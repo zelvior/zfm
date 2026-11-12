@@ -13,6 +13,10 @@ use std::thread;
 use zfm::directory::{self, Entry, Listing};
 use zfm::navigation::{Destination, History};
 
+#[path = "archive_ui.rs"]
+mod archive_ui;
+use archive_ui::{create_archive_manager, show_archive, ArchiveManager};
+
 type P = *mut c_void;
 type Idle = unsafe extern "C" fn(P) -> c_int;
 #[link(name = "dl")]
@@ -41,6 +45,8 @@ api! {
     gtk_main: unsafe extern "C" fn(), gtk_main_quit: unsafe extern "C" fn(),
     gtk_window_new: unsafe extern "C" fn(c_int) -> P,
     gtk_window_set_title: unsafe extern "C" fn(P, *const c_char),
+    gtk_window_get_focus: unsafe extern "C" fn(P) -> P,
+    gtk_widget_is_ancestor: unsafe extern "C" fn(P, P) -> c_int,
     gtk_window_set_modal: unsafe extern "C" fn(P, c_int),
     gtk_window_set_destroy_with_parent: unsafe extern "C" fn(P, c_int),
     gtk_dialog_new: unsafe extern "C" fn() -> P,
@@ -56,6 +62,11 @@ api! {
     gtk_progress_bar_set_fraction: unsafe extern "C" fn(P, f64),
     gtk_widget_hide: unsafe extern "C" fn(P),
     gtk_list_box_get_selected_row: unsafe extern "C" fn(P) -> P,
+    gtk_list_box_get_selected_rows: unsafe extern "C" fn(P) -> P,
+    gtk_list_box_set_selection_mode: unsafe extern "C" fn(P, c_int),
+    gtk_list_box_select_all: unsafe extern "C" fn(P),
+    gtk_list_box_unselect_all: unsafe extern "C" fn(P),
+    g_list_free: unsafe extern "C" fn(P),
     gtk_box_new: unsafe extern "C" fn(c_int, c_int) -> P,
     gtk_box_pack_start: unsafe extern "C" fn(P, P, c_int, c_int, c_uint),
     gtk_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
@@ -129,6 +140,7 @@ struct App {
     error: Option<String>,
     notice: Option<String>,
     converter: P,
+    archive_manager: P,
     window: P,
     operation: Option<Arc<AtomicBool>>,
     operation_id: u64,
@@ -368,6 +380,11 @@ unsafe extern "C" fn quit(_: P, data: P) {
     if let Some(cancel) = &app.operation {
         cancel.store(true, Ordering::Relaxed);
     }
+    if !app.archive_manager.is_null() {
+        (*(app.archive_manager as *mut ArchiveManager))
+            .cancel
+            .store(true, Ordering::Relaxed);
+    }
     if !app.converter.is_null() {
         (*(app.converter as *mut Converter))
             .cancel
@@ -419,11 +436,18 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0xff52, 8) => up(ptr::null_mut(), p),
         (0x6c, 4) | (0x4c, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).address),
         (0x66, 4) | (0x46, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).search_entry),
-        (0xffbf, 0) => rename(ptr::null_mut(), p), // F2
-        (0xffff, 1) => delete_permanently(ptr::null_mut(), p), // Shift+Delete
+        (0xffbf, 0) if list_has_focus(p) => rename(ptr::null_mut(), p), // F2
+        (0xffff, 0) if list_has_focus(p) => move_to_trash(ptr::null_mut(), p),
+        (0xffff, 1) if list_has_focus(p) => delete_permanently(ptr::null_mut(), p), // Shift+Delete
         _ => return 0,
     }
     1
+}
+unsafe fn list_has_focus(data: P) -> bool {
+    let window = (*(data as *mut App)).window;
+    let list = (*(data as *mut App)).list;
+    let focus = (api().gtk_window_get_focus)(window);
+    !focus.is_null() && (focus == list || (api().gtk_widget_is_ancestor)(focus, list) != 0)
 }
 unsafe extern "C" fn row_activated(_: P, row: P, p: P) {
     let app = &mut *(p as *mut App);
@@ -487,11 +511,20 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
             .extension()
             .and_then(|s| s.to_str())
             .map_or(false, |s| s.eq_ignore_ascii_case("csv"));
+    let can_archive = can_duplicate
+        && entry
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map_or(false, |s| s.eq_ignore_ascii_case("tar"));
     let list = app.list;
     (api().gtk_list_box_select_row)(list, row);
     let menu = (api().gtk_menu_new)();
     if can_convert {
         menu_action(menu, "Convert CSV to JSON…", show_converter as P, data);
+    }
+    if can_archive {
+        menu_action(menu, "Open TAR archive…", show_archive as P, data);
     }
     menu_action(menu, "Rename…", rename as P, data);
     menu_action(menu, "Move to…", move_to as P, data);
@@ -499,6 +532,7 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
         menu_action(menu, "Copy to…", copy_to as P, data);
         menu_action(menu, "Duplicate file…", duplicate as P, data);
     }
+    menu_action(menu, "Move to trash", move_to_trash as P, data);
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
     (api().gtk_widget_show_all)(menu);
@@ -587,6 +621,7 @@ pub fn run() -> Result<(), String> {
             error: None,
             notice: None,
             converter: ptr::null_mut(),
+            archive_manager: ptr::null_mut(),
             window,
             operation: None,
             operation_id: 0,
@@ -615,6 +650,7 @@ pub fn run() -> Result<(), String> {
         button(operations, "Duplicate file…", duplicate as P, p);
         button(operations, "Copy to…", copy_to as P, p);
         button(operations, "Move to…", move_to as P, p);
+        button(operations, "Trash", move_to_trash as P, p);
         button(
             operations,
             "Delete permanently…",
@@ -627,6 +663,7 @@ pub fn run() -> Result<(), String> {
         button(top, "↑", up as P, p);
         button(top, "↻", refresh as P, p);
         button(top, "Converter", show_converter as P, p);
+        button(top, "Archives", show_archive as P, p);
         let entry = (api().gtk_entry_new)();
         (*app).address = entry;
         (api().gtk_box_pack_start)(top, entry, 1, 1, 0);
@@ -657,7 +694,9 @@ pub fn run() -> Result<(), String> {
             }
         }
         button(sidebar, "Converter", show_converter as P, p);
+        button(sidebar, "Archives", show_archive as P, p);
         (*app).converter = create_converter(window);
+        (*app).archive_manager = create_archive_manager(window);
         (api().gtk_widget_show_all)(window);
         navigate(&mut *app, Destination::Refresh);
         (api().gtk_main)();
@@ -1045,6 +1084,7 @@ enum Operation {
     Duplicate(PathBuf, String),
     CopyTo(PathBuf, PathBuf),
     MoveTo(PathBuf, PathBuf),
+    Trash(PathBuf),
     Delete(PathBuf),
 }
 struct OperationResult {
@@ -1115,6 +1155,9 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
                 .map(|p| format!("Moved to {}", p.display())),
+            Operation::Trash(path) => {
+                zfm::trash::trash(&path).map(|_| format!("Moved {} to trash", path.display()))
+            }
             Operation::Delete(path) => {
                 operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
             }
@@ -1264,6 +1307,17 @@ unsafe extern "C" fn move_to(_: P, data: P) {
     if let Some(destination) = choose_folder(parent) {
         start_operation(data, source_dir, Operation::MoveTo(path, destination));
     }
+}
+unsafe extern "C" fn move_to_trash(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    start_operation(data, dir, Operation::Trash(path));
 }
 unsafe extern "C" fn delete_permanently(_: P, data: P) {
     let path = match selected_path(data) {

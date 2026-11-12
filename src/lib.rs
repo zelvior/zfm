@@ -5,3 +5,10 @@ pub mod navigation;
 pub mod converter;
 
 pub mod operations;
+
+pub mod archive;
+
+pub mod trash;
+
+#[cfg(target_os = "linux")]
+pub mod linux_flags;

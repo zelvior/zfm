@@ -153,13 +153,19 @@ pub fn copy_file<F: FnMut(u64)>(
     let destination = parent.join(new_name);
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         use std::os::unix::fs::OpenOptionsExt;
         // Avoid blocking on FIFOs and do not follow a final-component symlink.
-        options.custom_flags(0x800 | 0x20000); // O_NONBLOCK | O_NOFOLLOW
+        options.custom_flags(0x800 | crate::linux_flags::O_NOFOLLOW);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     return Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Safe copy is not supported on this platform",
