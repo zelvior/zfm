@@ -11,11 +11,14 @@ use std::sync::{
 };
 use std::thread;
 use zfm::directory::{self, Entry, Listing};
-use zfm::navigation::{Destination, History};
+use zfm::navigation::{Destination, Tabs};
 
 #[path = "archive_ui.rs"]
 mod archive_ui;
-use archive_ui::{create_archive_manager, show_archive, ArchiveManager};
+use archive_ui::{create_archive_manager, show_archive, supports_archive, ArchiveManager};
+#[path = "file_clipboard_ui.rs"]
+mod file_clipboard_ui;
+use file_clipboard_ui::{copy_to_clipboard, cut_to_clipboard, paste_from_clipboard};
 
 type P = *mut c_void;
 type Idle = unsafe extern "C" fn(P) -> c_int;
@@ -73,6 +76,10 @@ api! {
     gtk_check_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
+    gtk_combo_box_text_new: unsafe extern "C" fn() -> P,
+    gtk_combo_box_text_append_text: unsafe extern "C" fn(P, *const c_char),
+    gtk_combo_box_set_active: unsafe extern "C" fn(P, c_int),
+    gtk_combo_box_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_set_text: unsafe extern "C" fn(P, *const c_char),
     gtk_entry_set_placeholder_text: unsafe extern "C" fn(P, *const c_char),
     gtk_entry_get_text: unsafe extern "C" fn(P) -> *const c_char,
@@ -90,6 +97,14 @@ api! {
     gtk_menu_popup_at_pointer: unsafe extern "C" fn(P, P),
     gtk_widget_add_events: unsafe extern "C" fn(P, c_int),
     gdk_event_get_button: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
+    gdk_atom_intern: unsafe extern "C" fn(*const c_char, c_int) -> P,
+    gtk_clipboard_get: unsafe extern "C" fn(P) -> P,
+    gtk_clipboard_set_with_data: unsafe extern "C" fn(P, P, c_uint, P, P, P) -> c_int,
+    gtk_clipboard_request_contents: unsafe extern "C" fn(P, P, P, P),
+    gtk_selection_data_get_data: unsafe extern "C" fn(P) -> *const u8,
+    gtk_selection_data_get_length: unsafe extern "C" fn(P) -> c_int,
+    gtk_selection_data_get_target: unsafe extern "C" fn(P) -> P,
+    gtk_selection_data_set: unsafe extern "C" fn(P, P, c_int, *const u8, c_int),
     gtk_list_box_set_activate_on_single_click: unsafe extern "C" fn(P, c_int),
     gtk_list_box_insert: unsafe extern "C" fn(P, P, c_int),
     gtk_list_box_row_get_index: unsafe extern "C" fn(P) -> c_int,
@@ -98,6 +113,8 @@ api! {
     gtk_widget_destroy: unsafe extern "C" fn(P),
     gtk_widget_show_all: unsafe extern "C" fn(P),
     gtk_widget_grab_focus: unsafe extern "C" fn(P),
+    gtk_widget_set_sensitive: unsafe extern "C" fn(P, c_int),
+    gtk_widget_set_tooltip_text: unsafe extern "C" fn(P, *const c_char),
     gdk_event_get_keyval: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
     gdk_event_get_state: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
     gtk_widget_set_size_request: unsafe extern "C" fn(P, c_int, c_int),
@@ -128,7 +145,8 @@ fn c(s: &str) -> CString {
 }
 
 struct App {
-    history: History,
+    tabs: Tabs,
+    tab_strip: P,
     generation: Arc<AtomicU64>,
     address: P,
     list: P,
@@ -200,7 +218,7 @@ unsafe extern "C" fn destroy_child(widget: P, _: P) {
 }
 
 unsafe fn navigate(app: &mut App, destination: Destination) {
-    let path = match app.history.resolve(&destination) {
+    let path = match app.tabs.current().resolve(&destination) {
         Some(p) => p,
         None => return,
     };
@@ -239,11 +257,12 @@ unsafe extern "C" fn receive(data: P) -> c_int {
     }
     match msg.result {
         Ok(Some(listing)) => {
-            app.history.commit(msg.destination);
+            app.tabs.current_mut().commit(msg.destination);
+            rebuild_tabs(app);
             app.error = None;
             (api().gtk_entry_set_text)(
                 app.address,
-                c(&app.history.current().to_string_lossy()).as_ptr(),
+                c(&app.tabs.current().current().to_string_lossy()).as_ptr(),
             );
             (api().gtk_container_foreach)(app.list, destroy_child, ptr::null_mut());
             app.entries = listing.entries;
@@ -259,7 +278,7 @@ unsafe extern "C" fn receive(data: P) -> c_int {
         Err(e) => {
             (api().gtk_entry_set_text)(
                 app.address,
-                c(&app.history.current().to_string_lossy()).as_ptr(),
+                c(&app.tabs.current().current().to_string_lossy()).as_ptr(),
             );
             app.error = Some(format!("Could not open folder: {e}"));
             set_status(app, app.error.as_ref().unwrap());
@@ -361,7 +380,7 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
             &format!(
                 "{} items  ·  {}{}{}",
                 app.entries.len(),
-                app.history.current().display(),
+                app.tabs.current().current().display(),
                 skipped,
                 notice
             ),
@@ -403,7 +422,13 @@ unsafe extern "C" fn refresh(_: P, p: P) {
 }
 unsafe extern "C" fn up(_: P, p: P) {
     let app = &mut *(p as *mut App);
-    if let Some(parent) = app.history.current().parent().map(|p| p.to_path_buf()) {
+    if let Some(parent) = app
+        .tabs
+        .current()
+        .current()
+        .parent()
+        .map(|p| p.to_path_buf())
+    {
         navigate(app, Destination::Visit(parent));
     }
 }
@@ -416,7 +441,7 @@ unsafe extern "C" fn address(entry: P, p: P) {
     let path = if path.is_absolute() {
         path
     } else {
-        app.history.current().join(path)
+        app.tabs.current().current().join(path)
     };
     navigate(app, Destination::Visit(path));
 }
@@ -436,6 +461,11 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0xff52, 8) => up(ptr::null_mut(), p),
         (0x6c, 4) | (0x4c, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).address),
         (0x66, 4) | (0x46, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).search_entry),
+        (0x63, 4) | (0x43, 4) if list_has_focus(p) => copy_to_clipboard(ptr::null_mut(), p),
+        (0x78, 4) | (0x58, 4) if list_has_focus(p) => cut_to_clipboard(ptr::null_mut(), p),
+        (0x76, 4) | (0x56, 4) if list_has_focus(p) => paste_from_clipboard(ptr::null_mut(), p),
+        (0x74, 4) | (0x54, 4) => new_tab(ptr::null_mut(), p),
+        (0x77, 4) | (0x57, 4) => close_tab(ptr::null_mut(), p),
         (0xffbf, 0) if list_has_focus(p) => rename(ptr::null_mut(), p), // F2
         (0xffff, 0) if list_has_focus(p) => move_to_trash(ptr::null_mut(), p),
         (0xffff, 1) if list_has_focus(p) => delete_permanently(ptr::null_mut(), p), // Shift+Delete
@@ -504,28 +534,48 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
         Some(entry) => entry,
         None => return 0,
     };
+    let is_directory = entry.is_dir;
     let can_duplicate = entry.is_file;
+    let extension = entry
+        .path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let can_convert = can_duplicate
-        && entry
-            .path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map_or(false, |s| s.eq_ignore_ascii_case("csv"));
-    let can_archive = can_duplicate
-        && entry
-            .path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map_or(false, |s| s.eq_ignore_ascii_case("tar"));
+        && (extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("json"));
+    let is_json = extension.eq_ignore_ascii_case("json");
+    let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
     (api().gtk_list_box_select_row)(list, row);
     let menu = (api().gtk_menu_new)();
+    if is_directory {
+        menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
+    }
     if can_convert {
-        menu_action(menu, "Convert CSV to JSON…", show_converter as P, data);
+        menu_action(
+            menu,
+            if is_json {
+                "Convert JSON to CSV…"
+            } else {
+                "Convert CSV to JSON…"
+            },
+            show_converter as P,
+            data,
+        );
     }
     if can_archive {
-        menu_action(menu, "Open TAR archive…", show_archive as P, data);
+        menu_action(menu, "Open archive…", show_archive as P, data);
     }
+    if can_duplicate {
+        menu_action(menu, "Copy", copy_to_clipboard as P, data);
+    }
+    menu_action(menu, "Cut", cut_to_clipboard as P, data);
+    menu_action(
+        menu,
+        "Paste into current folder",
+        paste_from_clipboard as P,
+        data,
+    );
     menu_action(menu, "Rename…", rename as P, data);
     menu_action(menu, "Move to…", move_to as P, data);
     if can_duplicate {
@@ -576,6 +626,10 @@ pub fn run() -> Result<(), String> {
         (api().gtk_container_add)(window, outer);
         let top = (api().gtk_box_new)(0, 4);
         (api().gtk_box_pack_start)(outer, top, 0, 0, 6);
+        let tabs_row = (api().gtk_box_new)(0, 4);
+        (api().gtk_box_pack_start)(outer, tabs_row, 0, 0, 2);
+        let tab_strip = (api().gtk_box_new)(0, 2);
+        (api().gtk_box_pack_start)(tabs_row, tab_strip, 1, 1, 0);
         let search = (api().gtk_box_new)(0, 4);
         (api().gtk_box_pack_start)(outer, search, 0, 0, 4);
         let operations = (api().gtk_box_new)(0, 4);
@@ -609,7 +663,8 @@ pub fn run() -> Result<(), String> {
                 .join(initial)
         };
         let app = Box::into_raw(Box::new(App {
-            history: History::new(initial),
+            tabs: Tabs::new(initial),
+            tab_strip: ptr::null_mut(),
             generation: Arc::new(AtomicU64::new(0)),
             address: ptr::null_mut(),
             list,
@@ -631,6 +686,10 @@ pub fn run() -> Result<(), String> {
             search_case: false,
         }));
         let p = app as P;
+        (*app).tab_strip = tab_strip;
+        button(tabs_row, "+ Tab", new_tab as P, p);
+        button(tabs_row, "Close tab", close_tab as P, p);
+        rebuild_tabs(&*app);
         let search_entry = (api().gtk_entry_new)();
         (*app).search_entry = search_entry;
         (api().gtk_entry_set_placeholder_text)(
@@ -644,6 +703,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_box_pack_start)(search, case_toggle, 0, 0, 0);
         button(search, "Search", search_apply as P, p);
         button(search, "Clear", search_clear as P, p);
+        button(search, "Paste", paste_from_clipboard as P, p);
         button(operations, "New file", new_file as P, p);
         button(operations, "New folder", new_folder as P, p);
         button(operations, "Rename…", rename as P, p);
@@ -709,6 +769,7 @@ pub fn run() -> Result<(), String> {
 // communicate with it only through GLib's main-loop idle queue.
 struct Converter {
     window: P,
+    mode: P,
     input: P,
     output: P,
     status: P,
@@ -790,6 +851,7 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
     }
     let input = PathBuf::from(input);
     let output = PathBuf::from(output);
+    let json_to_csv = (api().gtk_combo_box_get_active)(converter.mode) == 1;
     converter.running = true;
     converter.job += 1;
     converter.last_output = None;
@@ -802,7 +864,7 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
     thread::spawn(move || {
         let total = std::fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
         let pending = Arc::new(AtomicBool::new(false));
-        let result = zfm::converter::csv_to_json(&input, &output, &cancel, |bytes| {
+        let mut report = |bytes| {
             if pending.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -818,7 +880,12 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
             unsafe {
                 (api().g_idle_add)(converter_update, Box::into_raw(msg) as P);
             }
-        })
+        };
+        let result = if json_to_csv {
+            zfm::json_csv::json_to_csv(&input, &output, &cancel, &mut report)
+        } else {
+            zfm::converter::csv_to_json(&input, &output, &cancel, &mut report)
+        }
         .map_err(|e| e.to_string());
         let msg = Box::new(ConvertUpdate {
             converter: ptr,
@@ -857,9 +924,9 @@ unsafe fn converter_browse(data: P, save: bool) {
     let window = (*(data as *mut Converter)).window;
     let dialog = (api().gtk_file_chooser_native_new)(
         c(if save {
-            "Save JSON as"
+            "Save output as"
         } else {
-            "Choose CSV file"
+            "Choose input file"
         })
         .as_ptr(),
         window,
@@ -915,21 +982,30 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
         let i = (api().gtk_list_box_row_get_index)(row);
         if i >= 0 {
             if let Some(entry) = app.entries.get(i as usize) {
-                if !entry.is_dir
-                    && entry
+                if entry.is_file {
+                    let extension = entry
                         .path
                         .extension()
                         .and_then(|s| s.to_str())
-                        .map_or(false, |s| s.eq_ignore_ascii_case("csv"))
-                {
-                    (api().gtk_entry_set_text)(
-                        converter.input,
-                        c(&entry.path.to_string_lossy()).as_ptr(),
-                    );
-                    (api().gtk_entry_set_text)(
-                        converter.output,
-                        c(&entry.path.with_extension("json").to_string_lossy()).as_ptr(),
-                    );
+                        .unwrap_or("");
+                    if extension.eq_ignore_ascii_case("csv")
+                        || extension.eq_ignore_ascii_case("json")
+                    {
+                        let json = extension.eq_ignore_ascii_case("json");
+                        (api().gtk_combo_box_set_active)(converter.mode, if json { 1 } else { 0 });
+                        (api().gtk_entry_set_text)(
+                            converter.input,
+                            c(&entry.path.to_string_lossy()).as_ptr(),
+                        );
+                        (api().gtk_entry_set_text)(
+                            converter.output,
+                            c(&entry
+                                .path
+                                .with_extension(if json { "csv" } else { "json" })
+                                .to_string_lossy())
+                            .as_ptr(),
+                        );
+                    }
                 }
             }
         }
@@ -938,7 +1014,7 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
 }
 unsafe fn create_converter(parent: P) -> P {
     let window = (api().gtk_window_new)(0);
-    (api().gtk_window_set_title)(window, c("ZFM — CSV to JSON").as_ptr());
+    (api().gtk_window_set_title)(window, c("ZFM — File converter").as_ptr());
     (api().gtk_window_set_transient_for)(window, parent);
     (api().gtk_window_set_default_size)(window, 600, 240);
     let layout = (api().gtk_box_new)(1, 8);
@@ -947,9 +1023,14 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let caption = label("Offline converter · CSV → JSON (UTF-8, first row is headers)");
+    let caption = label("Offline CSV / JSON converter · UTF-8 · string values only");
     (api().gtk_label_set_xalign)(caption, 0.0);
     (api().gtk_box_pack_start)(layout, caption, 0, 0, 0);
+    let mode = (api().gtk_combo_box_text_new)();
+    (api().gtk_combo_box_text_append_text)(mode, c("CSV → JSON").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("JSON → CSV (string-valued objects)").as_ptr());
+    (api().gtk_combo_box_set_active)(mode, 0);
+    (api().gtk_box_pack_start)(layout, mode, 0, 0, 0);
     let input_row = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, input_row, 0, 0, 0);
     (api().gtk_box_pack_start)(input_row, label("Input"), 0, 0, 0);
@@ -969,6 +1050,7 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_box_pack_start)(layout, actions, 0, 0, 0);
     let converter = Box::into_raw(Box::new(Converter {
         window,
+        mode,
         input,
         output,
         status,
@@ -1103,7 +1185,7 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
     app.operation = None;
     match message.result {
         Ok(result) => {
-            if app.history.current() == message.directory
+            if app.tabs.current().current() == message.directory
                 && app.generation.load(Ordering::Relaxed) == message.generation
             {
                 app.notice = Some(result);
@@ -1199,14 +1281,14 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
 }
 unsafe extern "C" fn new_file(_: P, data: P) {
     let parent = (*(data as *mut App)).window;
-    let dir = (*(data as *mut App)).history.current().to_path_buf();
+    let dir = (*(data as *mut App)).tabs.current().current().to_path_buf();
     if let Some(name) = prompt(parent, "New file", "Enter a file name:", Some("")) {
         start_operation(data, dir.clone(), Operation::CreateFile(dir, name));
     }
 }
 unsafe extern "C" fn new_folder(_: P, data: P) {
     let parent = (*(data as *mut App)).window;
-    let dir = (*(data as *mut App)).history.current().to_path_buf();
+    let dir = (*(data as *mut App)).tabs.current().current().to_path_buf();
     if let Some(name) = prompt(parent, "New folder", "Enter a folder name:", Some("")) {
         start_operation(data, dir.clone(), Operation::CreateDirectory(dir, name));
     }
@@ -1342,4 +1424,88 @@ unsafe extern "C" fn delete_permanently(_: P, data: P) {
     {
         start_operation(data, dir, Operation::Delete(path));
     }
+}
+
+struct TabButtonData {
+    app: usize,
+    index: usize,
+}
+unsafe extern "C" fn free_tab_data(data: P, _: P) {
+    drop(Box::from_raw(data as *mut TabButtonData));
+}
+unsafe extern "C" fn tab_clicked(_: P, data: P) {
+    let data = &*(data as *const TabButtonData);
+    let app_ptr = data.app as P;
+    let index = data.index;
+    if (*(app_ptr as *mut App)).tabs.select(index) {
+        activate_tab(app_ptr);
+    }
+}
+unsafe fn rebuild_tabs(app: &App) {
+    let data = app as *const App as usize;
+    let strip = app.tab_strip;
+    if strip.is_null() {
+        return;
+    }
+    (api().gtk_container_foreach)(strip, destroy_child, ptr::null_mut());
+    for index in 0..app.tabs.len() {
+        let path = app.tabs.history(index).unwrap().current();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| path.display().to_string());
+        let widget = (api().gtk_button_new_with_label)(c(&name).as_ptr());
+        (api().gtk_widget_set_tooltip_text)(widget, c(&path.to_string_lossy()).as_ptr());
+        (api().gtk_widget_set_sensitive)(widget, (index != app.tabs.active()) as c_int);
+        let callback_data = Box::into_raw(Box::new(TabButtonData { app: data, index })) as P;
+        (api().g_signal_connect_data)(
+            widget,
+            c("clicked").as_ptr(),
+            tab_clicked as P,
+            callback_data,
+            free_tab_data as P,
+            0,
+        );
+        (api().gtk_box_pack_start)(strip, widget, 0, 0, 0);
+        (api().gtk_widget_show_all)(widget);
+    }
+}
+unsafe fn activate_tab(data: P) {
+    let app = &mut *(data as *mut App);
+    // Cancel any work rendering the old tab before discarding its visible rows.
+    app.generation.fetch_add(1, Ordering::Relaxed);
+    (api().gtk_container_foreach)(app.list, destroy_child, ptr::null_mut());
+    app.entries.clear();
+    app.render_index = 0;
+    app.error = None;
+    app.notice = None;
+    (api().gtk_entry_set_text)(
+        app.address,
+        c(&app.tabs.current().current().to_string_lossy()).as_ptr(),
+    );
+    rebuild_tabs(app);
+    navigate(app, Destination::Refresh);
+}
+unsafe extern "C" fn new_tab(_: P, data: P) {
+    let app = &mut *(data as *mut App);
+    let path = app.tabs.current().current().to_path_buf();
+    app.tabs.add(path);
+    activate_tab(data);
+}
+unsafe extern "C" fn close_tab(_: P, data: P) {
+    if (*(data as *mut App)).tabs.close() {
+        activate_tab(data);
+    } else {
+        set_status(&*(data as *mut App), "The last tab cannot be closed.");
+    }
+}
+unsafe extern "C" fn open_folder_tab(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(path) => path,
+        None => return,
+    };
+    let app = &mut *(data as *mut App);
+    app.tabs.add(path);
+    activate_tab(data);
 }

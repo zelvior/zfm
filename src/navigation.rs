@@ -64,3 +64,78 @@ mod tests {
         assert_eq!(h.resolve(&Destination::Forward), None);
     }
 }
+
+/// Each tab owns independent navigation history; at least one tab is retained.
+#[derive(Debug)]
+pub struct Tabs {
+    histories: Vec<History>,
+    active: usize,
+}
+impl Tabs {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            histories: vec![History::new(path)],
+            active: 0,
+        }
+    }
+    pub fn current(&self) -> &History {
+        &self.histories[self.active]
+    }
+    pub fn current_mut(&mut self) -> &mut History {
+        &mut self.histories[self.active]
+    }
+    pub fn active(&self) -> usize {
+        self.active
+    }
+    pub fn len(&self) -> usize {
+        self.histories.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.histories.is_empty()
+    }
+    pub fn history(&self, index: usize) -> Option<&History> {
+        self.histories.get(index)
+    }
+    pub fn add(&mut self, path: PathBuf) {
+        self.histories.push(History::new(path));
+        self.active = self.histories.len() - 1;
+    }
+    pub fn select(&mut self, index: usize) -> bool {
+        if index >= self.histories.len() || index == self.active {
+            false
+        } else {
+            self.active = index;
+            true
+        }
+    }
+    pub fn close(&mut self) -> bool {
+        if self.histories.len() == 1 {
+            return false;
+        }
+        self.histories.remove(self.active);
+        if self.active >= self.histories.len() {
+            self.active = self.histories.len() - 1;
+        }
+        true
+    }
+}
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+    #[test]
+    fn tabs_keep_independent_history_and_at_least_one_tab() {
+        let mut tabs = Tabs::new("/a".into());
+        tabs.current_mut().commit(Destination::Visit("/b".into()));
+        tabs.add("/c".into());
+        tabs.current_mut().commit(Destination::Visit("/d".into()));
+        assert!(tabs.select(0));
+        assert_eq!(tabs.current().current(), Path::new("/b"));
+        tabs.current_mut().commit(Destination::Back);
+        assert!(tabs.select(1));
+        assert_eq!(tabs.current().current(), Path::new("/d"));
+        assert!(tabs.close());
+        assert_eq!(tabs.current().current(), Path::new("/a"));
+        assert!(!tabs.close());
+        assert!(!tabs.select(3));
+    }
+}

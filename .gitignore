@@ -2,3 +2,5 @@
 *.swp
 
 /zfm-linux-*.tar.gz
+
+/artifacts/

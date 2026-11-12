@@ -1,4 +1,4 @@
-//! Offline CSV-to-JSON conversion. Values are strings; no type inference is done.
+//! Offline, streaming CSV/JSON conversion with string values and no type inference.
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -15,30 +15,14 @@ fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "Conversion cancelled")
 }
 
-struct TempFile(PathBuf);
+pub(crate) struct TempFile(pub(crate) PathBuf);
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
 }
 
-/// Convert UTF-8 CSV to a JSON array of objects, with the first row as keys.
-/// Never replaces an existing destination. The output is staged in the target
-/// directory and published with a no-replace hard link after successful flush.
-/// `progress` receives input bytes processed (not a percentage).
-pub fn csv_to_json<F: FnMut(u64)>(
-    input: &Path,
-    output: &Path,
-    cancel: &AtomicBool,
-    mut progress: F,
-) -> io::Result<u64> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err(cancelled());
-    }
-    let source = File::open(input)?;
-    if !source.metadata()?.is_file() {
-        return Err(invalid("Input must be a regular file"));
-    }
+pub(crate) fn staged_output(output: &Path) -> io::Result<(TempFile, File)> {
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -46,7 +30,7 @@ pub fn csv_to_json<F: FnMut(u64)>(
     if output.file_name().is_none() {
         return Err(invalid("Choose an output file"));
     }
-    let (temp, file) = (0..100)
+    (0..100)
         .find_map(|_| {
             let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!(".zfm-{}-{id}.tmp", std::process::id()));
@@ -68,7 +52,27 @@ pub fn csv_to_json<F: FnMut(u64)>(
                 io::ErrorKind::AlreadyExists,
                 "Could not allocate temporary file",
             ))
-        })?;
+        })
+}
+
+/// Convert UTF-8 CSV to a JSON array of objects, with the first row as keys.
+/// Never replaces an existing destination. The output is staged in the target
+/// directory and published with a no-replace hard link after successful flush.
+/// `progress` receives input bytes processed (not a percentage).
+pub fn csv_to_json<F: FnMut(u64)>(
+    input: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> io::Result<u64> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    let source = File::open(input)?;
+    if !source.metadata()?.is_file() {
+        return Err(invalid("Input must be a regular file"));
+    }
+    let (temp, file) = staged_output(output)?;
     let mut writer = BufWriter::new(file);
     let mut reader = CsvReader::new(BufReader::new(source));
     let mut header = reader

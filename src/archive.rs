@@ -7,9 +7,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BLOCK: u64 = 512;
-const MAX_ENTRIES: usize = 10_000;
-const MAX_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_FILE: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_ENTRIES: usize = 10_000;
+pub(crate) const MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_FILE: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -58,7 +58,7 @@ fn header_text(bytes: &[u8]) -> io::Result<&str> {
 }
 /// Normalize harmless './' and reject absolute, drive-like, backslash and '..'
 /// paths, even on Linux. Empty root-directory records are handled separately.
-fn safe_name(name: &str) -> io::Result<String> {
+pub(crate) fn safe_name(name: &str) -> io::Result<String> {
     if name.starts_with('/')
         || name.contains('\\')
         || name.contains(':')
@@ -293,7 +293,7 @@ pub fn extract<F: FnMut(u64)>(
     target_os = "linux",
     any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
 ))]
-mod linux {
+pub(crate) mod linux {
     use super::*;
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};

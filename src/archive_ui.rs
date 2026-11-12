@@ -47,6 +47,33 @@ fn open_archive(_: &std::path::Path) -> std::io::Result<std::fs::File> {
     ))
 }
 
+#[derive(Clone, Copy)]
+enum SourceFormat {
+    Tar,
+    Packed(zfm::packed_archive::Format),
+}
+#[derive(Clone)]
+struct ArchiveItem {
+    path: String,
+    size: u64,
+    kind: zfm::archive::Kind,
+}
+fn source_format(path: &std::path::Path) -> Option<SourceFormat> {
+    if let Some(format) = zfm::packed_archive::format_for_path(path) {
+        Some(SourceFormat::Packed(format))
+    } else if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map_or(false, |s| s.eq_ignore_ascii_case("tar"))
+    {
+        Some(SourceFormat::Tar)
+    } else {
+        None
+    }
+}
+pub(super) fn supports_archive(path: &std::path::Path) -> bool {
+    source_format(path).is_some()
+}
 pub(super) struct ArchiveManager {
     window: P,
     input: P,
@@ -54,7 +81,8 @@ pub(super) struct ArchiveManager {
     list: P,
     status: P,
     progress: P,
-    entries: Vec<zfm::archive::Entry>,
+    entries: Vec<ArchiveItem>,
+    format: Option<SourceFormat>,
     render_index: usize,
     path: Option<PathBuf>,
     fingerprint: Option<ArchiveFingerprint>,
@@ -63,10 +91,11 @@ pub(super) struct ArchiveManager {
     pub(super) cancel: Arc<AtomicBool>,
 }
 enum ArchiveEvent {
-    Loaded(Result<(Vec<zfm::archive::Entry>, PathBuf, ArchiveFingerprint), String>),
+    Loaded(Result<(Vec<ArchiveItem>, PathBuf, ArchiveFingerprint, SourceFormat), String>),
     Progress(u64, u64, Arc<AtomicBool>),
     Extracted(Result<usize, String>),
     Created(Result<PathBuf, String>),
+    Tested(Result<(usize, bool), String>),
 }
 struct ArchiveMessage {
     manager: usize,
@@ -90,10 +119,11 @@ unsafe extern "C" fn archive_update(data: P) -> c_int {
         return 0;
     }
     match msg.event {
-        ArchiveEvent::Loaded(Ok((entries, path, fingerprint))) => {
+        ArchiveEvent::Loaded(Ok((entries, path, fingerprint, format))) => {
             manager.entries = entries;
             manager.path = Some(path);
             manager.fingerprint = Some(fingerprint);
+            manager.format = Some(format);
             manager.render_index = 0;
             let render = Box::new(ArchiveRender {
                 manager: msg.manager,
@@ -115,6 +145,26 @@ unsafe extern "C" fn archive_update(data: P) -> c_int {
             archive_status(manager, &format!("Processed {bytes} bytes…"));
         }
         ArchiveEvent::Progress(..) => (),
+        ArchiveEvent::Tested(result) => {
+            manager.busy = false;
+            match result {
+                Ok((count, true)) => {
+                    (api().gtk_progress_bar_set_fraction)(manager.progress, 1.0);
+                    archive_status(
+                        manager,
+                        &format!("Checked {count} TAR headers. TAR has no content checksum."),
+                    );
+                }
+                Ok((count, false)) => {
+                    (api().gtk_progress_bar_set_fraction)(manager.progress, 1.0);
+                    archive_status(
+                        manager,
+                        &format!("Tested {count} entries. Available format checks passed."),
+                    );
+                }
+                Err(error) => archive_status(manager, &format!("Archive test failed: {error}")),
+            }
+        }
         ArchiveEvent::Created(result) => {
             manager.busy = false;
             match result {
@@ -185,7 +235,7 @@ unsafe extern "C" fn archive_render(data: P) -> c_int {
         archive_status(
             manager,
             &format!(
-                "{} entries. Header checksums verified; TAR has no content checksum.",
+                "{} entries loaded. Use Test to read data and check available checksums.",
                 manager.entries.len()
             ),
         );
@@ -203,15 +253,26 @@ unsafe extern "C" fn archive_load(_: P, data: P) {
         .to_string_lossy()
         .into_owned();
     if path.is_empty() {
-        archive_status(manager, "Choose a TAR archive.");
+        archive_status(manager, "Choose a TAR, ZIP or compressed TAR archive.");
         return;
     }
     let path = PathBuf::from(path);
+    let format = match source_format(&path) {
+        Some(format) => format,
+        None => {
+            archive_status(
+                manager,
+                "Supported: .tar, .zip, .tar.gz, .tgz, .tar.bz2, .tar.xz",
+            );
+            return;
+        }
+    };
     manager.busy = true;
     manager.job += 1;
     manager.cancel = Arc::new(AtomicBool::new(false));
     manager.path = None;
     manager.fingerprint = None;
+    manager.format = None;
     manager.entries.clear();
     (api().gtk_container_foreach)(manager.list, destroy_child, ptr::null_mut());
     (api().gtk_progress_bar_set_fraction)(manager.progress, 0.0);
@@ -223,14 +284,33 @@ unsafe extern "C" fn archive_load(_: P, data: P) {
         let result = (|| -> std::io::Result<_> {
             let mut file = open_archive(&path)?;
             let before = archive_fingerprint(&file)?;
-            let entries = zfm::archive::inspect(&mut file, &cancel)?;
+            let entries: Vec<ArchiveItem> = match format {
+                SourceFormat::Tar => zfm::archive::inspect(&mut file, &cancel)?
+                    .into_iter()
+                    .map(|e| ArchiveItem {
+                        path: e.path,
+                        size: e.size,
+                        kind: e.kind,
+                    })
+                    .collect(),
+                SourceFormat::Packed(format) => {
+                    zfm::packed_archive::inspect(&mut file, format, &cancel)?
+                        .into_iter()
+                        .map(|e| ArchiveItem {
+                            path: e.path,
+                            size: e.size,
+                            kind: e.kind,
+                        })
+                        .collect()
+                }
+            };
             if archive_fingerprint(&file)? != before {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "Archive changed while reading",
                 ));
             }
-            Ok((entries, path, before))
+            Ok((entries, path, before, format))
         })()
         .map_err(|e| e.to_string());
         let msg = Box::new(ArchiveMessage {
@@ -246,7 +326,7 @@ unsafe extern "C" fn archive_load(_: P, data: P) {
 unsafe extern "C" fn archive_browse(_: P, data: P) {
     let window = (*(data as *mut ArchiveManager)).window;
     let dialog = (api().gtk_file_chooser_native_new)(
-        c("Choose uncompressed TAR").as_ptr(),
+        c("Choose archive").as_ptr(),
         window,
         0,
         c("Open").as_ptr(),
@@ -333,21 +413,21 @@ unsafe extern "C" fn archive_create(_: P, data: P) {
         Some(path) => path,
         None => return,
     };
-    let output = match choose_archive_file(window, "Save uncompressed TAR as", true) {
+    let output = match choose_archive_file(window, "Save .tar or .zip archive as", true) {
         Some(path) => path,
         None => return,
     };
-    if !output
-        .extension()
-        .and_then(|e| e.to_str())
-        .map_or(false, |e| e.eq_ignore_ascii_case("tar"))
-    {
-        archive_status(
-            &*(data as *mut ArchiveManager),
-            "Choose a .tar output filename.",
-        );
-        return;
-    }
+    let zip = match output.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("tar") => false,
+        Some(ext) if ext.eq_ignore_ascii_case("zip") => true,
+        _ => {
+            archive_status(
+                &*(data as *mut ArchiveManager),
+                "Choose a .tar or .zip output filename.",
+            );
+            return;
+        }
+    };
     let manager = &mut *(data as *mut ArchiveManager);
     if manager.busy {
         archive_status(manager, "An archive operation is already running.");
@@ -357,14 +437,14 @@ unsafe extern "C" fn archive_create(_: P, data: P) {
     manager.job += 1;
     manager.cancel = Arc::new(AtomicBool::new(false));
     (api().gtk_progress_bar_set_fraction)(manager.progress, 0.0);
-    archive_status(manager, "Creating TAR…");
+    archive_status(manager, "Creating archive…");
     let job = manager.job;
     let ptr = data as usize;
     let cancel = manager.cancel.clone();
     thread::spawn(move || {
         let total = std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0);
         let pending = Arc::new(AtomicBool::new(false));
-        let result = zfm::archive::create_single_file(&source, &output, &cancel, |bytes| {
+        let mut report = |bytes| {
             if pending.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -376,13 +456,91 @@ unsafe extern "C" fn archive_create(_: P, data: P) {
             unsafe {
                 (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
             }
-        })
-        .map(|_| output)
-        .map_err(|e| e.to_string());
+        };
+        let result = if zip {
+            zfm::packed_archive::create_single_file(&source, &output, &cancel, &mut report)
+        } else {
+            zfm::archive::create_single_file(&source, &output, &cancel, &mut report)
+        };
+        let result = result.map(|_| output).map_err(|e| e.to_string());
         let msg = Box::new(ArchiveMessage {
             manager: ptr,
             job,
             event: ArchiveEvent::Created(result),
+        });
+        unsafe {
+            (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
+        }
+    });
+}
+unsafe extern "C" fn archive_test(_: P, data: P) {
+    let manager = &mut *(data as *mut ArchiveManager);
+    if manager.busy {
+        archive_status(manager, "An archive operation is already running.");
+        return;
+    }
+    let path_text = CStr::from_ptr((api().gtk_entry_get_text)(manager.input))
+        .to_string_lossy()
+        .into_owned();
+    let path = match &manager.path {
+        Some(path) if *path == PathBuf::from(path_text) => path.clone(),
+        _ => {
+            archive_status(manager, "Load the current archive first.");
+            return;
+        }
+    };
+    let fingerprint = match &manager.fingerprint {
+        Some(value) => value.clone(),
+        None => return,
+    };
+    let format = match manager.format {
+        Some(value) => value,
+        None => return,
+    };
+    let total: u64 = manager.entries.iter().map(|entry| entry.size).sum();
+    manager.busy = true;
+    manager.job += 1;
+    manager.cancel = Arc::new(AtomicBool::new(false));
+    (api().gtk_progress_bar_set_fraction)(manager.progress, 0.0);
+    archive_status(manager, "Testing archive…");
+    let job = manager.job;
+    let ptr = data as usize;
+    let cancel = manager.cancel.clone();
+    thread::spawn(move || {
+        let result = (|| -> std::io::Result<(usize, bool)> {
+            let mut file = open_archive(&path)?;
+            if archive_fingerprint(&file)? != fingerprint {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Archive changed; load it again",
+                ));
+            }
+            match format {
+                SourceFormat::Tar => Ok((zfm::archive::inspect(&mut file, &cancel)?.len(), true)),
+                SourceFormat::Packed(format) => {
+                    let pending = Arc::new(AtomicBool::new(false));
+                    let count = zfm::packed_archive::verify(&mut file, format, &cancel, |bytes| {
+                        if pending.swap(true, Ordering::AcqRel) {
+                            return;
+                        }
+                        let msg = Box::new(ArchiveMessage {
+                            manager: ptr,
+                            job,
+                            event: ArchiveEvent::Progress(bytes, total, pending.clone()),
+                        });
+                        unsafe {
+                            (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
+                        }
+                    })?;
+                    Ok((count, false))
+                }
+            }
+        })()
+        .map_err(|e| e.to_string());
+        let msg = Box::new(ArchiveMessage {
+            manager: ptr,
+            job,
+            event: ArchiveEvent::Tested(result),
         });
         unsafe {
             (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
@@ -416,6 +574,10 @@ unsafe fn archive_extract(data: P, selected_only: bool) {
     };
     let fingerprint = match &manager.fingerprint {
         Some(v) => v.clone(),
+        None => return,
+    };
+    let format = match manager.format {
+        Some(value) => value,
         None => return,
     };
     if destination.is_empty() {
@@ -489,25 +651,36 @@ unsafe fn archive_extract(data: P, selected_only: bool) {
                 ));
             }
             let pending = Arc::new(AtomicBool::new(false));
-            zfm::archive::extract(
-                &mut file,
-                std::path::Path::new(&destination),
-                selected.as_deref(),
-                &cancel,
-                |bytes| {
-                    if pending.swap(true, Ordering::AcqRel) {
-                        return;
-                    }
-                    let msg = Box::new(ArchiveMessage {
-                        manager: ptr,
-                        job,
-                        event: ArchiveEvent::Progress(bytes, total, pending.clone()),
-                    });
-                    unsafe {
-                        (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
-                    }
-                },
-            )
+            let mut report = |bytes| {
+                if pending.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                let msg = Box::new(ArchiveMessage {
+                    manager: ptr,
+                    job,
+                    event: ArchiveEvent::Progress(bytes, total, pending.clone()),
+                });
+                unsafe {
+                    (api().g_idle_add)(archive_update, Box::into_raw(msg) as P);
+                }
+            };
+            match format {
+                SourceFormat::Tar => zfm::archive::extract(
+                    &mut file,
+                    std::path::Path::new(&destination),
+                    selected.as_deref(),
+                    &cancel,
+                    &mut report,
+                ),
+                SourceFormat::Packed(format) => zfm::packed_archive::extract(
+                    &mut file,
+                    format,
+                    std::path::Path::new(&destination),
+                    selected.as_deref(),
+                    &cancel,
+                    &mut report,
+                ),
+            }
         })()
         .map_err(|e| e.to_string());
         let msg = Box::new(ArchiveMessage {
@@ -556,13 +729,7 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
         let index = (api().gtk_list_box_row_get_index)(row);
         if index >= 0 {
             if let Some(entry) = app.entries.get(index as usize) {
-                if entry.is_file
-                    && entry
-                        .path
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map_or(false, |s| s.eq_ignore_ascii_case("tar"))
-                {
+                if entry.is_file && supports_archive(&entry.path) {
                     (api().gtk_entry_set_text)(
                         manager.input,
                         c(&entry.path.to_string_lossy()).as_ptr(),
@@ -587,7 +754,7 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
 }
 pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     let window = (api().gtk_window_new)(0);
-    (api().gtk_window_set_title)(window, c("ZFM — TAR archive manager").as_ptr());
+    (api().gtk_window_set_title)(window, c("ZFM — Archive manager").as_ptr());
     (api().gtk_window_set_transient_for)(window, parent);
     (api().gtk_window_set_default_size)(window, 700, 520);
     let layout = (api().gtk_box_new)(1, 6);
@@ -597,7 +764,7 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
     let title = label(
-        "Uncompressed TAR only · no overwrite · selecting a folder does not select its contents",
+        "TAR, ZIP and compressed TAR · no overwrite · selecting a folder does not select its contents",
     );
     (api().gtk_label_set_xalign)(title, 0.0);
     (api().gtk_box_pack_start)(layout, title, 0, 0, 0);
@@ -631,6 +798,7 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
         status,
         progress,
         entries: Vec::new(),
+        format: None,
         render_index: 0,
         path: None,
         fingerprint: None,
@@ -641,11 +809,12 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     button(input_row, "Browse…", archive_browse as P, manager);
     button(input_row, "Load", archive_load as P, manager);
     button(dest_row, "Browse…", archive_destination as P, manager);
+    button(actions, "Test archive", archive_test as P, manager);
     button(actions, "Select all", archive_select_all as P, manager);
     button(actions, "Deselect", archive_select_none as P, manager);
     button(
         actions,
-        "Create TAR from file…",
+        "Create TAR/ZIP from file…",
         archive_create as P,
         manager,
     );

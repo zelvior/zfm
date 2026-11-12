@@ -8,4 +8,8 @@ The application creates a worker for each requested directory read. A generation
 
 File operations are deliberately limited: no-overwrite rename/move require Linux `renameat2` support, copying/duplicating is restricted to regular files, and deletion requires confirmation and handles only individual files, symlinks, or empty directories. Copy stages in the target directory, so a destination writable by an untrusted user is not safe against concurrent tampering. See the README for the full limitations. GUI actions have not been interactively tested.
 
-Trash delegates to GIO and reports failures; it never falls back to permanent deletion. Built-in archive extraction is limited to uncompressed TAR on Linux x86/x86_64/aarch64. It rejects links and unsafe paths, uses no-follow directory-relative file operations, and applies resource limits. See the README for the exact supported TAR subset, partial-output semantics, and untrusted-directory restrictions.
+Trash delegates to GIO and reports failures; it never falls back to permanent deletion. Archive extraction supports uncompressed TAR and, with the system libarchive runtime, ZIP and gzip/bzip2/xz-compressed TAR on Linux x86/x86_64/aarch64. It rejects links and unsafe paths, uses no-follow directory-relative file operations, and applies resource limits. See the README for the exact supported TAR subset, partial-output semantics, and untrusted-directory restrictions.
+
+ZIP creation and compressed archive operations dynamically load `libarchive.so.13`; missing libraries or unsupported codecs produce an error. Linux tabs, clipboard, converters and archive GTK controls have not been exercised interactively here.
+
+For automated rustup installation and native/cross-builds, use `./scripts/build-linux.sh`; see the README for options, dependencies, output locations and compatibility limits. System package installation is opt-in.
