@@ -14,8 +14,12 @@ public static class ZfmSmoke {
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
 }
 '@
-$process = Start-Process -FilePath (Resolve-Path -LiteralPath $Executable).Path -PassThru
+$work = Join-Path ([IO.Path]::GetTempPath()) ('zfm-gui-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $work | Out-Null
+$process = $null
 try {
+    Set-Content -LiteralPath (Join-Path $work 'example.txt') -Value 'GUI smoke fixture'
+    $process = Start-Process -FilePath (Resolve-Path -LiteralPath $Executable).Path -ArgumentList ('"' + $work + '"') -PassThru
     $window = [IntPtr]::Zero
     for ($i = 0; $i -lt 100; $i++) {
         $process.Refresh()
@@ -33,6 +37,20 @@ try {
             throw "ZFM window does not contain a $class control."
         }
     }
+    # Verify that asynchronous directory enumeration actually populates the list.
+    $list = [ZfmSmoke]::FindWindowExW($window, [IntPtr]::Zero, 'LISTBOX', $null)
+    $populated = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $count = [UIntPtr]::Zero
+        if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x18b, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$count) -eq [IntPtr]::Zero) {
+            throw 'List control did not respond.'
+        }
+        if ($count.ToUInt64() -eq 1) { $populated = $true; break }
+        $process.Refresh()
+        if ($process.HasExited) { throw 'ZFM exited while listing the directory.' }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $populated) { throw 'ZFM did not list the fixture file within 10 seconds.' }
     # Refresh, new tab, close tab: synchronous calls exercise the message loop.
     foreach ($id in @(104, 110, 111)) {
         $result = [UIntPtr]::Zero
@@ -45,5 +63,9 @@ try {
     if ($process.HasExited) { throw "ZFM exited while handling navigation commands (exit code $($process.ExitCode))." }
     Write-Host "Win32 window and basic controls detected: $title"
 } finally {
-    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+    if ($null -ne $process) {
+        $process.Refresh()
+        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit() }
+    }
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
