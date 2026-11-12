@@ -2,13 +2,14 @@
 # Runs as root in Ubuntu 18.04, invoked by the release workflow.
 set -euxo pipefail
 TARGET=$1
+TAG=$2
 case "$TARGET" in x86_64-unknown-linux-gnu|i686-unknown-linux-gnu) ;; *) echo 'Unexpected target' >&2; exit 2;; esac
 export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture i386
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl build-essential gcc-multilib libc6-dev-i386 \
     libarchive13 libarchive13:i386 libglib2.0-0 libglib2.0-0:i386 \
-    libgtk-3-0 libgtk-3-0:i386 python3 xvfb xauth xdotool
+    libgtk-3-0 libgtk-3-0:i386 python3 xvfb xauth xdotool xdg-utils
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh
 sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain 1.77.2
 export PATH="/root/.cargo/bin:$PATH"
@@ -25,3 +26,14 @@ if [ -n "$new_glibc" ]; then echo "Unsupported glibc requirements: $new_glibc" >
 xvfb-run -a bash tests/gui-smoke-linux.sh "$binary"
 mkdir -p "build-output/$TARGET"
 cp "$binary" "build-output/$TARGET/zfm"
+bash tests/package-deb.sh
+bash scripts/package-deb.sh "$binary" "$TARGET" "$TAG" "build-output/$TARGET/zfm.deb"
+# Exercise the real package's installation, launch, and uninstallation in the
+# disposable container. Multiarch runtimes are installed above for i686.
+dpkg -i "build-output/$TARGET/zfm.deb"
+dpkg-query -W zfm
+xvfb-run -a bash tests/gui-smoke-linux.sh /usr/bin/zfm
+dpkg -r zfm
+if [ -e /usr/bin/zfm ] || [ -e /usr/share/applications/zfm.desktop ]; then
+    echo 'Package removal left installed files behind' >&2; exit 1
+fi

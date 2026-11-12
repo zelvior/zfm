@@ -56,15 +56,16 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          TAG: ${{ inputs.vtag }}
         run: |
           set -euxo pipefail
           # Build with Ubuntu 18.04's glibc 2.27 rather than the runner's 2.35.
           docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:18.04 \
-            bash scripts/ci-legacy-linux.sh "$TARGET"
+            bash scripts/ci-legacy-linux.sh "$TARGET" "$TAG"
       - name: Check shell scripts
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          bash -n scripts/build-linux.sh scripts/ci-legacy-linux.sh tests/build-script.sh tests/gui-smoke-linux.sh
+          bash -n scripts/build-linux.sh scripts/ci-legacy-linux.sh scripts/package-deb.sh tests/build-script.sh tests/gui-smoke-linux.sh tests/package-deb.sh
           ./tests/build-script.sh
       - name: Build and package
         env:
@@ -76,11 +77,13 @@ jobs:
           cp "build-output/$TARGET/zfm" README.md LICENSE "package/$name/"
           tar -czf "dist/$name.tar.gz" -C package "$name"
           cp "build-output/$TARGET/zfm" "dist/$name"
+          cp "build-output/$TARGET/zfm.deb" "dist/$name.deb"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
           path: |
             dist/zfm-${{ matrix.target }}.tar.gz
+            dist/zfm-${{ matrix.target }}.deb
             dist/zfm-${{ matrix.target }}
           if-no-files-found: error
 
@@ -120,10 +123,16 @@ jobs:
         run: |
           cargo +1.77.2 test --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install pinned NSIS compiler
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.10.0 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and package
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
+          TAG: ${{ inputs.vtag }}
         run: |
           $ErrorActionPreference = 'Stop'
           cargo +1.77.2 build --release --locked --target $env:TARGET
@@ -134,12 +143,21 @@ jobs:
           Copy-Item "target/$env:TARGET/release/zfm.exe", README.md, LICENSE -Destination "package/$name/"
           Compress-Archive -Path "package/$name" -DestinationPath "dist/$name.zip"
           Copy-Item "target/$env:TARGET/release/zfm.exe" -Destination "dist/$name.exe"
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path -LiteralPath $nsis)) { throw "NSIS compiler not found: $nsis" }
+          $arch = if ($env:TARGET.StartsWith('i686')) { 'x86' } else { 'x64' }
+          $binary = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
+          $installer = Join-Path $PWD "dist/$name-setup.exe"
+          & $nsis /NOCD /WX "/DAPP_BINARY=$binary" "/DOUTFILE=$installer" "/DVERSION=$env:TAG" "/DARCH=$arch" packaging/windows-installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./tests/installer-windows.ps1 -Installer $installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
           path: |
             dist/zfm-${{ matrix.target }}.zip
             dist/zfm-${{ matrix.target }}.exe
+            dist/zfm-${{ matrix.target }}-setup.exe
           if-no-files-found: error
 
   release:
@@ -173,8 +191,12 @@ jobs:
           assets=(
             zfm-x86_64-unknown-linux-gnu.tar.gz
             zfm-i686-unknown-linux-gnu.tar.gz
+            zfm-x86_64-unknown-linux-gnu.deb
+            zfm-i686-unknown-linux-gnu.deb
             zfm-x86_64-pc-windows-msvc.zip
             zfm-i686-pc-windows-msvc.zip
+            zfm-x86_64-pc-windows-msvc-setup.exe
+            zfm-i686-pc-windows-msvc-setup.exe
             zfm-x86_64-unknown-linux-gnu
             zfm-i686-unknown-linux-gnu
             zfm-x86_64-pc-windows-msvc.exe

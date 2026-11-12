@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ZFM File Manager
+Comment=Browse and manage files
+Exec=zfm %f
+Icon=zfm
+Terminal=false
+Categories=Utility;FileManager;
+StartupNotify=false

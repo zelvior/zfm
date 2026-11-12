@@ -4,7 +4,7 @@ A small native file manager written in Rust. **This repository currently contain
 
 ## What works in this foundation
 
-- Linux GTK 3 window with a black-and-white theme, directory list, sidebar, and status line.
+- Linux GTK 3 window with a light theme, directory list, sidebar, and status line.
 - Enter a path and press Enter; double-click a folder to enter it or a file to open it with `xdg-open`. Back, forward, parent and refresh buttons; F5, Alt+Left/Right/Up and Ctrl+L shortcuts.
 - Hidden-file toggle, folder-first case-insensitive name ordering, file sizes and modification dates. Broken links remain visible. Errors opening a directory are shown in the status bar.
 - Directory enumeration and metadata run on a worker. New navigation cancels the *results* of earlier work; UI rows are added in batches on the GTK main loop. There is no persistent background service.
@@ -13,7 +13,7 @@ A small native file manager written in Rust. **This repository currently contain
 - The archive manager browses and extracts TAR, ZIP, TAR.GZ/TGZ, TAR.BZ2 and TAR.XZ; ZIP and compressed TAR require the system libarchive runtime. It tests ZIP/compressed archives and creates a TAR or ZIP from one regular file. Operations run in the background with cancellation and no-overwrite behavior. See the limitations below before use.
 - The offline converter supports CSV → JSON and a restricted JSON → CSV mode, on a worker with progress and cancellation. Select a CSV or JSON file first to pre-fill paths and direction.
 - Linux tabs retain independent navigation histories; use Ctrl+T, Ctrl+W, or the folder context menu. File clipboard actions support one local item via GNOME copied-files and URI-list targets (Ctrl+C/X/V with the list focused). Copy is regular-file only; cut uses the same same-filesystem move operation as Move to.
-- The native Win32 browser offers navigation, directory listing, opening files, tab histories, a current-folder name filter, a hidden-file toggle, creation of files and folders, rename, and confirmed permanent deletion of files or empty folders. File changes run on a worker and creation/rename refuse replacement. Enter the name in **New name** before creating or renaming. The Windows UI is experimental and remains incomplete; its new controls have not been tested interactively.
+- The native Win32 browser offers navigation, directory listing, opening files, tab histories, a current-folder name filter, a hidden-file toggle, creation of files and folders, rename, and confirmed permanent deletion of files or empty folders. File changes run on a worker and creation/rename refuse replacement. Enter the name in **New name** before creating or renaming. The Windows UI is experimental and remains incomplete; the redesigned interface has not yet been tested interactively.
 - No third-party Rust crates. GTK 3 is loaded at runtime through a small platform adapter; filesystem and navigation code are separate.
 
 Sidebar locations currently use conventional subdirectories of `$HOME`, **not** customized XDG user directories. The file list supports a single selection. The list is batched but not virtualized: very large directories still consume memory for all entries and widgets. Directory sorting happens after enumeration; a slow network filesystem call cannot be interrupted until it returns. Displayed non-UTF-8 filenames are lossily decoded, although double-clicking uses the original path. Entering a non-UTF-8 path in the address bar is not supported. File opening depends on `xdg-open` and an installed application for the file type.
@@ -43,6 +43,15 @@ TAR and ZIP creation are limited to one regular file with a safe UTF-8 basename 
 | Windows x86 / x86_64 | Earlier MSVC core tests and release builds passed on GitHub's Windows Server 2022 runners; the latest Windows UI changes were only type-checked and have not been linked or tested interactively. Clipboard, copy/move, trash, archives and converter UI are not implemented on Windows. Windows 7 support is not claimed. |
 
 A Rust build produced on a newer distribution can require a newer glibc than Mint 19 provides. Build on the oldest supported distribution, or in a compatible build environment, and test the actual artifact on the target. Architecture support is not guaranteed merely by installing a Rust target.
+
+## Installing ZFM
+
+After a release containing the installers is published, download the asset matching your operating system and architecture from the GitHub Releases page. **The existing v0.0.2 release does not include these installers.** They need a new release tag and have not yet been tested on Windows 7 or Mint 19.
+
+- **Windows 7 SP1 or newer:** run `zfm-i686-pc-windows-msvc-setup.exe` for 32-bit Windows, or `zfm-x86_64-pc-windows-msvc-setup.exe` for 64-bit Windows. Setup installs for the current user by default, adds a Start Menu shortcut and an entry in Programs and Features, and includes an uninstaller. It does not install a service or require Rust. Choose a dedicated folder; unrelated files in that folder are preserved on uninstall. The installer is not code-signed, so Windows may display a security warning.
+- **Linux Mint 19 / Ubuntu 18.04:** use the `i686` `.deb` for a 32-bit OS or the `x86_64` `.deb` for a 64-bit OS. Double-click the downloaded package to open your package installer, or run `sudo apt install ./zfm-i686-unknown-linux-gnu.deb` (use the x86_64 filename on 64-bit systems). The package declares the GTK 3, libarchive and `xdg-utils` dependencies and adds ZFM to the applications menu. Dependencies may require configured package repositories. Uninstall with the package manager or `sudo apt remove zfm`.
+
+Portable archives and direct executables remain available alongside the installers. The Windows interface is still an incomplete file manager; see the limitations above. Back up important files before testing.
 
 ## Troubleshooting startup on older systems
 
@@ -133,25 +142,27 @@ Run the `zfm.exe` in the target subdirectory matching the Windows machine, using
 
 ## GitHub Actions and releases
 
-The **Build and release** workflow runs **only when manually requested**, and requires a version tag each time. Pushes, pull requests and tag pushes do not run it automatically. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. GUI interaction is not tested by this workflow.
+The **Build and release** workflow runs **only when manually requested**, and requires a version tag each time. Pushes, pull requests and tag pushes do not run it automatically. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. The workflow includes GUI startup smoke tests and installer install/uninstall checks; these are not a substitute for testing on the target desktop systems.
 
 To publish a release:
 
 1. Merge the intended source into `main` (or choose another branch containing the workflow and the intended source).
-2. In GitHub, open **Actions → Build and release → Run workflow**, select that branch, and enter a `v`-prefixed version such as `v0.0.1` in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.0.1`.
+2. In GitHub, open **Actions → Build and release → Run workflow**, select that branch, and enter a `v`-prefixed version such as `v0.0.1` in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.0.3 -f publish=true`.
 3. Check **publish** if you want a release; leave it unchecked to test only. If the tag already exists, the workflow builds its commit. If it does not exist, it builds the selected branch's commit from the time the run was started. After **all four builds and tests pass**, it creates a missing tag at that exact commit, then creates or updates the GitHub Release and uploads these assets:
 
 - `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
 - `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
 - `zfm-x86_64-pc-windows-msvc.exe` and `zfm-i686-pc-windows-msvc.exe` (direct Windows executables)
 - `zfm-x86_64-unknown-linux-gnu` and `zfm-i686-unknown-linux-gnu` (direct Linux executables)
-- `SHA256SUMS.txt` for verifying all eight downloads
+- `zfm-{x86_64,i686}-unknown-linux-gnu.deb` (Linux packages)
+- `zfm-{x86_64,i686}-pc-windows-msvc-setup.exe` (Windows installers)
+- `SHA256SUMS.txt` for verifying all twelve downloads
 
 If a tag existed when the run began but points to a different commit or disappears, publication fails. If a new tag is created by someone else while the build runs, the run fails rather than replacing it; check the tag and retry. A tag created after successful builds may remain if a later release upload fails. Use protected, immutable release tags when possible.
 
 Each archive contains the executable, README and license. Raw executables are also provided for convenience; after downloading a Linux executable, run `chmod +x` on it before starting it. Release assets from before this workflow update contain the executables inside the archives but not as separate downloads. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Manual runs default to test-only and still require a tag input; check **publish** to create or update the release after the tests pass. Test-only runs do not create tags or releases. No release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
 
-The release workflow uses Rust 1.77.2, builds Linux inside Ubuntu 18.04 (glibc 2.27), and statically links the Windows C runtime to target older systems. It checks that GUI windows appear on hosted runners before publishing. On GitHub, the revised Linux builds and GTK window smoke tests have passed for both architectures. The Windows builds and unit tests have passed, but the GUI smoke test failed due to a suspected test lookup issue; its correction has not yet been verified. Neither platform has been verified on an actual Mint 19 or Windows 7 system. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+The release workflow uses Rust 1.77.2, builds Linux inside Ubuntu 18.04 (glibc 2.27), and statically links the Windows C runtime to target older systems. It checks that GUI windows appear on hosted runners before publishing. The v0.0.2 GitHub run passed both architectures' builds and GUI startup smoke tests. The newer interface and installer changes have not yet been verified by a release workflow. Neither installer has been verified on an actual Mint 19 or Windows 7 system. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
 
 ## Development roadmap
 

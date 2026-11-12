@@ -20,6 +20,8 @@ const WM_CREATE: u32 = 1;
 const WM_DESTROY: u32 = 2;
 const WM_SIZE: u32 = 5;
 const WM_COMMAND: u32 = 0x111;
+const WM_DRAWITEM: u32 = 0x2b;
+const WM_GETMINMAXINFO: u32 = 0x24;
 const WM_KEYDOWN: u32 = 0x100;
 const WM_SYSKEYDOWN: u32 = 0x104;
 const WM_SETFONT: u32 = 0x30;
@@ -36,6 +38,8 @@ const WS_BORDER: u32 = 0x00800000;
 const WS_VSCROLL: u32 = 0x00200000;
 const WS_TABSTOP: u32 = 0x00010000;
 const LB_ADDSTRING: u32 = 0x180;
+const LB_SETITEMHEIGHT: u32 = 0x1a0;
+const BS_OWNERDRAW: u32 = 0x0b;
 const LB_RESETCONTENT: u32 = 0x184;
 const LB_GETCURSEL: u32 = 0x188;
 const CB_ADDSTRING: u32 = 0x143;
@@ -99,6 +103,26 @@ struct Rect {
     bottom: i32,
 }
 #[repr(C)]
+struct DrawItem {
+    control_type: u32,
+    control_id: u32,
+    item_id: u32,
+    item_action: u32,
+    item_state: u32,
+    hwnd: H,
+    dc: H,
+    rect: Rect,
+    item_data: usize,
+}
+#[repr(C)]
+struct MinMaxInfo {
+    reserved: Point,
+    max_size: Point,
+    max_position: Point,
+    min_track_size: Point,
+    max_track_size: Point,
+}
+#[repr(C)]
 struct CreateStruct {
     param: *mut c_void,
     instance: H,
@@ -148,6 +172,11 @@ extern "system" {
     fn GetFocus() -> H;
     fn SetFocus(hwnd: H) -> H;
     fn GetKeyState(key: i32) -> i16;
+    fn IsDialogMessageW(hwnd: H, msg: *mut Msg) -> i32;
+    fn FillRect(dc: H, rect: *const Rect, brush: H) -> i32;
+    fn FrameRect(dc: H, rect: *const Rect, brush: H) -> i32;
+    fn DrawFocusRect(dc: H, rect: *const Rect) -> i32;
+    fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
 }
 type P = *mut c_void;
 #[cfg(target_pointer_width = "64")]
@@ -168,9 +197,28 @@ extern "system" {
 }
 #[link(name = "gdi32")]
 extern "system" {
-    fn GetStockObject(index: i32) -> H;
     fn SetTextColor(dc: H, color: u32) -> u32;
     fn SetBkColor(dc: H, color: u32) -> u32;
+    fn SetBkMode(dc: H, mode: i32) -> i32;
+    fn CreateSolidBrush(color: u32) -> H;
+    fn DeleteObject(object: H) -> i32;
+    fn SelectObject(dc: H, object: H) -> H;
+    fn CreateFontW(
+        height: i32,
+        width: i32,
+        escapement: i32,
+        orientation: i32,
+        weight: i32,
+        italic: u32,
+        underline: u32,
+        strikeout: u32,
+        charset: u32,
+        output_precision: u32,
+        clip_precision: u32,
+        quality: u32,
+        pitch_and_family: u32,
+        face: *const u16,
+    ) -> H;
 }
 #[link(name = "shell32")]
 extern "system" {
@@ -209,7 +257,104 @@ unsafe fn get_data(hwnd: H) -> isize {
         GetWindowLongW(hwnd, GWLP_USERDATA) as isize
     }
 }
+// COLORREF uses 0x00BBGGRR.
+const BACKGROUND: u32 = 0xf8f5f2;
+const INK: u32 = 0x3c2d20;
+const MUTED: u32 = 0x756c60;
+const BUTTON_BG: u32 = 0xf3ebe4;
+const BUTTON_DOWN: u32 = 0xe6d8ca;
+const ACCENT: u32 = 0xb86532;
+const ACCENT_DOWN: u32 = 0x974e25;
+const BORDER: u32 = 0xe4d8cd;
+
+struct Theme {
+    background: H,
+    surface: H,
+    button: H,
+    pressed: H,
+    accent: H,
+    accent_pressed: H,
+    border: H,
+    font: H,
+    title_font: H,
+}
+impl Theme {
+    unsafe fn new() -> Result<Self, String> {
+        let font = |height, weight| {
+            CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                5,
+                0,
+                text("Segoe UI").as_ptr(),
+            )
+        };
+        let theme = Self {
+            background: CreateSolidBrush(BACKGROUND),
+            surface: CreateSolidBrush(0xffffff),
+            button: CreateSolidBrush(BUTTON_BG),
+            pressed: CreateSolidBrush(BUTTON_DOWN),
+            accent: CreateSolidBrush(ACCENT),
+            accent_pressed: CreateSolidBrush(ACCENT_DOWN),
+            border: CreateSolidBrush(BORDER),
+            font: font(-16, 400),
+            title_font: font(-24, 700),
+        };
+        if [
+            theme.background,
+            theme.surface,
+            theme.button,
+            theme.pressed,
+            theme.accent,
+            theme.accent_pressed,
+            theme.border,
+            theme.font,
+            theme.title_font,
+        ]
+        .iter()
+        .any(|h| h.is_null())
+        {
+            return Err("Could not initialize the interface resources".into());
+        }
+        Ok(theme)
+    }
+}
+impl Drop for Theme {
+    fn drop(&mut self) {
+        unsafe {
+            for object in [
+                self.background,
+                self.surface,
+                self.button,
+                self.pressed,
+                self.accent,
+                self.accent_pressed,
+                self.border,
+                self.font,
+                self.title_font,
+            ] {
+                if !object.is_null() {
+                    DeleteObject(object);
+                }
+            }
+        }
+    }
+}
 struct App {
+    // Theme outlives the window and its controls.
+    theme: *const Theme,
+    heading: H,
+    subtitle: H,
+    list_heading: H,
     tabs: Tabs,
     tabs_control: H,
     filter_control: H,
@@ -251,7 +396,10 @@ unsafe fn child(hwnd: H, class: &str, value: &str, style: u32, id: usize) -> H {
         ptr::null_mut(),
     );
     if !control.is_null() {
-        SendMessageW(control, WM_SETFONT, GetStockObject(17) as usize, 1);
+        let app = get_data(hwnd) as *mut App;
+        if !app.is_null() {
+            SendMessageW(control, WM_SETFONT, (*(*app).theme).font as usize, 1);
+        }
     }
     control
 }
@@ -290,16 +438,6 @@ unsafe fn load(hwnd: H, app: *mut App, destination: Destination) {
     });
 }
 unsafe fn layout(hwnd: H, app: *mut App) {
-    let buttons = (*app).buttons;
-    let address = (*app).address;
-    let list = (*app).list;
-    let status = (*app).status;
-    let tabs = (*app).tabs_control;
-    let filter = (*app).filter_control;
-    let extra = (*app).extra_buttons;
-    let name = (*app).name_control;
-    let filter_label = (*app).filter_label;
-    let name_label = (*app).name_label;
     let mut r = Rect {
         left: 0,
         top: 0,
@@ -307,44 +445,151 @@ unsafe fn layout(hwnd: H, app: *mut App) {
         bottom: 0,
     };
     GetClientRect(hwnd, &mut r);
-    let width = r.right.max(520);
-    let height = r.bottom.max(120);
-    let margin = 8;
-    let top = 8;
+    let width = r.right.max(690);
+    let height = r.bottom.max(420);
+    let margin = 18;
+    let right = width - margin;
     let h = 30;
+    MoveWindow((*app).heading, margin, 12, 65, 30, 1);
+    MoveWindow((*app).subtitle, margin + 70, 20, 300, 20, 1);
+
+    // Navigation, tabs, filtering, and operations each have their own row.
+    let top = 52;
+    let buttons = (*app).buttons;
     for (i, button) in buttons.iter().take(4).enumerate() {
-        MoveWindow(*button, margin + (i as i32) * 42, top, 38, h, 1);
+        MoveWindow(*button, margin + (i as i32) * 62, top, 58, h, 1);
     }
-    let x = margin + 4 * 42;
-    MoveWindow(buttons[4], width - margin - 42, top, 42, h, 1);
-    MoveWindow(address, x, top, (width - margin - 48 - x).max(1), h, 1);
-    let second = top + h + 8;
-    MoveWindow(tabs, margin, second, (width - 210).max(80), 300, 1);
-    MoveWindow(extra[0], width - 194, second, 92, h, 1);
-    MoveWindow(extra[1], width - 98, second, 90, h, 1);
-    let third = second + h + 8;
-    MoveWindow(filter_label, margin, third + 7, 45, 20, 1);
-    MoveWindow(filter, margin + 48, third, (width - 336).max(30), h, 1);
-    MoveWindow(extra[2], width - 274, third, 76, h, 1);
-    MoveWindow(extra[3], width - 194, third, 76, h, 1);
-    MoveWindow(extra[4], width - 114, third, 106, h, 1);
-    let fourth = third + h + 8;
-    MoveWindow(name_label, margin, fourth + 7, 70, 20, 1);
-    MoveWindow(name, margin + 72, fourth, (width - 486).max(30), h, 1);
-    MoveWindow(extra[5], width - 400, fourth, 92, h, 1);
-    MoveWindow(extra[6], width - 304, fourth, 100, h, 1);
-    MoveWindow(extra[8], width - 200, fourth, 92, h, 1);
-    MoveWindow(extra[7], width - 104, fourth, 96, h, 1);
-    let list_top = fourth + h + 8;
+    let address_x = margin + 4 * 62 + 4;
+    MoveWindow(buttons[4], right - 56, top, 56, h, 1);
     MoveWindow(
-        list,
+        (*app).address,
+        address_x,
+        top + 2,
+        (right - 66 - address_x).max(1),
+        h - 4,
+        1,
+    );
+
+    let second = top + 40;
+    let extra = (*app).extra_buttons;
+    MoveWindow(
+        (*app).tabs_control,
+        margin,
+        second + 2,
+        (right - margin - 204).max(80),
+        300,
+        1,
+    );
+    MoveWindow(extra[0], right - 196, second, 96, h, 1);
+    MoveWindow(extra[1], right - 96, second, 96, h, 1);
+
+    let third = second + 40;
+    MoveWindow((*app).filter_label, margin, third + 5, 48, 22, 1);
+    MoveWindow(
+        (*app).filter_control,
+        margin + 51,
+        third + 2,
+        (right - margin - 335).max(30),
+        h - 4,
+        1,
+    );
+    MoveWindow(extra[2], right - 274, third, 76, h, 1);
+    MoveWindow(extra[3], right - 194, third, 76, h, 1);
+    MoveWindow(extra[4], right - 114, third, 114, h, 1);
+
+    let fourth = third + 40;
+    MoveWindow((*app).name_label, margin, fourth + 5, 80, 22, 1);
+    MoveWindow(
+        (*app).name_control,
+        margin + 83,
+        fourth + 2,
+        (right - margin - 497).max(30),
+        h - 4,
+        1,
+    );
+    MoveWindow(extra[5], right - 400, fourth, 96, h, 1);
+    MoveWindow(extra[6], right - 300, fourth, 100, h, 1);
+    MoveWindow(extra[8], right - 196, fourth, 96, h, 1);
+    MoveWindow(extra[7], right - 96, fourth, 96, h, 1);
+    let list_top = fourth + h + 32;
+    MoveWindow((*app).list_heading, margin, fourth + h + 9, 300, 20, 1);
+    MoveWindow(
+        (*app).list,
         margin,
         list_top,
         width - 2 * margin,
-        (height - list_top - 32).max(1),
+        (height - list_top - 35).max(1),
         1,
     );
-    MoveWindow(status, margin, height - 25, width - 2 * margin, 20, 1);
+    MoveWindow(
+        (*app).status,
+        margin,
+        height - 28,
+        width - 2 * margin,
+        22,
+        1,
+    );
+}
+
+unsafe fn draw_button(app: *mut App, item: *mut DrawItem) -> LResult {
+    let item = &mut *item;
+    let theme = &*(*app).theme;
+    let primary = item.control_id as usize == GO || item.control_id as usize == APPLY_FILTER;
+    let pressed = item.item_state & 1 != 0;
+    let disabled = item.item_state & 4 != 0;
+    let brush = if primary && !disabled {
+        if pressed {
+            theme.accent_pressed
+        } else {
+            theme.accent
+        }
+    } else if pressed {
+        theme.pressed
+    } else {
+        theme.button
+    };
+    FillRect(item.dc, &item.rect, brush);
+    if !primary || disabled {
+        FrameRect(item.dc, &item.rect, theme.border);
+    }
+    let old_font = SelectObject(item.dc, theme.font);
+    SetBkMode(item.dc, 1);
+    SetTextColor(
+        item.dc,
+        if disabled {
+            MUTED
+        } else if primary {
+            0xffffff
+        } else {
+            INK
+        },
+    );
+    let label = control_value(item.hwnd);
+    let label = wide(&label);
+    let mut bounds = Rect {
+        left: item.rect.left + 4,
+        top: item.rect.top,
+        right: item.rect.right - 4,
+        bottom: item.rect.bottom,
+    };
+    DrawTextW(
+        item.dc,
+        label.as_ptr(),
+        -1,
+        &mut bounds,
+        0x0001 | 0x0004 | 0x0020 | 0x8000,
+    );
+    if item.item_state & 0x10 != 0 {
+        let focus = Rect {
+            left: item.rect.left + 4,
+            top: item.rect.top + 4,
+            right: item.rect.right - 4,
+            bottom: item.rect.bottom - 4,
+        };
+        DrawFocusRect(item.dc, &focus);
+    }
+    SelectObject(item.dc, old_font);
+    1
 }
 unsafe fn control_value(address: H) -> std::ffi::OsString {
     let length = GetWindowTextLengthW(address).max(0) as usize;
@@ -416,12 +661,22 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
     if msg == WM_CREATE {
         let app = (*(lp as *const CreateStruct)).param as *mut App;
         set_data(hwnd, app as isize);
+        let heading = child(hwnd, "STATIC", "ZFM", 0, 0);
+        let subtitle = child(hwnd, "STATIC", "FILE MANAGER", 0, 0);
+        let list_heading = child(hwnd, "STATIC", "FILES AND FOLDERS", 0, 0);
+        if heading.is_null() || subtitle.is_null() || list_heading.is_null() {
+            return -1;
+        }
+        (*app).heading = heading;
+        (*app).subtitle = subtitle;
+        (*app).list_heading = list_heading;
+        SendMessageW(heading, WM_SETFONT, (*(*app).theme).title_font as usize, 1);
         let buttons = [
-            child(hwnd, "BUTTON", "Back", WS_TABSTOP, BACK),
-            child(hwnd, "BUTTON", "Next", WS_TABSTOP, FORWARD),
-            child(hwnd, "BUTTON", "Up", WS_TABSTOP, UP),
-            child(hwnd, "BUTTON", "Reload", WS_TABSTOP, REFRESH),
-            child(hwnd, "BUTTON", "Go", WS_TABSTOP, GO),
+            child(hwnd, "BUTTON", "Back", WS_TABSTOP | BS_OWNERDRAW, BACK),
+            child(hwnd, "BUTTON", "Next", WS_TABSTOP | BS_OWNERDRAW, FORWARD),
+            child(hwnd, "BUTTON", "Up", WS_TABSTOP | BS_OWNERDRAW, UP),
+            child(hwnd, "BUTTON", "Reload", WS_TABSTOP | BS_OWNERDRAW, REFRESH),
+            child(hwnd, "BUTTON", "Go", WS_TABSTOP | BS_OWNERDRAW, GO),
         ];
         let address = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, ADDRESS);
         let list = child(
@@ -438,15 +693,51 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         let filter_label = child(hwnd, "STATIC", "Filter:", 0, 0);
         let name_label = child(hwnd, "STATIC", "New name:", 0, 0);
         let extra_buttons = [
-            child(hwnd, "BUTTON", "New tab", WS_TABSTOP, NEW_TAB),
-            child(hwnd, "BUTTON", "Close tab", WS_TABSTOP, CLOSE_TAB),
-            child(hwnd, "BUTTON", "Search", WS_TABSTOP, APPLY_FILTER),
-            child(hwnd, "BUTTON", "Clear", WS_TABSTOP, CLEAR_FILTER),
+            child(
+                hwnd,
+                "BUTTON",
+                "New tab",
+                WS_TABSTOP | BS_OWNERDRAW,
+                NEW_TAB,
+            ),
+            child(
+                hwnd,
+                "BUTTON",
+                "Close tab",
+                WS_TABSTOP | BS_OWNERDRAW,
+                CLOSE_TAB,
+            ),
+            child(
+                hwnd,
+                "BUTTON",
+                "Search",
+                WS_TABSTOP | BS_OWNERDRAW,
+                APPLY_FILTER,
+            ),
+            child(
+                hwnd,
+                "BUTTON",
+                "Clear",
+                WS_TABSTOP | BS_OWNERDRAW,
+                CLEAR_FILTER,
+            ),
             child(hwnd, "BUTTON", "Show hidden", WS_TABSTOP | 3, HIDDEN),
-            child(hwnd, "BUTTON", "New file", WS_TABSTOP, NEW_FILE),
-            child(hwnd, "BUTTON", "New folder", WS_TABSTOP, NEW_FOLDER),
-            child(hwnd, "BUTTON", "Delete…", WS_TABSTOP, DELETE),
-            child(hwnd, "BUTTON", "Rename", WS_TABSTOP, RENAME),
+            child(
+                hwnd,
+                "BUTTON",
+                "New file",
+                WS_TABSTOP | BS_OWNERDRAW,
+                NEW_FILE,
+            ),
+            child(
+                hwnd,
+                "BUTTON",
+                "New folder",
+                WS_TABSTOP | BS_OWNERDRAW,
+                NEW_FOLDER,
+            ),
+            child(hwnd, "BUTTON", "Delete…", WS_TABSTOP | BS_OWNERDRAW, DELETE),
+            child(hwnd, "BUTTON", "Rename", WS_TABSTOP | BS_OWNERDRAW, RENAME),
         ];
         if address.is_null()
             || list.is_null()
@@ -464,6 +755,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         (*app).buttons = buttons;
         (*app).address = address;
         (*app).list = list;
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, 25);
         (*app).status = status;
         (*app).tabs_control = tabs_control;
         (*app).filter_control = filter_control;
@@ -484,6 +776,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
     }
     let app = data as *mut App;
     match msg {
+        WM_GETMINMAXINFO => {
+            let info = &mut *(lp as *mut MinMaxInfo);
+            info.min_track_size.x = 720;
+            info.min_track_size.y = 480;
+            0
+        }
+        WM_DRAWITEM if lp != 0 => draw_button(app, lp as *mut DrawItem),
         WM_SIZE => {
             layout(hwnd, app);
             0
@@ -692,9 +991,25 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-            SetTextColor(wp as H, 0xffffff);
-            SetBkColor(wp as H, 0);
-            GetStockObject(4) as LResult
+            let theme = &*(*app).theme;
+            if msg == WM_CTLCOLORSTATIC {
+                let control = lp as H;
+                let color = if control == (*app).subtitle
+                    || control == (*app).list_heading
+                    || control == (*app).status
+                {
+                    MUTED
+                } else {
+                    INK
+                };
+                SetTextColor(wp as H, color);
+                SetBkColor(wp as H, BACKGROUND);
+                theme.background as LResult
+            } else {
+                SetTextColor(wp as H, INK);
+                SetBkColor(wp as H, 0xffffff);
+                theme.surface as LResult
+            }
         }
         WM_DESTROY => {
             (*app).token.fetch_add(1, Ordering::Relaxed);
@@ -711,6 +1026,7 @@ pub fn run() -> Result<(), String> {
         if instance.is_null() {
             return Err("Cannot get application instance".into());
         }
+        let theme = Theme::new()?;
         let class = text("ZFMNativeWindow");
         let wc = WndClass {
             style: 0,
@@ -720,7 +1036,7 @@ pub fn run() -> Result<(), String> {
             instance,
             icon: ptr::null_mut(),
             cursor: LoadCursorW(ptr::null_mut(), 32512usize as *const u16),
-            background: GetStockObject(4),
+            background: theme.background,
             menu: ptr::null(),
             class: class.as_ptr(),
         };
@@ -742,6 +1058,10 @@ pub fn run() -> Result<(), String> {
         };
         // The state is retained until process exit; background messages may still be queued.
         let app = Box::into_raw(Box::new(App {
+            theme: &theme,
+            heading: ptr::null_mut(),
+            subtitle: ptr::null_mut(),
+            list_heading: ptr::null_mut(),
             tabs: Tabs::new(initial),
             tabs_control: ptr::null_mut(),
             filter_control: ptr::null_mut(),
@@ -819,8 +1139,10 @@ pub fn run() -> Result<(), String> {
                     continue;
                 }
             }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            if IsDialogMessageW(window, &mut msg) == 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
     Ok(())

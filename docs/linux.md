@@ -13,3 +13,7 @@ Trash delegates to GIO and reports failures; it never falls back to permanent de
 ZIP creation and compressed archive operations dynamically load `libarchive.so.13`; missing libraries or unsupported codecs produce an error. Linux tabs, clipboard, converters and archive GTK controls have not been exercised interactively here.
 
 For automated rustup installation and native/cross-builds, use `./scripts/build-linux.sh`; see the README for options, dependencies, output locations and compatibility limits. System package installation is opt-in.
+
+## Debian package
+
+The release workflow builds an architecture-specific `.deb` from its Ubuntu 18.04-based executable. The package provides an applications-menu entry, declares the runtime dependencies and is removable through the system package manager. Its install, launch and removal are tested inside the build container before publication. These new packages have not yet run through the workflow or been tested on Mint 19 itself; v0.0.2 only contains portable downloads.
