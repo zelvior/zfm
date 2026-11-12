@@ -1,3 +1,7 @@
+// Only the Windows setup program reads these constants; other hosts build the
+// payload for the installer unit tests.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 //! The files the installer carries inside its own executable.
 //!
 //! The payload is embedded at build time, so setup needs no network access,

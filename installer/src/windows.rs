@@ -337,23 +337,72 @@ where
     Ok(())
 }
 
-/// Move the running uninstaller into the temporary folder so the installation
-/// folder can be removed. Windows allows renaming a running executable but not
-/// deleting it.
-fn move_uninstaller_away(exe: &Path) -> Option<PathBuf> {
+/// Restart the uninstaller from the temporary folder so that the copy in the
+/// installation folder is no longer running and can be removed. A running
+/// executable can be copied, but it can neither be deleted nor moved to another
+/// volume, so the copy does the removal and this process only hands over.
+fn relaunch_from_temp(exe: &Path, dir: &Path) -> Option<()> {
     let temp = win32::temporary_folder()?;
-    let name = format!("zfm-uninstall-{}.exe", unsafe {
-        win32::GetCurrentProcessId()
-    });
-    let target = temp.join(name);
-    fs::rename(exe, &target).ok()?;
-    Some(target)
+    // One fixed name keeps at most one copy behind; a concurrent uninstall
+    // simply falls back to the in-place removal below.
+    let copy = temp.join("zfm-uninstall.exe");
+    // Remove copies left behind by earlier uninstalls; one run needs one copy.
+    if let Ok(entries) = fs::read_dir(&temp) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("zfm-uninstall-") && name.ends_with(".exe") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    fs::copy(exe, &copy).ok()?;
+    // The parent has already asked or was started silently, so the copy never
+    // prompts. It also receives the folder, so it never depends on the registry
+    // entry it is about to remove.
+    let started = std::process::Command::new(&copy)
+        .arg("/UNINSTALL")
+        .arg("/S")
+        .arg(format!("/D={}", dir.display()))
+        .spawn();
+    match started {
+        Ok(_) => Some(()),
+        Err(_) => {
+            let _ = fs::remove_file(&copy);
+            None
+        }
+    }
+}
+
+/// Wait until the original uninstaller has exited, then delete its file. Only
+/// a relocated copy calls this; the file is still locked while the process that
+/// started us is shutting down.
+fn remove_original_uninstaller(dir: &Path) {
+    let original = dir.join("Uninstall.exe");
+    for _ in 0..100 {
+        match fs::remove_file(&original) {
+            Ok(()) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) => unsafe { win32::Sleep(100) },
+        }
+    }
+}
+
+fn relocated_copy(exe: &Path) -> bool {
+    exe.file_name()
+        .map(|name| name.to_string_lossy().starts_with("zfm-uninstall-"))
+        .unwrap_or(false)
 }
 
 fn uninstall(exe: &Path, options: &Options) -> i32 {
     let running = exe.parent().map(Path::to_path_buf);
     let registered = registered_directory();
-    let dir = match plan::uninstall_directory(running.as_deref(), registered.as_deref()) {
+    // A relocated copy is given the folder explicitly, so it never depends on
+    // the registry entry it is about to remove.
+    let requested = options.directory.clone();
+    let dir = match requested.or_else(|| {
+        plan::uninstall_directory(running.as_deref(), registered.as_deref())
+    }) {
         Some(dir) => dir,
         None => {
             if !options.silent {
@@ -387,6 +436,17 @@ fn uninstall(exe: &Path, options: &Options) -> i32 {
             .map(|parent| plan::same_directory(parent, &dir))
             .unwrap_or(false);
 
+    if inside {
+        // Hand the removal to a copy in the temporary folder; otherwise the
+        // running file would keep the installation folder alive. The window
+        // closes immediately and the copy finishes the removal.
+        if relaunch_from_temp(exe, &dir).is_some() {
+            return 0;
+        }
+    } else if relocated_copy(exe) {
+        remove_original_uninstaller(&dir);
+    }
+
     let mut problems = Vec::new();
     problems.extend(remove_shortcuts());
     problems.extend(remove_registry());
@@ -394,12 +454,9 @@ fn uninstall(exe: &Path, options: &Options) -> i32 {
         &dir,
         if inside { Some("Uninstall.exe") } else { None },
     ));
-    if inside {
-        // A running executable cannot delete its own file, but Windows lets us
-        // rename it. Moving it away empties the folder so it can be removed
-        // now, and the next restart removes the temporary copy.
-        let left_behind = move_uninstaller_away(exe).unwrap_or_else(|| exe.to_path_buf());
-        win32::delete_on_reboot(&left_behind);
+    if inside || relocated_copy(exe) {
+        // The running copy can only be removed at the next restart.
+        win32::delete_on_reboot(exe);
     }
     payload::remove_folder_if_empty(&dir);
 
@@ -794,7 +851,9 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
 unsafe fn finish(hwnd: Hwnd, wizard: &mut Wizard) {
     if win32::SendMessageW(wizard.launch, BM_GETCHECK, 0, 0) == 1 {
         let exe = PathBuf::from(&wizard.dir).join("zfm.exe");
-        win32::spawn(&exe, "");
+        // Start the application detached from setup; the standard library does
+        // the CreateProcessW plumbing correctly.
+        let _ = std::process::Command::new(&exe).spawn();
     }
     win32::DestroyWindow(hwnd);
 }
@@ -1122,15 +1181,18 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
 pub fn main() -> i32 {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
+    let arguments: Vec<std::ffi::OsString> = arguments.collect();
+    // A silent run must never block on a dialog, not even to report bad usage.
+    let silent_requested = arguments.iter().any(|argument| {
+        let text = argument.to_string_lossy().to_ascii_lowercase();
+        text == "/s" || text == "/silent"
+    });
     let options = match plan::parse(arguments) {
         Ok(options) => options,
         Err(error) => {
-            win32::message(
-                ptr::null_mut(),
-                &error,
-                "ZFM Setup",
-                win32::MB_ICONERROR,
-            );
+            if !silent_requested {
+                win32::message(ptr::null_mut(), &error, "ZFM Setup", win32::MB_ICONERROR);
+            }
             return 2;
         }
     };
