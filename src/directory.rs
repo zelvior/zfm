@@ -9,6 +9,8 @@ pub struct Entry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+    /// True only for a regular file, not a symlink to one.
+    pub is_file: bool,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
 }
@@ -28,6 +30,24 @@ pub fn read(
     generation: &AtomicU64,
     expected: u64,
 ) -> io::Result<Option<Listing>> {
+    read_filtered(path, show_hidden, "", false, generation, expected)
+}
+
+/// Filter by a literal substring of the displayed filename, before loading
+/// metadata. The caller controls when a search starts; typing does not scan.
+pub fn read_filtered(
+    path: &Path,
+    show_hidden: bool,
+    query: &str,
+    case_sensitive: bool,
+    generation: &AtomicU64,
+    expected: u64,
+) -> io::Result<Option<Listing>> {
+    let query = if case_sensitive {
+        query.to_owned()
+    } else {
+        query.to_lowercase()
+    };
     let mut entries = Vec::new();
     let mut skipped = 0;
     for item in fs::read_dir(path)? {
@@ -45,6 +65,16 @@ pub fn read(
         if !show_hidden && name.starts_with('.') {
             continue;
         }
+        if !query.is_empty() {
+            let matches = if case_sensitive {
+                name.contains(&query)
+            } else {
+                name.to_lowercase().contains(&query)
+            };
+            if !matches {
+                continue;
+            }
+        }
         let metadata = match item.metadata() {
             Ok(m) => Some(m),
             Err(_) => {
@@ -60,10 +90,12 @@ pub fn read(
             Some(m) => m.is_dir(),
             None => false,
         };
+        let is_file = metadata.as_ref().map_or(false, |m| m.is_file());
         entries.push(Entry {
             path: item.path(),
             name,
             is_dir,
+            is_file,
             size: metadata.as_ref().filter(|_| !is_dir).map(|m| m.len()),
             modified: metadata.and_then(|m| m.modified().ok()),
         });
@@ -150,5 +182,25 @@ mod tests {
                 .len(),
             2000
         );
+    }
+    #[test]
+    fn filters_names_and_extensions_before_metadata() {
+        let t = Temp::new();
+        fs::write(t.0.join("Report.TXT"), b"a").unwrap();
+        fs::write(t.0.join("other.txt"), b"b").unwrap();
+        fs::write(t.0.join("image.png"), b"c").unwrap();
+        let generation = AtomicU64::new(3);
+        let listing = read_filtered(&t.0, false, ".txt", false, &generation, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(listing.entries.len(), 2);
+        let listing = read_filtered(&t.0, false, "report", true, &generation, 3)
+            .unwrap()
+            .unwrap();
+        assert!(listing.entries.is_empty());
+        let listing = read_filtered(&t.0, false, "Report", true, &generation, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(listing.entries.len(), 1);
     }
 }

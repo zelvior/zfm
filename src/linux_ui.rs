@@ -41,6 +41,12 @@ api! {
     gtk_main: unsafe extern "C" fn(), gtk_main_quit: unsafe extern "C" fn(),
     gtk_window_new: unsafe extern "C" fn(c_int) -> P,
     gtk_window_set_title: unsafe extern "C" fn(P, *const c_char),
+    gtk_window_set_modal: unsafe extern "C" fn(P, c_int),
+    gtk_window_set_destroy_with_parent: unsafe extern "C" fn(P, c_int),
+    gtk_dialog_new: unsafe extern "C" fn() -> P,
+    gtk_dialog_add_button: unsafe extern "C" fn(P, *const c_char, c_int) -> P,
+    gtk_dialog_get_content_area: unsafe extern "C" fn(P) -> P,
+    gtk_dialog_run: unsafe extern "C" fn(P) -> c_int,
     gtk_window_set_default_size: unsafe extern "C" fn(P, c_int, c_int),
     gtk_window_set_transient_for: unsafe extern "C" fn(P, P),
     gtk_file_chooser_native_new: unsafe extern "C" fn(*const c_char, P, c_int, *const c_char, *const c_char) -> P,
@@ -57,6 +63,7 @@ api! {
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
     gtk_entry_set_text: unsafe extern "C" fn(P, *const c_char),
+    gtk_entry_set_placeholder_text: unsafe extern "C" fn(P, *const c_char),
     gtk_entry_get_text: unsafe extern "C" fn(P) -> *const c_char,
     gtk_label_new: unsafe extern "C" fn(*const c_char) -> P,
     gtk_label_set_text: unsafe extern "C" fn(P, *const c_char),
@@ -120,7 +127,15 @@ struct App {
     render_index: usize,
     skipped: usize,
     error: Option<String>,
+    notice: Option<String>,
     converter: P,
+    window: P,
+    operation: Option<Arc<AtomicBool>>,
+    operation_id: u64,
+    search_entry: P,
+    case_toggle: P,
+    search_query: String,
+    search_case: bool,
 }
 struct ResultMessage {
     app: usize,
@@ -177,13 +192,19 @@ unsafe fn navigate(app: &mut App, destination: Destination) {
         Some(p) => p,
         None => return,
     };
+    if !matches!(destination, Destination::Refresh) {
+        app.notice = None;
+    }
     let generation = app.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let token = app.generation.clone();
     let hidden = (api().gtk_toggle_button_get_active)(app.hidden) != 0;
     let app_ptr = app as *mut App as usize;
+    let query = app.search_query.clone();
+    let case_sensitive = app.search_case;
     set_status(app, &format!("Loading {}…", path.display()));
     thread::spawn(move || {
-        let result = directory::read(&path, hidden, &token, generation);
+        let result =
+            directory::read_filtered(&path, hidden, &query, case_sensitive, &token, generation);
         if token.load(Ordering::Relaxed) != generation {
             return;
         }
@@ -318,13 +339,19 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
     if let Some(error) = app.error.as_ref() {
         set_status(app, error);
     } else {
+        let notice = app
+            .notice
+            .as_ref()
+            .map(|s| format!("  ·  {s}"))
+            .unwrap_or_default();
         set_status(
             app,
             &format!(
-                "{} items  ·  {}{}",
+                "{} items  ·  {}{}{}",
                 app.entries.len(),
                 app.history.current().display(),
-                skipped
+                skipped,
+                notice
             ),
         );
     }
@@ -338,6 +365,9 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
 unsafe extern "C" fn quit(_: P, data: P) {
     let app = &mut *(data as *mut App);
     app.generation.fetch_add(1, Ordering::Relaxed);
+    if let Some(cancel) = &app.operation {
+        cancel.store(true, Ordering::Relaxed);
+    }
     if !app.converter.is_null() {
         (*(app.converter as *mut Converter))
             .cancel
@@ -380,19 +410,17 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         return 0;
     }
     (api().gdk_event_get_state)(event, &mut state);
-    let app = &mut *(p as *mut App);
-    // Ignore Shift/Super combinations to avoid surprising shortcut collisions.
+    // Do not retain an App reference while callbacks run nested dialogs.
     let modifiers = state & (1 | 4 | 8 | 64);
     match (key, modifiers) {
-        (0xffc2, 0) => navigate(app, Destination::Refresh), // F5
-        (0xff51, 8) => navigate(app, Destination::Back),
-        (0xff53, 8) => navigate(app, Destination::Forward),
-        (0xff52, 8) => {
-            if let Some(parent) = app.history.current().parent().map(|p| p.to_path_buf()) {
-                navigate(app, Destination::Visit(parent));
-            }
-        }
-        (0x6c, 4) | (0x4c, 4) => (api().gtk_widget_grab_focus)(app.address),
+        (0xffc2, 0) => navigate(&mut *(p as *mut App), Destination::Refresh),
+        (0xff51, 8) => navigate(&mut *(p as *mut App), Destination::Back),
+        (0xff53, 8) => navigate(&mut *(p as *mut App), Destination::Forward),
+        (0xff52, 8) => up(ptr::null_mut(), p),
+        (0x6c, 4) | (0x4c, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).address),
+        (0x66, 4) | (0x46, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).search_entry),
+        (0xffbf, 0) => rename(ptr::null_mut(), p), // F2
+        (0xffff, 1) => delete_permanently(ptr::null_mut(), p), // Shift+Delete
         _ => return 0,
     }
     1
@@ -448,26 +476,39 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
     if index < 0 {
         return 0;
     }
-    let supported = app.entries.get(index as usize).map_or(false, |entry| {
-        !entry.is_dir
-            && entry
-                .path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map_or(false, |s| s.eq_ignore_ascii_case("csv"))
-    });
-    if !supported {
-        return 0;
-    }
-    (api().gtk_list_box_select_row)(app.list, row);
+    let entry = match app.entries.get(index as usize) {
+        Some(entry) => entry,
+        None => return 0,
+    };
+    let can_duplicate = entry.is_file;
+    let can_convert = can_duplicate
+        && entry
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map_or(false, |s| s.eq_ignore_ascii_case("csv"));
+    let list = app.list;
+    (api().gtk_list_box_select_row)(list, row);
     let menu = (api().gtk_menu_new)();
-    let item = (api().gtk_menu_item_new_with_label)(c("Convert CSV to JSON…").as_ptr());
-    (api().gtk_menu_shell_append)(menu, item);
-    connect(item, "activate", show_converter as P, data);
+    if can_convert {
+        menu_action(menu, "Convert CSV to JSON…", show_converter as P, data);
+    }
+    menu_action(menu, "Rename…", rename as P, data);
+    menu_action(menu, "Move to…", move_to as P, data);
+    if can_duplicate {
+        menu_action(menu, "Copy to…", copy_to as P, data);
+        menu_action(menu, "Duplicate file…", duplicate as P, data);
+    }
+    menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
     (api().gtk_widget_show_all)(menu);
     (api().gtk_menu_popup_at_pointer)(menu, event);
     1
+}
+unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
+    let item = (api().gtk_menu_item_new_with_label)(c(text).as_ptr());
+    (api().gtk_menu_shell_append)(menu, item);
+    connect(item, "activate", callback, data);
 }
 struct Shortcut {
     app: usize,
@@ -501,6 +542,10 @@ pub fn run() -> Result<(), String> {
         (api().gtk_container_add)(window, outer);
         let top = (api().gtk_box_new)(0, 4);
         (api().gtk_box_pack_start)(outer, top, 0, 0, 6);
+        let search = (api().gtk_box_new)(0, 4);
+        (api().gtk_box_pack_start)(outer, search, 0, 0, 4);
+        let operations = (api().gtk_box_new)(0, 4);
+        (api().gtk_box_pack_start)(outer, operations, 0, 0, 4);
         let content = (api().gtk_box_new)(0, 0);
         (api().gtk_box_pack_start)(outer, content, 1, 1, 0);
         let sidebar = (api().gtk_box_new)(1, 3);
@@ -540,9 +585,43 @@ pub fn run() -> Result<(), String> {
             render_index: 0,
             skipped: 0,
             error: None,
+            notice: None,
             converter: ptr::null_mut(),
+            window,
+            operation: None,
+            operation_id: 0,
+            search_entry: ptr::null_mut(),
+            case_toggle: ptr::null_mut(),
+            search_query: String::new(),
+            search_case: false,
         }));
         let p = app as P;
+        let search_entry = (api().gtk_entry_new)();
+        (*app).search_entry = search_entry;
+        (api().gtk_entry_set_placeholder_text)(
+            search_entry,
+            c("Filter filenames in this folder…").as_ptr(),
+        );
+        (api().gtk_box_pack_start)(search, search_entry, 1, 1, 0);
+        connect(search_entry, "activate", search_apply as P, p);
+        let case_toggle = (api().gtk_check_button_new_with_label)(c("Case sensitive").as_ptr());
+        (*app).case_toggle = case_toggle;
+        (api().gtk_box_pack_start)(search, case_toggle, 0, 0, 0);
+        button(search, "Search", search_apply as P, p);
+        button(search, "Clear", search_clear as P, p);
+        button(operations, "New file", new_file as P, p);
+        button(operations, "New folder", new_folder as P, p);
+        button(operations, "Rename…", rename as P, p);
+        button(operations, "Duplicate file…", duplicate as P, p);
+        button(operations, "Copy to…", copy_to as P, p);
+        button(operations, "Move to…", move_to as P, p);
+        button(
+            operations,
+            "Delete permanently…",
+            delete_permanently as P,
+            p,
+        );
+        button(operations, "Cancel copy", cancel_operation as P, p);
         button(top, "‹", back as P, p);
         button(top, "›", forward as P, p);
         button(top, "↑", up as P, p);
@@ -877,4 +956,336 @@ unsafe fn create_converter(parent: P) -> P {
     );
     connect(window, "delete-event", converter_hide as P, converter);
     converter
+}
+
+/// GTK dialogs run a nested main loop: never keep Rust references into App
+/// across gtk_dialog_run, because another callback may run during the dialog.
+unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -> Option<String> {
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c(title).as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    (api().gtk_dialog_add_button)(
+        dialog,
+        c(if initial.is_some() {
+            "OK"
+        } else {
+            "Delete permanently"
+        })
+        .as_ptr(),
+        -3,
+    );
+    let area = (api().gtk_dialog_get_content_area)(dialog);
+    let description = label(message);
+    (api().gtk_label_set_xalign)(description, 0.0);
+    (api().gtk_widget_set_margin_start)(description, 12);
+    (api().gtk_widget_set_margin_end)(description, 12);
+    (api().gtk_widget_set_margin_top)(description, 12);
+    (api().gtk_widget_set_margin_bottom)(description, 12);
+    (api().gtk_box_pack_start)(area, description, 0, 0, 0);
+    let entry = if let Some(text) = initial {
+        let entry = (api().gtk_entry_new)();
+        (api().gtk_entry_set_text)(entry, c(text).as_ptr());
+        (api().gtk_box_pack_start)(area, entry, 0, 0, 8);
+        entry
+    } else {
+        ptr::null_mut()
+    };
+    (api().gtk_widget_show_all)(dialog);
+    if !entry.is_null() {
+        (api().gtk_widget_grab_focus)(entry);
+    }
+    let response = (api().gtk_dialog_run)(dialog);
+    let result = if response == -3 {
+        Some(if entry.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr((api().gtk_entry_get_text)(entry))
+                .to_string_lossy()
+                .into_owned()
+        })
+    } else {
+        None
+    };
+    if response != -1 {
+        (api().gtk_widget_destroy)(dialog);
+    }
+    result
+}
+
+fn initial_copy_name(path: &std::path::Path) -> String {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    match path.extension().and_then(|s| s.to_str()) {
+        Some(extension) if !extension.is_empty() => format!("{stem} copy.{extension}"),
+        _ => format!("{stem} copy"),
+    }
+}
+unsafe fn selected_path(data: P) -> Option<PathBuf> {
+    let app = &*(data as *mut App);
+    let row = (api().gtk_list_box_get_selected_row)(app.list);
+    if row.is_null() {
+        set_status(app, "Select an item first.");
+        return None;
+    }
+    let index = (api().gtk_list_box_row_get_index)(row);
+    if index < 0 {
+        return None;
+    }
+    app.entries
+        .get(index as usize)
+        .map(|entry| entry.path.clone())
+}
+
+enum Operation {
+    CreateFile(PathBuf, String),
+    CreateDirectory(PathBuf, String),
+    Rename(PathBuf, String),
+    Duplicate(PathBuf, String),
+    CopyTo(PathBuf, PathBuf),
+    MoveTo(PathBuf, PathBuf),
+    Delete(PathBuf),
+}
+struct OperationResult {
+    app: usize,
+    id: u64,
+    directory: PathBuf,
+    generation: u64,
+    result: Result<String, String>,
+}
+unsafe extern "C" fn operation_result(data: P) -> c_int {
+    let message = Box::from_raw(data as *mut OperationResult);
+    let app = &mut *(message.app as *mut App);
+    if app.operation_id != message.id {
+        return 0;
+    }
+    app.operation = None;
+    match message.result {
+        Ok(result) => {
+            if app.history.current() == message.directory
+                && app.generation.load(Ordering::Relaxed) == message.generation
+            {
+                app.notice = Some(result);
+                navigate(app, Destination::Refresh);
+            } else {
+                set_status(app, &result);
+            }
+        }
+        Err(error) => {
+            app.error = Some(format!("Operation failed: {error}"));
+            set_status(app, app.error.as_ref().unwrap());
+        }
+    }
+    0
+}
+unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
+    let app = &mut *(data as *mut App);
+    if app.operation.is_some() {
+        set_status(app, "An operation is already running.");
+        return;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.operation = Some(cancel.clone());
+    app.operation_id += 1;
+    let id = app.operation_id;
+    let generation = app.generation.load(Ordering::Relaxed);
+    let app_ptr = data as usize;
+    set_status(app, "Working…");
+    thread::spawn(move || {
+        use std::ffi::OsStr;
+        use zfm::operations;
+        let result = match operation {
+            Operation::CreateFile(dir, name) => operations::create_file(&dir, OsStr::new(&name))
+                .map(|p| format!("Created {}", p.display())),
+            Operation::CreateDirectory(dir, name) => {
+                operations::create_directory(&dir, OsStr::new(&name))
+                    .map(|p| format!("Created {}", p.display()))
+            }
+            Operation::Rename(path, name) => operations::rename_child(&path, OsStr::new(&name))
+                .map(|p| format!("Renamed to {}", p.display())),
+            Operation::Duplicate(path, name) => {
+                operations::duplicate_file(&path, OsStr::new(&name), &cancel, |_| {})
+                    .map(|p| format!("Created {}", p.display()))
+            }
+            Operation::CopyTo(path, destination) => {
+                let name = path.file_name().unwrap_or_default();
+                operations::copy_file(&path, &destination, name, &cancel, |_| {})
+                    .map(|p| format!("Copied to {}", p.display()))
+            }
+            Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
+                .map(|p| format!("Moved to {}", p.display())),
+            Operation::Delete(path) => {
+                operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
+            }
+        }
+        .map_err(|e| e.to_string());
+        let message = Box::new(OperationResult {
+            app: app_ptr,
+            id,
+            directory,
+            generation,
+            result,
+        });
+        unsafe {
+            (api().g_idle_add)(operation_result, Box::into_raw(message) as P);
+        }
+    });
+}
+unsafe extern "C" fn search_apply(_: P, data: P) {
+    let app = &mut *(data as *mut App);
+    app.search_query = CStr::from_ptr((api().gtk_entry_get_text)(app.search_entry))
+        .to_string_lossy()
+        .into_owned();
+    app.search_case = (api().gtk_toggle_button_get_active)(app.case_toggle) != 0;
+    navigate(app, Destination::Refresh);
+}
+unsafe extern "C" fn search_clear(_: P, data: P) {
+    let entry = (*(data as *mut App)).search_entry;
+    (api().gtk_entry_set_text)(entry, c("").as_ptr());
+    search_apply(ptr::null_mut(), data);
+}
+unsafe extern "C" fn cancel_operation(_: P, data: P) {
+    let app = &*(data as *mut App);
+    if let Some(cancel) = &app.operation {
+        cancel.store(true, Ordering::Relaxed);
+        set_status(app, "Cancellation requested (applies only to copying).");
+    } else {
+        set_status(app, "No operation is running.");
+    }
+}
+unsafe extern "C" fn new_file(_: P, data: P) {
+    let parent = (*(data as *mut App)).window;
+    let dir = (*(data as *mut App)).history.current().to_path_buf();
+    if let Some(name) = prompt(parent, "New file", "Enter a file name:", Some("")) {
+        start_operation(data, dir.clone(), Operation::CreateFile(dir, name));
+    }
+}
+unsafe extern "C" fn new_folder(_: P, data: P) {
+    let parent = (*(data as *mut App)).window;
+    let dir = (*(data as *mut App)).history.current().to_path_buf();
+    if let Some(name) = prompt(parent, "New folder", "Enter a folder name:", Some("")) {
+        start_operation(data, dir.clone(), Operation::CreateDirectory(dir, name));
+    }
+}
+unsafe extern "C" fn rename(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let parent = (*(data as *mut App)).window;
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    let old_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if let Some(name) = prompt(
+        parent,
+        "Rename",
+        "Enter a new name (existing items are never replaced):",
+        Some(&old_name),
+    ) {
+        start_operation(data, dir, Operation::Rename(path, name));
+    }
+}
+unsafe extern "C" fn duplicate(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let parent = (*(data as *mut App)).window;
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    if let Some(name) = prompt(
+        parent,
+        "Duplicate file",
+        "Enter a name for the copy (regular files only):",
+        Some(&initial_copy_name(&path)),
+    ) {
+        start_operation(data, dir, Operation::Duplicate(path, name));
+    }
+}
+unsafe fn choose_folder(parent: P) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let dialog = (api().gtk_file_chooser_native_new)(
+        c("Select destination folder").as_ptr(),
+        parent,
+        2,
+        c("Select").as_ptr(),
+        c("Cancel").as_ptr(),
+    );
+    let result = if (api().gtk_native_dialog_run)(dialog) == -3 {
+        let filename = (api().gtk_file_chooser_get_filename)(dialog);
+        if filename.is_null() {
+            None
+        } else {
+            let path = PathBuf::from(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr(filename).to_bytes(),
+            ));
+            (api().g_free)(filename as P);
+            Some(path)
+        }
+    } else {
+        None
+    };
+    (api().g_object_unref)(dialog);
+    result
+}
+unsafe extern "C" fn copy_to(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let parent = (*(data as *mut App)).window;
+    let source_dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    if let Some(destination) = choose_folder(parent) {
+        start_operation(data, source_dir, Operation::CopyTo(path, destination));
+    }
+}
+unsafe extern "C" fn move_to(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let parent = (*(data as *mut App)).window;
+    let source_dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    if let Some(destination) = choose_folder(parent) {
+        start_operation(data, source_dir, Operation::MoveTo(path, destination));
+    }
+}
+unsafe extern "C" fn delete_permanently(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let parent = (*(data as *mut App)).window;
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/"))
+        .to_path_buf();
+    if prompt(
+        parent,
+        "Permanently delete?",
+        &format!(
+            "Permanently delete {}?\nThis cannot be undone. Only empty folders can be deleted.",
+            path.display()
+        ),
+        None,
+    )
+    .is_some()
+    {
+        start_operation(data, dir, Operation::Delete(path));
+    }
 }

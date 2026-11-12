@@ -3,3 +3,5 @@ pub mod directory;
 pub mod navigation;
 
 pub mod converter;
+
+pub mod operations;
