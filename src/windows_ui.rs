@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::thread;
 use zfm::directory::{self, Entry, Listing};
-use zfm::navigation::{Destination, History};
+use zfm::navigation::{Destination, Tabs};
 
 type H = *mut c_void;
 type WParam = usize;
@@ -20,11 +20,14 @@ const WM_CREATE: u32 = 1;
 const WM_DESTROY: u32 = 2;
 const WM_SIZE: u32 = 5;
 const WM_COMMAND: u32 = 0x111;
+const WM_KEYDOWN: u32 = 0x100;
+const WM_SYSKEYDOWN: u32 = 0x104;
 const WM_SETFONT: u32 = 0x30;
 const WM_CTLCOLORSTATIC: u32 = 0x138;
 const WM_CTLCOLOREDIT: u32 = 0x133;
 const WM_CTLCOLORLISTBOX: u32 = 0x134;
 const WM_RESULT: u32 = 0x8001;
+const WM_OPERATION_RESULT: u32 = 0x8002;
 const GWLP_USERDATA: i32 = -21;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
 const WS_CHILD: u32 = 0x40000000;
@@ -35,6 +38,11 @@ const WS_TABSTOP: u32 = 0x00010000;
 const LB_ADDSTRING: u32 = 0x180;
 const LB_RESETCONTENT: u32 = 0x184;
 const LB_GETCURSEL: u32 = 0x188;
+const CB_ADDSTRING: u32 = 0x143;
+const CB_RESETCONTENT: u32 = 0x14b;
+const CB_SETCURSEL: u32 = 0x14e;
+const CB_GETCURSEL: u32 = 0x147;
+const BM_GETCHECK: u32 = 0xf0;
 const BACK: usize = 101;
 const FORWARD: usize = 102;
 const UP: usize = 103;
@@ -43,6 +51,18 @@ const GO: usize = 105;
 const ADDRESS: usize = 106;
 const LIST: usize = 107;
 const STATUS: usize = 108;
+const TABS: usize = 109;
+const NEW_TAB: usize = 110;
+const CLOSE_TAB: usize = 111;
+const FILTER: usize = 112;
+const APPLY_FILTER: usize = 113;
+const CLEAR_FILTER: usize = 114;
+const HIDDEN: usize = 115;
+const NAME: usize = 116;
+const NEW_FILE: usize = 117;
+const NEW_FOLDER: usize = 118;
+const DELETE: usize = 119;
+const RENAME: usize = 120;
 #[repr(C)]
 struct WndClass {
     style: u32,
@@ -125,6 +145,9 @@ extern "system" {
     fn GetWindowTextLengthW(hwnd: H) -> i32;
     fn GetWindowTextW(hwnd: H, text: *mut u16, max: i32) -> i32;
     fn MessageBoxW(hwnd: H, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    fn GetFocus() -> H;
+    fn SetFocus(hwnd: H) -> H;
+    fn GetKeyState(key: i32) -> i16;
 }
 type P = *mut c_void;
 #[cfg(target_pointer_width = "64")]
@@ -187,13 +210,25 @@ unsafe fn get_data(hwnd: H) -> isize {
     }
 }
 struct App {
-    history: History,
+    tabs: Tabs,
+    tabs_control: H,
+    filter_control: H,
+    filter: String,
+    show_hidden: bool,
+    extra_buttons: [H; 9],
+    name_control: H,
+    filter_label: H,
+    name_label: H,
+    operation_busy: bool,
     token: Arc<AtomicU64>,
     address: H,
     list: H,
     status: H,
     buttons: [H; 5],
     entries: Vec<Entry>,
+}
+struct OperationMessage {
+    result: Result<String, String>,
 }
 struct ResultMessage {
     generation: u64,
@@ -225,16 +260,19 @@ unsafe fn set_status(app: *mut App, value: &str) {
     SetWindowTextW(status, text(value).as_ptr());
 }
 unsafe fn load(hwnd: H, app: *mut App, destination: Destination) {
-    let path = match (*app).history.resolve(&destination) {
+    let path = match (*app).tabs.current().resolve(&destination) {
         Some(path) => path,
         None => return,
     };
     let generation = (*app).token.fetch_add(1, Ordering::Relaxed) + 1;
     let token = (*app).token.clone();
     let target = hwnd as usize;
+    let filter = (*app).filter.clone();
+    let show_hidden = (*app).show_hidden;
     set_status(app, &format!("Loading {}…", path.display()));
     thread::spawn(move || {
-        let result = directory::read(&path, false, &token, generation);
+        let result =
+            directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
         if token.load(Ordering::Relaxed) != generation {
             return;
         }
@@ -256,6 +294,12 @@ unsafe fn layout(hwnd: H, app: *mut App) {
     let address = (*app).address;
     let list = (*app).list;
     let status = (*app).status;
+    let tabs = (*app).tabs_control;
+    let filter = (*app).filter_control;
+    let extra = (*app).extra_buttons;
+    let name = (*app).name_control;
+    let filter_label = (*app).filter_label;
+    let name_label = (*app).name_label;
     let mut r = Rect {
         left: 0,
         top: 0,
@@ -263,7 +307,7 @@ unsafe fn layout(hwnd: H, app: *mut App) {
         bottom: 0,
     };
     GetClientRect(hwnd, &mut r);
-    let width = r.right.max(320);
+    let width = r.right.max(520);
     let height = r.bottom.max(120);
     let margin = 8;
     let top = 8;
@@ -274,22 +318,90 @@ unsafe fn layout(hwnd: H, app: *mut App) {
     let x = margin + 4 * 42;
     MoveWindow(buttons[4], width - margin - 42, top, 42, h, 1);
     MoveWindow(address, x, top, (width - margin - 48 - x).max(1), h, 1);
+    let second = top + h + 8;
+    MoveWindow(tabs, margin, second, (width - 210).max(80), 300, 1);
+    MoveWindow(extra[0], width - 194, second, 92, h, 1);
+    MoveWindow(extra[1], width - 98, second, 90, h, 1);
+    let third = second + h + 8;
+    MoveWindow(filter_label, margin, third + 7, 45, 20, 1);
+    MoveWindow(filter, margin + 48, third, (width - 336).max(30), h, 1);
+    MoveWindow(extra[2], width - 274, third, 76, h, 1);
+    MoveWindow(extra[3], width - 194, third, 76, h, 1);
+    MoveWindow(extra[4], width - 114, third, 106, h, 1);
+    let fourth = third + h + 8;
+    MoveWindow(name_label, margin, fourth + 7, 70, 20, 1);
+    MoveWindow(name, margin + 72, fourth, (width - 486).max(30), h, 1);
+    MoveWindow(extra[5], width - 400, fourth, 92, h, 1);
+    MoveWindow(extra[6], width - 304, fourth, 100, h, 1);
+    MoveWindow(extra[8], width - 200, fourth, 92, h, 1);
+    MoveWindow(extra[7], width - 104, fourth, 96, h, 1);
+    let list_top = fourth + h + 8;
     MoveWindow(
         list,
         margin,
-        top + h + 8,
+        list_top,
         width - 2 * margin,
-        (height - (top + h + 8) - 32).max(1),
+        (height - list_top - 32).max(1),
         1,
     );
     MoveWindow(status, margin, height - 25, width - 2 * margin, 20, 1);
 }
-unsafe fn address_value(app: *mut App) -> PathBuf {
-    let address = (*app).address;
+unsafe fn control_value(address: H) -> std::ffi::OsString {
     let length = GetWindowTextLengthW(address).max(0) as usize;
     let mut value = vec![0u16; length + 1];
     let n = GetWindowTextW(address, value.as_mut_ptr(), (length + 1) as i32).max(0) as usize;
-    PathBuf::from(std::ffi::OsString::from_wide(&value[..n]))
+    std::ffi::OsString::from_wide(&value[..n])
+}
+unsafe fn refresh_tabs(app: *mut App) {
+    let control = (*app).tabs_control;
+    SendMessageW(control, CB_RESETCONTENT, 0, 0);
+    let count = (*app).tabs.len();
+    for i in 0..count {
+        let label = (*app)
+            .tabs
+            .history(i)
+            .unwrap()
+            .current()
+            .to_string_lossy()
+            .into_owned();
+        SendMessageW(control, CB_ADDSTRING, 0, text(&label).as_ptr() as isize);
+    }
+    SendMessageW(control, CB_SETCURSEL, (*app).tabs.active(), 0);
+}
+enum Operation {
+    NewFile(PathBuf, std::ffi::OsString),
+    NewFolder(PathBuf, std::ffi::OsString),
+    Delete(PathBuf),
+    Rename(PathBuf, std::ffi::OsString),
+}
+unsafe fn start_operation(hwnd: H, app: *mut App, operation: Operation) {
+    if (*app).operation_busy {
+        set_status(app, "Another file operation is already running.");
+        return;
+    }
+    (*app).operation_busy = true;
+    set_status(app, "Working…");
+    let target = hwnd as usize;
+    thread::spawn(move || {
+        let result = match operation {
+            Operation::NewFile(dir, name) => zfm::operations::create_file(&dir, &name)
+                .map(|p| format!("Created {}", p.display())),
+            Operation::NewFolder(dir, name) => zfm::operations::create_directory(&dir, &name)
+                .map(|p| format!("Created {}", p.display())),
+            Operation::Rename(path, name) => zfm::operations::rename_child(&path, &name)
+                .map(|p| format!("Renamed to {}", p.display())),
+            Operation::Delete(path) => {
+                zfm::operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
+            }
+        }
+        .map_err(|e| e.to_string());
+        let msg = Box::into_raw(Box::new(OperationMessage { result }));
+        if unsafe { PostMessageW(target as H, WM_OPERATION_RESULT, 0, msg as isize) } == 0 {
+            unsafe {
+                drop(Box::from_raw(msg));
+            }
+        }
+    });
 }
 unsafe fn show_error(hwnd: H, message: &str) {
     MessageBoxW(hwnd, text(message).as_ptr(), text("ZFM").as_ptr(), 0x10);
@@ -314,10 +426,32 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             LIST,
         );
         let status = child(hwnd, "STATIC", "", 0, STATUS);
+        let tabs_control = child(hwnd, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | 3, TABS);
+        let filter_control = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, FILTER);
+        let name_control = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, NAME);
+        let filter_label = child(hwnd, "STATIC", "Filter:", 0, 0);
+        let name_label = child(hwnd, "STATIC", "New name:", 0, 0);
+        let extra_buttons = [
+            child(hwnd, "BUTTON", "New tab", WS_TABSTOP, NEW_TAB),
+            child(hwnd, "BUTTON", "Close tab", WS_TABSTOP, CLOSE_TAB),
+            child(hwnd, "BUTTON", "Search", WS_TABSTOP, APPLY_FILTER),
+            child(hwnd, "BUTTON", "Clear", WS_TABSTOP, CLEAR_FILTER),
+            child(hwnd, "BUTTON", "Show hidden", WS_TABSTOP | 3, HIDDEN),
+            child(hwnd, "BUTTON", "New file", WS_TABSTOP, NEW_FILE),
+            child(hwnd, "BUTTON", "New folder", WS_TABSTOP, NEW_FOLDER),
+            child(hwnd, "BUTTON", "Delete…", WS_TABSTOP, DELETE),
+            child(hwnd, "BUTTON", "Rename", WS_TABSTOP, RENAME),
+        ];
         if address.is_null()
             || list.is_null()
             || status.is_null()
             || buttons.iter().any(|b| b.is_null())
+            || tabs_control.is_null()
+            || filter_control.is_null()
+            || name_control.is_null()
+            || filter_label.is_null()
+            || name_label.is_null()
+            || extra_buttons.iter().any(|b| b.is_null())
         {
             return -1;
         }
@@ -325,7 +459,14 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         (*app).address = address;
         (*app).list = list;
         (*app).status = status;
-        let path = wide((*app).history.current().as_os_str());
+        (*app).tabs_control = tabs_control;
+        (*app).filter_control = filter_control;
+        (*app).name_control = name_control;
+        (*app).filter_label = filter_label;
+        (*app).name_label = name_label;
+        (*app).extra_buttons = extra_buttons;
+        refresh_tabs(app);
+        let path = wide((*app).tabs.current().current().as_os_str());
         SetWindowTextW(address, path.as_ptr());
         layout(hwnd, app);
         load(hwnd, app, Destination::Refresh);
@@ -348,12 +489,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             }
             match message.result {
                 Ok(Some(listing)) => {
-                    (*app).history.commit(message.destination);
-                    let path = wide((*app).history.current().as_os_str());
+                    (*app).tabs.current_mut().commit(message.destination);
+                    refresh_tabs(app);
+                    let path = wide((*app).tabs.current().current().as_os_str());
                     let status = format!(
                         "{} items  ·  {}{}",
                         listing.entries.len(),
-                        (*app).history.current().display(),
+                        (*app).tabs.current().current().display(),
                         if listing.skipped > 0 {
                             format!("  ·  {} entries had errors", listing.skipped)
                         } else {
@@ -378,11 +520,23 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 Ok(None) => (),
                 Err(e) => {
-                    let path = wide((*app).history.current().as_os_str());
+                    let path = wide((*app).tabs.current().current().as_os_str());
                     let address = (*app).address;
                     SetWindowTextW(address, path.as_ptr());
                     set_status(app, &format!("Could not open folder: {e}"));
                 }
+            }
+            0
+        }
+        WM_OPERATION_RESULT => {
+            let message = Box::from_raw(lp as *mut OperationMessage);
+            (*app).operation_busy = false;
+            match message.result {
+                Ok(status) => {
+                    load(hwnd, app, Destination::Refresh);
+                    set_status(app, &status);
+                }
+                Err(error) => set_status(app, &format!("File operation failed: {error}")),
             }
             0
         }
@@ -394,19 +548,110 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 FORWARD => load(hwnd, app, Destination::Forward),
                 REFRESH => load(hwnd, app, Destination::Refresh),
                 UP => {
-                    let parent = (*app).history.current().parent().map(|p| p.to_path_buf());
+                    let parent = (*app)
+                        .tabs
+                        .current()
+                        .current()
+                        .parent()
+                        .map(|p| p.to_path_buf());
                     if let Some(parent) = parent {
                         load(hwnd, app, Destination::Visit(parent));
                     }
                 }
                 GO => {
-                    let path = address_value(app);
+                    let path = PathBuf::from(control_value((*app).address));
                     let path = if path.is_absolute() {
                         path
                     } else {
-                        (*app).history.current().join(path)
+                        (*app).tabs.current().current().join(path)
                     };
                     load(hwnd, app, Destination::Visit(path));
+                }
+                NEW_TAB if code == 0 => {
+                    let path = (*app).tabs.current().current().to_path_buf();
+                    (*app).tabs.add(path);
+                    refresh_tabs(app);
+                    load(hwnd, app, Destination::Refresh);
+                }
+                CLOSE_TAB if code == 0 => {
+                    if (*app).tabs.close() {
+                        refresh_tabs(app);
+                        load(hwnd, app, Destination::Refresh);
+                    } else {
+                        set_status(app, "At least one tab must remain open.");
+                    }
+                }
+                TABS if code == 1 => {
+                    let index = SendMessageW((*app).tabs_control, CB_GETCURSEL, 0, 0);
+                    if index >= 0 && (*app).tabs.select(index as usize) {
+                        load(hwnd, app, Destination::Refresh);
+                    }
+                }
+                APPLY_FILTER if code == 0 => {
+                    (*app).filter = control_value((*app).filter_control)
+                        .to_string_lossy()
+                        .into_owned();
+                    load(hwnd, app, Destination::Refresh);
+                }
+                CLEAR_FILTER if code == 0 => {
+                    (*app).filter.clear();
+                    SetWindowTextW((*app).filter_control, text("").as_ptr());
+                    load(hwnd, app, Destination::Refresh);
+                }
+                HIDDEN if code == 0 => {
+                    (*app).show_hidden =
+                        SendMessageW((*app).extra_buttons[4], BM_GETCHECK, 0, 0) == 1;
+                    load(hwnd, app, Destination::Refresh);
+                }
+                NEW_FILE | NEW_FOLDER if code == 0 => {
+                    let name = control_value((*app).name_control);
+                    let dir = (*app).tabs.current().current().to_path_buf();
+                    let operation = if id == NEW_FILE {
+                        Operation::NewFile(dir, name)
+                    } else {
+                        Operation::NewFolder(dir, name)
+                    };
+                    start_operation(hwnd, app, operation);
+                }
+                RENAME if code == 0 => {
+                    let index = SendMessageW((*app).list, LB_GETCURSEL, 0, 0);
+                    let path = if index >= 0 {
+                        (&(*app).entries)
+                            .get(index as usize)
+                            .map(|e| e.path.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(path) = path {
+                        let name = control_value((*app).name_control);
+                        start_operation(hwnd, app, Operation::Rename(path, name));
+                    } else {
+                        set_status(app, "Select an item and enter a new name.");
+                    }
+                }
+                DELETE if code == 0 => {
+                    let index = SendMessageW((*app).list, LB_GETCURSEL, 0, 0);
+                    let path = if index >= 0 {
+                        (&(*app).entries)
+                            .get(index as usize)
+                            .map(|e| e.path.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(path) = path {
+                        let message = format!("Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.", path.display());
+                        if MessageBoxW(
+                            hwnd,
+                            text(&message).as_ptr(),
+                            text("Confirm permanent deletion").as_ptr(),
+                            0x134,
+                        ) == 6
+                        {
+                            start_operation(hwnd, app, Operation::Delete(path));
+                        }
+                    } else {
+                        set_status(app, "Select an item to delete.");
+                    }
                 }
                 LIST if code == 2 => {
                     let list = (*app).list;
@@ -491,7 +736,16 @@ pub fn run() -> Result<(), String> {
         };
         // The state is retained until process exit; background messages may still be queued.
         let app = Box::into_raw(Box::new(App {
-            history: History::new(initial),
+            tabs: Tabs::new(initial),
+            tabs_control: ptr::null_mut(),
+            filter_control: ptr::null_mut(),
+            filter: String::new(),
+            show_hidden: false,
+            extra_buttons: [ptr::null_mut(); 9],
+            name_control: ptr::null_mut(),
+            filter_label: ptr::null_mut(),
+            name_label: ptr::null_mut(),
+            operation_busy: false,
             token: Arc::new(AtomicU64::new(0)),
             address: ptr::null_mut(),
             list: ptr::null_mut(),
@@ -525,6 +779,39 @@ pub fn run() -> Result<(), String> {
             }
             if status < 0 {
                 return Err("Windows message loop failed".into());
+            }
+            if msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN {
+                let focus = GetFocus();
+                let ctrl = GetKeyState(0x11) < 0;
+                let alt = GetKeyState(0x12) < 0;
+                let id = match msg.wparam {
+                    0x74 if !ctrl && !alt => Some(REFRESH),
+                    0x54 if ctrl && !alt => Some(NEW_TAB),
+                    0x57 if ctrl && !alt => Some(CLOSE_TAB),
+                    0x25 if alt && !ctrl => Some(BACK),
+                    0x27 if alt && !ctrl => Some(FORWARD),
+                    0x26 if alt && !ctrl => Some(UP),
+                    0x0d if focus == (*app).address => Some(GO),
+                    0x0d if focus == (*app).filter_control => Some(APPLY_FILTER),
+                    0x2e if focus == (*app).list && !ctrl && !alt => Some(DELETE),
+                    _ => None,
+                };
+                if let Some(id) = id {
+                    SendMessageW(window, WM_COMMAND, id, 0);
+                    continue;
+                }
+                if ctrl && !alt && msg.wparam == 0x4c {
+                    SetFocus((*app).address);
+                    continue;
+                }
+                if ctrl && !alt && msg.wparam == 0x46 {
+                    SetFocus((*app).filter_control);
+                    continue;
+                }
+                if msg.wparam == 0x0d && focus == (*app).list && !ctrl && !alt {
+                    SendMessageW(window, WM_COMMAND, LIST | (2 << 16), 0);
+                    continue;
+                }
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
