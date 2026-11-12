@@ -11,7 +11,7 @@ on:
         description: 'Publish a release after all builds pass (uncheck for a test run)'
         required: true
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
