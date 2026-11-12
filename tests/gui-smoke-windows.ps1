@@ -6,8 +6,12 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class ZfmSmoke {
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string className, string title);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern IntPtr GetDlgItem(IntPtr parent, int id);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern int GetClassNameW(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll")]
@@ -32,13 +36,39 @@ try {
     $title = New-Object System.Text.StringBuilder 256
     [void][ZfmSmoke]::GetWindowTextW($window, $title, $title.Capacity)
     if (-not $title.ToString().StartsWith('ZFM')) { throw "Unexpected window title: $title" }
-    foreach ($class in @('BUTTON', 'EDIT', 'LISTBOX')) {
-        if ([ZfmSmoke]::FindWindowExW($window, [IntPtr]::Zero, $class, $null) -eq [IntPtr]::Zero) {
-            throw "ZFM window does not contain a $class control."
+    $windowClass = New-Object System.Text.StringBuilder 256
+    [void][ZfmSmoke]::GetClassNameW($window, $windowClass, $windowClass.Capacity)
+    if ($windowClass.ToString() -ne 'ZFMNativeWindow') {
+        throw "Expected the ZFM main window, got class '$windowClass' and title '$title' (possibly a startup error dialog)."
+    }
+    if (-not [ZfmSmoke]::IsWindowVisible($window)) { throw 'ZFM main window is not visible.' }
+
+    # Identify controls by their Win32 IDs. Passing PowerShell $null to a .NET
+    # string argument can become an empty string, so FindWindowEx's title filter
+    # accidentally searched for an unlabelled button instead of any button.
+    $controls = @(
+        @{ Id = 101; Class = 'Button'; Label = 'Back' },
+        @{ Id = 106; Class = 'Edit'; Label = $null },
+        @{ Id = 107; Class = 'ListBox'; Label = $null }
+    )
+    foreach ($control in $controls) {
+        $handle = [ZfmSmoke]::GetDlgItem($window, $control.Id)
+        if ($handle -eq [IntPtr]::Zero) { throw "Missing control ID $($control.Id) ($($control.Class))." }
+        $actualClass = New-Object System.Text.StringBuilder 256
+        [void][ZfmSmoke]::GetClassNameW($handle, $actualClass, $actualClass.Capacity)
+        if ($actualClass.ToString() -ne $control.Class) {
+            throw "Control ID $($control.Id) has class '$actualClass', expected '$($control.Class)'."
+        }
+        if (-not [ZfmSmoke]::IsWindowVisible($handle)) { throw "Control ID $($control.Id) is not visible." }
+        if ($null -ne $control.Label) {
+            $actualLabel = New-Object System.Text.StringBuilder 256
+            [void][ZfmSmoke]::GetWindowTextW($handle, $actualLabel, $actualLabel.Capacity)
+            if ($actualLabel.ToString() -ne $control.Label) { throw "Unexpected control label '$actualLabel'." }
         }
     }
+    if ([ZfmSmoke]::GetDlgItem($window, 32767) -ne [IntPtr]::Zero) { throw 'Unexpected control with unused ID.' }
     # Verify that asynchronous directory enumeration actually populates the list.
-    $list = [ZfmSmoke]::FindWindowExW($window, [IntPtr]::Zero, 'LISTBOX', $null)
+    $list = [ZfmSmoke]::GetDlgItem($window, 107)
     $populated = $false
     for ($i = 0; $i -lt 100; $i++) {
         $count = [UIntPtr]::Zero
