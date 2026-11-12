@@ -1,6 +1,6 @@
 # ZFM — Zelvior File Manager
 
-A small native file manager written in Rust. **This repository currently contains an early Phase 1 foundation, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
+A small native file manager written in Rust. **This repository currently contains an early foundation and a limited set of file operations, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
 
 ## What works in this foundation
 
@@ -8,10 +8,18 @@ A small native file manager written in Rust. **This repository currently contain
 - Enter a path and press Enter; double-click a folder to enter it or a file to open it with `xdg-open`. Back, forward, parent and refresh buttons; F5, Alt+Left/Right/Up and Ctrl+L shortcuts.
 - Hidden-file toggle, folder-first case-insensitive name ordering, file sizes and modification dates. Broken links remain visible. Errors opening a directory are shown in the status bar.
 - Directory enumeration and metadata run on a worker. New navigation cancels the *results* of earlier work; UI rows are added in batches on the GTK main loop. There is no persistent background service.
+- A current-folder filename filter (including extension substrings), with an optional case-sensitive mode. Press Search or Enter to apply; Ctrl+F focuses it. It is not recursive, and the filter stays active while navigating until cleared.
+- Single-item create file/folder, rename, duplicate regular file, copy a regular file to another folder, and move an item to another folder on the same filesystem. These run in a worker and refuse to overwrite. Permanent deletion of a file, symlink, or **empty** folder requires confirmation; F2 renames and Shift+Delete requests permanent deletion. There is no trash integration and Delete alone does nothing.
 - A built-in, offline CSV → JSON converter is available from the toolbar, sidebar, and the context menu on CSV files. The converter runs on a worker, reports bytes processed, and supports cancellation. Selecting a CSV first pre-fills the paths.
 - No third-party Rust crates. GTK 3 is loaded at runtime through a small platform adapter; filesystem and navigation code are separate.
 
 Sidebar locations currently use conventional subdirectories of `$HOME`, **not** customized XDG user directories. The interface uses a single selection and a single tab. The list is batched but not virtualized: very large directories still consume memory for all entries and widgets. Directory sorting happens after enumeration; a slow network filesystem call cannot be interrupted until it returns. Displayed non-UTF-8 filenames are lossily decoded, although double-clicking uses the original path. Entering a non-UTF-8 path in the address bar is not supported. File opening depends on `xdg-open` and an installed application for the file type.
+
+## File-operation limits
+
+The file actions operate on the single selected item. The copy and duplicate actions stream regular files only; they do not follow source symlinks, copy folders, or preserve metadata. Copies are created with restrictive permissions, not the source permissions. Copy cancellation is cooperative and may be too late once publication begins. Copies use a temporary file and a no-replace hard link in the destination directory, so filesystems without hard-link support fail rather than overwrite. A forced exit can leave `.zfm-copy-*.tmp` files. Do not use directories writable by untrusted users as staging destinations: the temporary-file publication is not protected against hostile concurrent changes in such directories.
+
+Rename and move use Linux `renameat2(RENAME_NOREPLACE)`, requiring a kernel and filesystem that support it. Move is same-filesystem only; a cross-filesystem move fails and leaves the source in place. Rename and move are currently implemented for Linux x86, x86_64, and aarch64 only. The destination is never intentionally overwritten. Directory deletion is intentionally restricted to empty directories, does not recurse, and deleting a symlink removes the link rather than its target. Permanent deletion cannot be undone. There is no trash, clipboard, multi-select, directory copy, or cross-filesystem move. The new GTK controls and destructive-action confirmation have **not** been tested interactively in this environment; use caution and back up data before trying them.
 
 ## Conversion and archives: current scope
 
@@ -78,6 +86,6 @@ There is currently no Windows interface or release package. Building the shared 
 
 ## Development roadmap
 
-Phase 1 needs interactive GTK testing and compatibility verification before moving on. File operations, properties, search, tabs, bookmarks, recent files, multiple selection, general-purpose context menus, drag-and-drop, alternative views and advanced features are **not implemented**. In particular, there is no delete button or shortcut: no destructive operation is silently substituted. Future phases should implement and test core operations before adding advanced tools, and profile real workloads before making performance claims.
+The foundation and added actions need interactive GTK testing and compatibility verification. Recursive file operations, trash, clipboard, properties, recursive search, tabs, bookmarks, recent files, multiple selection, drag-and-drop, alternative views and advanced features are **not implemented**. Delete alone is deliberately not mapped to permanent deletion. Future phases should implement and test core operations before adding advanced tools, and profile real workloads before making performance claims.
 
 Licensed under [Apache-2.0](LICENSE). Made by Zelvior.

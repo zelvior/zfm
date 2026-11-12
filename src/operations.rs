@@ -1,0 +1,423 @@
+//! Conservative, non-overwriting filesystem operations used by the UI.
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// Accept exactly one ordinary filename, never a path or dot component.
+pub fn validate_name(name: &OsStr) -> io::Result<()> {
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() {
+        return Err(invalid("Enter a single file or folder name"));
+    }
+    // Components normalizes trailing separators and a trailing '/.'. Reject both.
+    if Path::new(name).file_name() != Some(name) {
+        return Err(invalid("Enter a single file or folder name"));
+    }
+    Ok(())
+}
+
+pub fn create_file(directory: &Path, name: &OsStr) -> io::Result<PathBuf> {
+    validate_name(name)?;
+    let path = directory.join(name);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    Ok(path)
+}
+
+pub fn create_directory(directory: &Path, name: &OsStr) -> io::Result<PathBuf> {
+    validate_name(name)?;
+    let path = directory.join(name);
+    fs::create_dir(&path)?;
+    Ok(path)
+}
+
+/// Rename a direct child, atomically refusing to replace an existing name.
+/// Linux renameat2 requires kernel 3.15 or newer. Other targets fail safely.
+pub fn rename_child(source: &Path, new_name: &OsStr) -> io::Result<PathBuf> {
+    validate_name(new_name)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| invalid("Source has no parent"))?;
+    let dest = parent.join(new_name);
+    if source == dest {
+        return Err(invalid("Choose a different name"));
+    }
+    rename_no_replace(source, &dest)?;
+    Ok(dest)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn rename_no_replace(source: &Path, dest: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_int, c_long};
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn syscall(number: c_long, ...) -> c_long;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: c_long = 316;
+    #[cfg(target_arch = "x86")]
+    const SYS_RENAMEAT2: c_long = 353;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_RENAMEAT2: c_long = 276;
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_int = 1;
+    let source =
+        CString::new(source.as_os_str().as_bytes()).map_err(|_| invalid("Invalid source path"))?;
+    let dest = CString::new(dest.as_os_str().as_bytes())
+        .map_err(|_| invalid("Invalid destination path"))?;
+    // `renameat2` with RENAME_NOREPLACE avoids the check-then-rename race.
+    let result = unsafe {
+        syscall(
+            SYS_RENAMEAT2,
+            AT_FDCWD,
+            source.as_ptr(),
+            AT_FDCWD,
+            dest.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+)))]
+fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Safe rename is not supported on this platform",
+    ))
+}
+
+/// Move an entry to another directory on the same filesystem without replacing anything.
+/// Cross-filesystem moves fail without altering the source.
+pub fn move_into(source: &Path, directory: &Path) -> io::Result<PathBuf> {
+    let name = source
+        .file_name()
+        .ok_or_else(|| invalid("Source has no filename"))?;
+    validate_name(name)?;
+    let dest = directory.join(name);
+    rename_no_replace(source, &dest)?;
+    Ok(dest)
+}
+
+struct Temporary(PathBuf);
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Duplicate a regular file in its original directory. Does not follow symbolic
+/// links on Linux. The published destination is never overwritten. Partial data
+/// stays in a hidden staging file which is removed on normal errors/cancel.
+pub fn duplicate_file<F: FnMut(u64)>(
+    source: &Path,
+    new_name: &OsStr,
+    cancel: &AtomicBool,
+    progress: F,
+) -> io::Result<PathBuf> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| invalid("Source has no parent"))?;
+    copy_file(source, parent, new_name, cancel, progress)
+}
+
+/// Copy a regular file to a directory without replacing a destination.
+pub fn copy_file<F: FnMut(u64)>(
+    source: &Path,
+    parent: &Path,
+    new_name: &OsStr,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> io::Result<PathBuf> {
+    validate_name(new_name)?;
+    let destination = parent.join(new_name);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Avoid blocking on FIFOs and do not follow a final-component symlink.
+        options.custom_flags(0x800 | 0x20000); // O_NONBLOCK | O_NOFOLLOW
+    }
+    #[cfg(not(target_os = "linux"))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Safe copy is not supported on this platform",
+    ));
+    #[allow(unreachable_code)]
+    let mut input = options.open(source)?;
+    if !input.metadata()?.is_file() {
+        return Err(invalid("Only regular files can be duplicated"));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+    }
+    let (temp, mut output) = (0..100)
+        .find_map(|_| {
+            let path = parent.join(format!(
+                ".zfm-copy-{}-{}.tmp",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
+                Ok(file) => Some(Ok((Temporary(path), file))),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Cannot allocate a temporary file",
+            ))
+        })?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+        }
+        let read = match input.read(&mut buf) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buf[..read])?;
+        total += read as u64;
+        progress(total);
+    }
+    output.flush()?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+    }
+    drop(output);
+    // Atomic, no-replace publication; failure on filesystems without hard links.
+    fs::hard_link(&temp.0, &destination)?;
+    Ok(destination)
+}
+
+/// Permanently remove a file/symlink or an *empty* folder. Never recurse or
+/// follow the final symlink. Confirmation is the caller's responsibility.
+pub fn remove_one(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "zfm-ops-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&p).unwrap();
+            Self(p)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn names_reject_paths_and_dot_components() {
+        for name in ["", ".", "..", "foo/", "foo/.", "../x", "a/b", "/tmp"] {
+            assert!(validate_name(OsStr::new(name)).is_err(), "{name}");
+        }
+        for name in ["space and ü.txt", ".hidden"] {
+            assert!(validate_name(OsStr::new(name)).is_ok());
+        }
+    }
+    #[test]
+    fn creation_does_not_overwrite() {
+        let t = Temp::new();
+        let file = create_file(&t.0, OsStr::new("file")).unwrap();
+        fs::write(&file, b"keep").unwrap();
+        assert!(create_file(&t.0, OsStr::new("file")).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+        assert!(create_directory(&t.0, OsStr::new("dir")).unwrap().is_dir());
+        assert!(create_directory(&t.0, OsStr::new("dir")).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_files_directories_and_conflicts() {
+        let t = Temp::new();
+        let file = create_file(&t.0, OsStr::new("one")).unwrap();
+        fs::write(&file, b"one").unwrap();
+        fs::write(t.0.join("two"), b"two").unwrap();
+        assert!(rename_child(&file, OsStr::new("two")).is_err());
+        assert_eq!(fs::read(t.0.join("two")).unwrap(), b"two");
+        assert_eq!(
+            fs::read(rename_child(&file, OsStr::new("new")).unwrap()).unwrap(),
+            b"one"
+        );
+        let dir = create_directory(&t.0, OsStr::new("dir")).unwrap();
+        assert!(rename_child(&dir, OsStr::new("new-dir")).unwrap().is_dir());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn duplicate_cancel_conflict_and_symlink() {
+        let t = Temp::new();
+        let src = t.0.join("source");
+        fs::write(&src, vec![42u8; 200_000]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let dup = duplicate_file(&src, OsStr::new("copy"), &cancel, |_| {}).unwrap();
+        assert_eq!(fs::read(&src).unwrap(), fs::read(&dup).unwrap());
+        assert!(duplicate_file(&src, OsStr::new("copy"), &cancel, |_| {}).is_err());
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            duplicate_file(&src, OsStr::new("cancel"), &cancel, |_| {
+                cancel.store(true, Ordering::Relaxed)
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(!t.0.join("cancel").exists());
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".zfm-copy-")));
+        let link = t.0.join("link");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        assert!(duplicate_file(
+            &link,
+            OsStr::new("copied-link"),
+            &AtomicBool::new(false),
+            |_| {}
+        )
+        .is_err());
+    }
+    #[test]
+    fn delete_empty_only_and_symlink_not_target() {
+        let t = Temp::new();
+        let dir = t.0.join("dir");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("child"), b"x").unwrap();
+        assert!(remove_one(&dir).is_err());
+        assert!(dir.join("child").exists());
+        #[cfg(unix)]
+        {
+            let link = t.0.join("link");
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            remove_one(&link).unwrap();
+            assert!(dir.is_dir());
+        }
+        remove_one(&dir.join("child")).unwrap();
+        remove_one(&dir).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_and_move_to_other_folder_without_overwrite() {
+        let t = Temp::new();
+        let source = t.0.join("file with space.txt");
+        let destination = t.0.join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, b"source data").unwrap();
+        let copy = copy_file(
+            &source,
+            &destination,
+            source.file_name().unwrap(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"source data");
+        assert!(move_into(&source, &destination).is_err());
+        assert!(source.exists());
+        fs::remove_file(&copy).unwrap();
+        assert_eq!(move_into(&source, &destination).unwrap(), copy);
+        assert!(!source.exists());
+        assert_eq!(fs::read(&copy).unwrap(), b"source data");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_does_not_replace_symlink_and_copies_do_not_follow_symlinks() {
+        let t = Temp::new();
+        let source = t.0.join("original");
+        let dest = t.0.join("out");
+        fs::create_dir(&dest).unwrap();
+        fs::write(&source, b"original data").unwrap();
+        let target = t.0.join("target");
+        fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, dest.join("original")).unwrap();
+        assert!(move_into(&source, &dest).is_err());
+        assert!(copy_file(
+            &source,
+            &dest,
+            OsStr::new("original"),
+            &AtomicBool::new(false),
+            |_| {}
+        )
+        .is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        assert_eq!(fs::read(&source).unwrap(), b"original data");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_streams_larger_files_and_reports_progress() {
+        let t = Temp::new();
+        let source = t.0.join("large");
+        let mut file = fs::File::create(&source).unwrap();
+        let chunk = [0x4cu8; 64 * 1024];
+        for _ in 0..160 {
+            file.write_all(&chunk).unwrap();
+        }
+        drop(file);
+        let mut last = 0;
+        let output = duplicate_file(
+            &source,
+            OsStr::new("large copy"),
+            &AtomicBool::new(false),
+            |n| {
+                assert!(n > last);
+                last = n;
+            },
+        )
+        .unwrap();
+        assert_eq!(last, 160 * chunk.len() as u64);
+        assert_eq!(fs::metadata(output).unwrap().len(), last);
+    }
+}
