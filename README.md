@@ -129,17 +129,21 @@ Run the `zfm.exe` in the target subdirectory matching the Windows machine, using
 
 ## GitHub Actions and releases
 
-The **Build and release** workflow runs on pull requests, pushes to `main`, version-tag pushes and manual runs. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets, and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. GUI interaction is not tested by this workflow. The four build jobs have passed on GitHub; tag-triggered release publication has not yet been exercised.
+The **Build and release** workflow runs **only when manually requested**, and requires a version tag each time. Pushes, pull requests and tag pushes do not run it automatically. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. GUI interaction is not tested by this workflow.
 
-To publish a release, first merge the intended source into `main`, then create and push a version tag (for example `v0.1.0`) pointing to the intended commit. The tag must already exist on GitHub. After **all four builds and tests pass**, the workflow creates a GitHub Release for that tag if necessary and uploads these assets:
+To publish a release:
+
+1. Merge the intended source into `main`, then create and push a version tag (for example `v0.1.0`) pointing to the commit to release. The tag must already exist on GitHub; this workflow does not create tags. Use protected, immutable release tags when possible.
+2. In GitHub, open **Actions → Build and release → Run workflow**, select the branch containing the workflow (normally `main`), and enter that existing `v`-prefixed tag in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.1.0`.
+3. The workflow resolves the tag to a commit, builds that exact commit on all four targets and checks that the tag has not moved before publishing. After **all four builds and tests pass**, it creates a GitHub Release for the tag if necessary and uploads these assets:
 
 - `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
 - `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
 - `SHA256SUMS.txt` for verifying the four archives
 
-Each archive contains the executable, README and license. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Pull requests and manual runs do **not** publish releases. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
+Each archive contains the executable, README and license. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Each successful manual run publishes or updates the release; no release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
 
-These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+The four earlier build jobs passed on GitHub; this manual, tag-input release flow has not yet been exercised on GitHub. These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
 
 ## Development roadmap
 

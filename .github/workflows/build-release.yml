@@ -1,17 +1,38 @@
 name: Build and release
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
+    inputs:
+      vtag:
+        description: 'Existing version tag to build and release (for example v0.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  validate:
+    name: Validate version tag
+    runs-on: ubuntu-22.04
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Resolve existing tag to a commit
+        id: tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.vtag }}
+        run: |
+          set -euo pipefail
+          ./tests/release-tag.sh
+          commit=$(./scripts/resolve-release-tag.sh "$TAG")
+          echo "Building tag $TAG at $commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
   linux:
+    needs: validate
     name: Linux ${{ matrix.target }}
     runs-on: ubuntu-22.04
     strategy:
@@ -20,6 +41,8 @@ jobs:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Install native and 32-bit dependencies
         shell: bash
         run: |
@@ -66,6 +89,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: validate
     name: Windows ${{ matrix.target }}
     runs-on: windows-2022
     strategy:
@@ -74,6 +98,8 @@ jobs:
         target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Install Rust target
         shell: pwsh
         env:
@@ -114,15 +140,23 @@ jobs:
 
   release:
     name: Publish release assets
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [validate, linux, windows]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     concurrency:
-      group: release-${{ github.ref }}
+      group: release-${{ inputs.vtag }}
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify tag still points to the built commit
+        shell: bash
+        env:
+          TAG: ${{ inputs.vtag }}
+          BUILT_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          ./scripts/resolve-release-tag.sh "$TAG" "$BUILT_COMMIT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: zfm-*
@@ -133,7 +167,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.vtag }}
         run: |
           set -euxo pipefail
           cd dist
