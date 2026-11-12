@@ -583,7 +583,11 @@ mod tests {
         }
     }
     fn fixtures(t: &Temp) -> bool {
-        if api().is_err() {
+        if let Err(error) = api() {
+            assert!(
+                std::env::var_os("ZFM_REQUIRE_ARCHIVE_TESTS").is_none(),
+                "libarchive is required for these tests: {error}"
+            );
             eprintln!("Skipping packed-archive integration tests: libarchive unavailable");
             return false;
         }
@@ -614,6 +618,10 @@ for suffix,mode in [('tar.gz','w:gz'),('tar.bz2','w:bz2'),('tar.xz','w:xz')]:
                 true
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                assert!(
+                    std::env::var_os("ZFM_REQUIRE_ARCHIVE_TESTS").is_none(),
+                    "python3 is required for these tests"
+                );
                 eprintln!("Skipping packed-archive tests: python3 unavailable");
                 false
             }

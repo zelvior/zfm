@@ -127,6 +127,20 @@ For Linux executables **as well**, install Windows Subsystem for Linux (WSL) and
 
 Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. The Windows GUI and Windows build script remain untested here; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
 
+## GitHub Actions and releases
+
+The **Build and release** workflow runs on pull requests, pushes to `main`, version-tag pushes and manual runs. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets, and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. GUI interaction is not tested by this workflow. The workflow itself has not yet been run on GitHub.
+
+To publish a release, first merge the intended source into `main`, then create and push a version tag (for example `v0.1.0`) pointing to the intended commit. The tag must already exist on GitHub. After **all four builds and tests pass**, the workflow creates a GitHub Release for that tag if necessary and uploads these assets:
+
+- `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
+- `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
+- `SHA256SUMS.txt` for verifying the four archives
+
+Each archive contains the executable, README and license. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Pull requests and manual runs do **not** publish releases. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
+
+These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+
 ## Development roadmap
 
 The foundation and added actions need interactive GTK testing and compatibility verification. Recursive file operations, properties, recursive search, bookmarks, recent files, multiple selection, drag-and-drop, alternative views and advanced features are **not implemented**. Delete alone moves to trash when the file list has focus; it never silently performs permanent deletion. Future phases should implement and test core operations before adding advanced tools, and profile real workloads before making performance claims.
