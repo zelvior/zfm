@@ -351,7 +351,7 @@ fn relaunch_from_temp(exe: &Path, dir: &Path) -> Option<()> {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("zfm-uninstall-") && name.ends_with(".exe") {
+            if name.starts_with("zfm-uninstall") && name.ends_with(".exe") {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -390,7 +390,7 @@ fn remove_original_uninstaller(dir: &Path) {
 
 fn relocated_copy(exe: &Path) -> bool {
     exe.file_name()
-        .map(|name| name.to_string_lossy().starts_with("zfm-uninstall-"))
+        .map(|name| name.to_string_lossy().starts_with("zfm-uninstall"))
         .unwrap_or(false)
 }
 
