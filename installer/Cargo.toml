@@ -1,0 +1,12 @@
+[package]
+name = "zfm-installer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "ZFM setup and uninstaller"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "zfm-setup"
+path = "src/main.rs"

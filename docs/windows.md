@@ -1,6 +1,6 @@
 # Windows development notes
 
-The application has an experimental native Win32 browser with navigation, tabs, filename filtering, hidden-file toggle, file/folder creation, rename and confirmed permanent deletion of files or empty folders. Enter a single name in the New name field for creation or rename; operations run in a worker, do not intentionally replace existing destinations, and permanent deletion has no trash fallback. Clipboard, copying, moving, trash, archives, converter UI and many advanced features are still absent. Windows MSVC 32-bit and 64-bit builds, core tests and GUI startup smoke tests passed on GitHub's Windows Server 2022 runners for v0.0.2. The newer interface and installer remain unverified on Windows. These commands require a suitable toolchain and do not establish compatibility.
+The application has an experimental native Win32 browser painted in the same black-and-white palette as the Linux interface (white surfaces, near-black ink, solid black primary buttons and a solid black list selection) with navigation, tabs, filename filtering, hidden-file toggle, file/folder creation, rename and confirmed permanent deletion of files or empty folders. Enter a single name in the New name field for creation or rename; operations run in a worker, do not intentionally replace existing destinations, and permanent deletion has no trash fallback. Clipboard, copying, moving, trash, archives, converter UI and many advanced features are still absent. Windows MSVC 32-bit and 64-bit builds, core tests and GUI startup smoke tests passed on GitHub's Windows Server 2022 runners for v0.0.2. The black-and-white interface and the rewritten installer remain unverified on Windows. These commands require a suitable toolchain and do not establish compatibility.
 
 ## Automated builds
 
@@ -31,4 +31,21 @@ The old v0.0.1 release used Rust stable targeting Windows 10+. The revised relea
 
 ## Installer
 
-The workflow can build per-user NSIS setup executables for each architecture. They add a Start Menu shortcut and an uninstall entry; they install only into the selected folder and do not delete unrelated files during uninstall. The setup downloads no external runtime. Its build and install/uninstall smoke tests have not yet run on GitHub or Windows 7. The existing v0.0.2 release has portable binaries only.
+ZFM ships its own installer instead of using NSIS or another third-party framework. It lives in `installer/` (a separate `zfm-installer` package in the workspace) and is plain Rust with direct Win32 calls, like the application itself.
+
+- The setup executable embeds the release `zfm.exe`, `zfm.ico`, the license and the README at build time, so it needs no network access and no extra archive.
+- The wizard uses the ZFM black-and-white interface and offers welcome, folder, license, progress and finish pages. `/S` installs silently and `/D=<folder>` chooses the folder.
+- Setup installs for the current user in `%LOCALAPPDATA%\Programs\ZFM` by default, writes the Start Menu shortcuts and the Programs and Features entry under `HKCU`, and copies itself to `Uninstall.exe` next to the application.
+- Uninstall removes exactly the files setup created. Other files in the folder are kept, the folder itself is removed only when empty, and the running uninstaller is moved to `%TEMP%` (also scheduled for removal at the next restart, which may require elevation) so the folder can be removed.
+- Setup refuses to replace unrelated files: reinstalling into the recorded folder upgrades in place, while any other folder that already contains a managed file is rejected.
+
+Build it after the application for the same architecture:
+
+```powershell
+cargo build --release --locked --target x86_64-pc-windows-msvc
+$env:ZFM_APP_BINARY = (Resolve-Path "target/x86_64-pc-windows-msvc/release/zfm.exe").Path
+$env:ZFM_VERSION = "v0.0.3"
+cargo build --release --locked --target x86_64-pc-windows-msvc -p zfm-installer
+```
+
+`ZFM_APP_BINARY` is required at build time; without it the package builds a placeholder payload so `cargo test -p zfm-installer` still runs. The installer unit tests (`cargo test -p zfm-installer`) cover option parsing, folder selection and the file install/remove rules on any host; Windows CI also compiles the Win32 wizard and runs the install/uninstall smoke test in `tests/installer-windows.ps1`. That smoke test has not yet run on GitHub or on Windows 7, and the wizard has not been exercised interactively.

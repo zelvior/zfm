@@ -67,24 +67,21 @@ jobs:
         run: |
           bash -n scripts/build-linux.sh scripts/ci-legacy-linux.sh scripts/package-deb.sh tests/build-script.sh tests/gui-smoke-linux.sh tests/package-deb.sh
           ./tests/build-script.sh
-      - name: Build and package
+      - name: Test the setup program logic
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --locked -p zfm-installer
+      - name: Package the installer
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euxo pipefail
           name="zfm-$TARGET"
-          mkdir -p "package/$name" dist
-          cp "build-output/$TARGET/zfm" README.md LICENSE "package/$name/"
-          tar -czf "dist/$name.tar.gz" -C package "$name"
-          cp "build-output/$TARGET/zfm" "dist/$name"
+          mkdir -p dist
           cp "build-output/$TARGET/zfm.deb" "dist/$name.deb"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: |
-            dist/zfm-${{ matrix.target }}.tar.gz
-            dist/zfm-${{ matrix.target }}.deb
-            dist/zfm-${{ matrix.target }}
+          path: dist/zfm-${{ matrix.target }}.deb
           if-no-files-found: error
 
   windows:
@@ -123,12 +120,9 @@ jobs:
         run: |
           cargo +1.77.2 test --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Install pinned NSIS compiler
-        shell: pwsh
-        run: |
-          choco install nsis --version=3.10.0 -y --no-progress
+          cargo +1.77.2 test --locked --target $env:TARGET -p zfm-installer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build and package
+      - name: Build and package the installer
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
@@ -139,25 +133,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $name = "zfm-$env:TARGET"
-          New-Item -ItemType Directory -Path "package/$name", dist -Force | Out-Null
-          Copy-Item "target/$env:TARGET/release/zfm.exe", README.md, LICENSE -Destination "package/$name/"
-          Compress-Archive -Path "package/$name" -DestinationPath "dist/$name.zip"
-          Copy-Item "target/$env:TARGET/release/zfm.exe" -Destination "dist/$name.exe"
-          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
-          if (-not (Test-Path -LiteralPath $nsis)) { throw "NSIS compiler not found: $nsis" }
-          $arch = if ($env:TARGET.StartsWith('i686')) { 'x86' } else { 'x64' }
-          $binary = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
-          $installer = Join-Path $PWD "dist/$name-setup.exe"
-          & $nsis /NOCD /WX "/DAPP_BINARY=$binary" "/DOUTFILE=$installer" "/DVERSION=$env:TAG" "/DARCH=$arch" packaging/windows-installer.nsi
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          # The setup program embeds the release executable at build time.
+          $env:ZFM_APP_BINARY = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
+          $env:ZFM_VERSION = $env:TAG
+          cargo +1.77.2 build --release --locked --target $env:TARGET -p zfm-installer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = Join-Path $PWD "dist/$name-setup.exe"
+          Copy-Item "target/$env:TARGET/release/zfm-setup.exe" -Destination $installer
           & ./tests/installer-windows.ps1 -Installer $installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: |
-            dist/zfm-${{ matrix.target }}.zip
-            dist/zfm-${{ matrix.target }}.exe
-            dist/zfm-${{ matrix.target }}-setup.exe
+          path: dist/zfm-${{ matrix.target }}-setup.exe
           if-no-files-found: error
 
   release:
@@ -189,18 +177,10 @@ jobs:
           set -euxo pipefail
           cd dist
           assets=(
-            zfm-x86_64-unknown-linux-gnu.tar.gz
-            zfm-i686-unknown-linux-gnu.tar.gz
             zfm-x86_64-unknown-linux-gnu.deb
             zfm-i686-unknown-linux-gnu.deb
-            zfm-x86_64-pc-windows-msvc.zip
-            zfm-i686-pc-windows-msvc.zip
             zfm-x86_64-pc-windows-msvc-setup.exe
             zfm-i686-pc-windows-msvc-setup.exe
-            zfm-x86_64-unknown-linux-gnu
-            zfm-i686-unknown-linux-gnu
-            zfm-x86_64-pc-windows-msvc.exe
-            zfm-i686-pc-windows-msvc.exe
           )
           for asset in "${assets[@]}"; do test -s "$asset"; done
           sha256sum "${assets[@]}" > SHA256SUMS.txt
@@ -209,7 +189,7 @@ jobs:
             prerelease=()
             if [[ "$TAG" == *-* ]]; then prerelease+=(--prerelease); fi
             gh release create "$TAG" --verify-tag --title "$TAG" "${prerelease[@]}" \
-              --notes 'Automated builds targeting Ubuntu 18.04 / Mint 19 and Windows 7 SP1 or newer. Linux requires GTK 3 and libarchive. GUI startup is smoke-tested on hosted runners, not on the legacy operating systems; compatibility is not guaranteed. The Windows interface is incomplete. See the included README.'
+              --notes 'Installers only: run the Windows setup program for your architecture, or install the .deb on Linux. Automated builds target Ubuntu 18.04 / Mint 19 and Windows 7 SP1 or newer. Linux requires GTK 3 and libarchive. Both setup programs are built from this repository without a third-party installer framework, use the black-and-white ZFM interface, and install for the current user with an uninstaller. GUI startup is smoke-tested on hosted runners, not on the legacy operating systems; compatibility is not guaranteed. See the included README.'
           fi
           ../scripts/resolve-release-tag.sh "$TAG" "$BUILT_COMMIT"
           gh release upload "$TAG" "${assets[@]}" SHA256SUMS.txt --clobber

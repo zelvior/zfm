@@ -2,7 +2,7 @@
 
 The Linux frontend uses GTK 3's C ABI, dynamically loading `libgtk-3.so.0` and resolving the required symbols at startup. This allows core tests and builds without GTK development files, but a GTK 3 runtime and a usable display are required to run the GUI. Missing GTK or display produces a diagnostic and a nonzero exit. `xdg-open` is used to open files. There is no daemon.
 
-See the README for installation, build, cross-architecture and packaging commands. The tarball is not a statically linked binary; the target still needs compatible libc, GTK 3, desktop integration and their transitive dependencies. Build and test on the oldest supported system to avoid inadvertently requiring newer glibc symbols. No claim is made that a binary built on Debian 12 runs on Mint 19.
+See the README for installation, build, cross-architecture and packaging commands. Releases distribute an installable `.deb`, not a portable archive; the package is not statically linked and the target still needs compatible libc, GTK 3, desktop integration and their transitive dependencies. Build and test on the oldest supported system to avoid inadvertently requiring newer glibc symbols. No claim is made that a binary built on Debian 12 runs on Mint 19.
 
 The application creates a worker for each requested directory read. A generation counter discards stale results and stops iteration between entries, but cannot cancel a blocked kernel call. Rows are added 64 at a time to keep the main loop responsive; they are not virtualized, and reads, metadata and sorting can still be costly for large or remote directories. No profiling, GUI responsiveness, network drive or external drive testing has been performed yet.
 
@@ -16,4 +16,4 @@ For automated rustup installation and native/cross-builds, use `./scripts/build-
 
 ## Debian package
 
-The release workflow builds an architecture-specific `.deb` from its Ubuntu 18.04-based executable. The package provides an applications-menu entry, declares the runtime dependencies and is removable through the system package manager. Its install, launch and removal are tested inside the build container before publication. These new packages have not yet run through the workflow or been tested on Mint 19 itself; v0.0.2 only contains portable downloads.
+The release workflow builds an architecture-specific `.deb` from its Ubuntu 18.04-based executable. The package provides an applications-menu entry, declares the runtime dependencies and is removable through the system package manager. Its install, launch and removal are tested inside the build container before publication. These packages have not yet run through the workflow or been tested on Mint 19 itself; v0.0.2 only contains portable downloads, which are no longer produced.

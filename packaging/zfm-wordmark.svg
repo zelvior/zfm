@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 128" width="440" height="128" role="img" aria-label="ZFM — Zelvior File Manager">
+  <title>ZFM — Zelvior File Manager</title>
+  <g>
+    <rect x="5" y="5" width="118" height="118" rx="26" fill="#ffffff" stroke="#0a0a0a" stroke-width="9"/>
+    <polygon points="30,33 98,33 98,51 62,77 98,77 98,95 30,95 30,77 66,51 30,51" fill="#0a0a0a"/>
+  </g>
+  <g fill="#0a0a0a" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="150" y="78" font-size="66" font-weight="700" letter-spacing="3">ZFM</text>
+    <text x="153" y="105" font-size="16" font-weight="600" letter-spacing="6.5">FILE MANAGER</text>
+  </g>
+</svg>

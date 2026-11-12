@@ -1,3 +1,6 @@
+[workspace]
+members = ["installer"]
+
 [package]
 name = "zfm"
 version = "0.1.0"
