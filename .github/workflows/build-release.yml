@@ -7,6 +7,11 @@ on:
         description: 'Version tag to create or release (for example v0.0.1)'
         required: true
         type: string
+      publish:
+        description: 'Publish a release after all builds pass (uncheck for a test run)'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,46 +52,30 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate.outputs.commit }}
-      - name: Install native and 32-bit dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib libc6-dev-i386 libarchive13 libarchive13:i386 libglib2.0-0 libglib2.0-0:i386 python3
-      - name: Install Rust target
+      - name: Build, test, and smoke-test on the Mint 19 base
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euxo pipefail
-          rustup toolchain install stable --profile minimal
-          rustup target add --toolchain stable "$TARGET"
-          rustup component add --toolchain stable rustfmt
-          rustc +stable --version
-          cargo +stable --version
-      - name: Check formatting and build script
+          # Build with Ubuntu 18.04's glibc 2.27 rather than the runner's 2.35.
+          docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:18.04 \
+            bash scripts/ci-legacy-linux.sh "$TARGET"
+      - name: Check shell scripts
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          cargo +stable fmt --all -- --check
-          bash -n scripts/build-linux.sh tests/build-script.sh
+          bash -n scripts/build-linux.sh scripts/ci-legacy-linux.sh tests/build-script.sh tests/gui-smoke-linux.sh
           ./tests/build-script.sh
-      - name: Test
-        env:
-          TARGET: ${{ matrix.target }}
-          ZFM_REQUIRE_ARCHIVE_TESTS: '1'
-        run: cargo +stable test --locked --target "$TARGET"
       - name: Build and package
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euxo pipefail
-          cargo +stable build --release --locked --target "$TARGET"
           name="zfm-$TARGET"
           mkdir -p "package/$name" dist
-          cp "target/$TARGET/release/zfm" README.md LICENSE "package/$name/"
+          cp "build-output/$TARGET/zfm" README.md LICENSE "package/$name/"
           tar -czf "dist/$name.tar.gz" -C package "$name"
-          cp "target/$TARGET/release/zfm" "dist/$name"
+          cp "build-output/$TARGET/zfm" "dist/$name"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
@@ -99,6 +88,10 @@ jobs:
     needs: validate
     name: Windows ${{ matrix.target }}
     runs-on: windows-2022
+    env:
+      # Rust 1.78 raised the Windows minimum to Windows 10. Static CRT avoids
+      # requiring a separate VC++ redistributable on Windows 7.
+      RUSTFLAGS: -C target-feature=+crt-static
     strategy:
       fail-fast: false
       matrix:
@@ -112,20 +105,20 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install 1.77.2 --profile minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup target add --toolchain stable $env:TARGET
+          rustup target add --toolchain 1.77.2 $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustc +stable --version
+          rustc +1.77.2 --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +stable --version
+          cargo +1.77.2 --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo +stable test --locked --target $env:TARGET
+          cargo +1.77.2 test --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and package
         shell: pwsh
@@ -133,8 +126,9 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo +stable build --release --locked --target $env:TARGET
+          cargo +1.77.2 build --release --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $name = "zfm-$env:TARGET"
           New-Item -ItemType Directory -Path "package/$name", dist -Force | Out-Null
           Copy-Item "target/$env:TARGET/release/zfm.exe", README.md, LICENSE -Destination "package/$name/"
@@ -150,6 +144,7 @@ jobs:
 
   release:
     name: Publish release assets
+    if: inputs.publish
     needs: [validate, linux, windows]
     runs-on: ubuntu-22.04
     permissions:
@@ -192,7 +187,7 @@ jobs:
             prerelease=()
             if [[ "$TAG" == *-* ]]; then prerelease+=(--prerelease); fi
             gh release create "$TAG" --verify-tag --title "$TAG" "${prerelease[@]}" \
-              --notes 'Automated builds. Linux requires compatible system GTK 3, libc and libarchive. The Windows browser is experimental and incomplete. Old-platform compatibility has not been verified; see the included README.'
+              --notes 'Automated builds targeting Ubuntu 18.04 / Mint 19 and Windows 7 SP1 or newer. Linux requires GTK 3 and libarchive. GUI startup is smoke-tested on hosted runners, not on the legacy operating systems; compatibility is not guaranteed. The Windows interface is incomplete. See the included README.'
           fi
           ../scripts/resolve-release-tag.sh "$TAG" "$BUILT_COMMIT"
           gh release upload "$TAG" "${assets[@]}" SHA256SUMS.txt --clobber

@@ -403,6 +403,12 @@ unsafe fn start_operation(hwnd: H, app: *mut App, operation: Operation) {
         }
     });
 }
+/// Surface initialization errors even when launched from Explorer without a console.
+pub fn show_startup_error(message: &str) {
+    unsafe {
+        show_error(ptr::null_mut(), &format!("ZFM could not start: {message}"));
+    }
+}
 unsafe fn show_error(hwnd: H, message: &str) {
     MessageBoxW(hwnd, text(message).as_ptr(), text("ZFM").as_ptr(), 0x10);
 }

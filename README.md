@@ -44,6 +44,10 @@ TAR and ZIP creation are limited to one regular file with a safe UTF-8 basename 
 
 A Rust build produced on a newer distribution can require a newer glibc than Mint 19 provides. Build on the oldest supported distribution, or in a compatible build environment, and test the actual artifact on the target. Architecture support is not guaranteed merely by installing a Rust target.
 
+## Troubleshooting startup on older systems
+
+The old `v0.0.1` release was built on Ubuntu 22.04 with current Rust. It can fail before a window appears on Linux Mint 19 (glibc 2.27) or Windows 7. Download a newer release **after** the updated workflow has successfully built and published one; existing release files are not automatically replaced. For 32-bit systems use the `i686` assets, not `x86_64`. Windows needs Windows 7 SP1 or newer, although this has not yet been tested on a Windows 7 machine. On Linux, extract the `.tar.gz` and run its `zfm` file from a terminal; for a separately downloaded executable, first run `chmod +x` on it. Linux requires a graphical session and GTK 3; archive support additionally needs libarchive. A terminal will show startup errors if the desktop cannot display them.
+
 ## Linux build and run
 
 ### Automated builds (Linux host)
@@ -125,7 +129,7 @@ Use `-NativeOnly` for the host Windows architecture, `-Toolchain 1.85.0` (for ex
 
 For Linux executables **as well**, install Windows Subsystem for Linux (WSL) and a Linux distribution, set up Linux C compilers and multilib in that distribution, then run `.\scripts\build-windows.cmd -IncludeLinux`. It calls the Linux script in WSL with `--linux-only`: that script installs/updates its own Linux Rust stable, runs Linux tests, and builds 32-bit and 64-bit Linux binaries in a separate `artifacts/build-*/` directory. `-SkipTests` applies to both; `-Toolchain` applies to Windows only. On Debian/Ubuntu x86_64 in WSL, you can first run `./scripts/build-linux.sh --linux-only --install-deps` to install Linux prerequisites. WSL is not available on Windows 7. Builds on newer Linux may not run on older glibc systems.
 
-Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. The Windows GUI and Windows build script remain untested interactively; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
+Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. For Windows 7, current Rust stable binaries target Windows 10 or later; to build for Windows 7 try `-Toolchain 1.77.2` with compatible Visual C++ tools. This older-platform setup is not yet verified here. The Windows GUI and Windows build script remain untested interactively; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
 
 ## GitHub Actions and releases
 
@@ -135,7 +139,7 @@ To publish a release:
 
 1. Merge the intended source into `main` (or choose another branch containing the workflow and the intended source).
 2. In GitHub, open **Actions → Build and release → Run workflow**, select that branch, and enter a `v`-prefixed version such as `v0.0.1` in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.0.1`.
-3. If the tag already exists, the workflow builds its commit. If it does not exist, it builds the selected branch's commit from the time the run was started. After **all four builds and tests pass**, it creates a missing tag at that exact commit, then creates or updates the GitHub Release and uploads these assets:
+3. Check **publish** if you want a release; leave it unchecked to test only. If the tag already exists, the workflow builds its commit. If it does not exist, it builds the selected branch's commit from the time the run was started. After **all four builds and tests pass**, it creates a missing tag at that exact commit, then creates or updates the GitHub Release and uploads these assets:
 
 - `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
 - `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
@@ -145,9 +149,9 @@ To publish a release:
 
 If a tag existed when the run began but points to a different commit or disappears, publication fails. If a new tag is created by someone else while the build runs, the run fails rather than replacing it; check the tag and retry. A tag created after successful builds may remain if a later release upload fails. Use protected, immutable release tags when possible.
 
-Each archive contains the executable, README and license. Raw executables are also provided for convenience; after downloading a Linux executable, run `chmod +x` on it before starting it. Release assets from before this workflow update contain the executables inside the archives but not as separate downloads. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Each successful manual run publishes or updates the release; no release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
+Each archive contains the executable, README and license. Raw executables are also provided for convenience; after downloading a Linux executable, run `chmod +x` on it before starting it. Release assets from before this workflow update contain the executables inside the archives but not as separate downloads. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Manual runs default to test-only and still require a tag input; check **publish** to create or update the release after the tests pass. Test-only runs do not create tags or releases. No release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
 
-The four earlier build jobs passed on GitHub; the updated new-tag creation flow has not yet been exercised on GitHub. These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+The release workflow uses Rust 1.77.2, builds Linux inside Ubuntu 18.04 (glibc 2.27), and statically links the Windows C runtime to target older systems. It checks that GUI windows appear on hosted runners before publishing. The revised legacy builds and GUI smoke tests have not yet been exercised on GitHub or on actual Mint 19 and Windows 7 systems. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
 
 ## Development roadmap
 
