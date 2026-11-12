@@ -1,6 +1,6 @@
 # Windows development notes
 
-The application has an experimental native Win32 browser with navigation, tabs, filename filtering, hidden-file toggle, file/folder creation, rename and confirmed permanent deletion of files or empty folders. Enter a single name in the New name field for creation or rename; operations run in a worker, do not intentionally replace existing destinations, and permanent deletion has no trash fallback. Clipboard, copying, moving, trash, archives, converter UI and many advanced features are still absent. Windows MSVC 32-bit and 64-bit builds and core tests passed on GitHub's Windows Server 2022 runners before these latest changes; these changes have only been GNU type-checked and the GUI has not been tested interactively. These commands require a suitable toolchain and do not establish compatibility.
+The application has an experimental native Win32 browser with navigation, tabs, filename filtering, hidden-file toggle, file/folder creation, rename and confirmed permanent deletion of files or empty folders. Enter a single name in the New name field for creation or rename; operations run in a worker, do not intentionally replace existing destinations, and permanent deletion has no trash fallback. Clipboard, copying, moving, trash, archives, converter UI and many advanced features are still absent. Windows MSVC 32-bit and 64-bit builds, core tests and GUI startup smoke tests passed on GitHub's Windows Server 2022 runners for v0.0.2. The newer interface and installer remain unverified on Windows. These commands require a suitable toolchain and do not establish compatibility.
 
 ## Automated builds
 
@@ -25,6 +25,10 @@ cargo build --release --locked --target x86_64-pc-windows-gnu
 cargo build --release --locked --target i686-pc-windows-gnu
 ```
 
-Use the appropriate MinGW toolchain for both architectures and configure Cargo linkers if they are not automatically found. The native Windows adapter must be linked and tested on each supported OS and architecture; modern Rust/toolchains may not support Windows 7. Do not distribute this untested browser as a Windows release. A future release should include the executable, license, and any required runtime libraries, so end users do not need Rust.
+Use the appropriate MinGW toolchain for both architectures and configure Cargo linkers if they are not automatically found. The native Windows adapter must be linked and tested on each supported OS and architecture; modern Rust/toolchains may not support Windows 7. The Windows interface remains incomplete; see README for the exact limitations.
 
 The old v0.0.1 release used Rust stable targeting Windows 10+. The revised release workflow pins Rust 1.77.2 and uses the static C runtime to target Windows 7 SP1+, but neither the revised artifact nor the GUI has yet been verified on an actual Windows 7 system.
+
+## Installer
+
+The workflow can build per-user NSIS setup executables for each architecture. They add a Start Menu shortcut and an uninstall entry; they install only into the selected folder and do not delete unrelated files during uninstall. The setup downloads no external runtime. Its build and install/uninstall smoke tests have not yet run on GitHub or Windows 7. The existing v0.0.2 release has portable binaries only.

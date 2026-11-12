@@ -1,11 +1,18 @@
 #Requires -Version 5.1
 param([Parameter(Mandatory=$true)][string]$Executable)
 $ErrorActionPreference = 'Stop'
+if (-not ('ZfmSmoke' -as [type])) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class ZfmSmoke {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int left, top, right, bottom; }
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern int GetWindowLongW(IntPtr window, int index);
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern IntPtr GetDlgItem(IntPtr parent, int id);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
@@ -18,6 +25,7 @@ public static class ZfmSmoke {
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
 }
 '@
+}
 $work = Join-Path ([IO.Path]::GetTempPath()) ('zfm-gui-smoke-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 $process = $null
@@ -67,8 +75,19 @@ try {
         }
     }
     if ([ZfmSmoke]::GetDlgItem($window, 32767) -ne [IntPtr]::Zero) { throw 'Unexpected control with unused ID.' }
-    # Verify that asynchronous directory enumeration actually populates the list.
+    $button = [ZfmSmoke]::GetDlgItem($window, 101)
+    if (([ZfmSmoke]::GetWindowLongW($button, -16) -band 0x0f) -ne 0x0b) { throw 'Navigation button is not using the redesigned style.' }
     $list = [ZfmSmoke]::GetDlgItem($window, 107)
+    $nameField = [ZfmSmoke]::GetDlgItem($window, 116)
+    $listRect = New-Object 'ZfmSmoke+Rect'
+    $nameRect = New-Object 'ZfmSmoke+Rect'
+    if (-not [ZfmSmoke]::GetWindowRect($list, [ref]$listRect) -or -not [ZfmSmoke]::GetWindowRect($nameField, [ref]$nameRect)) {
+        throw 'Could not inspect the layout.'
+    }
+    if ($listRect.top -le $nameRect.bottom -or ($listRect.bottom - $listRect.top) -lt 100) {
+        throw 'File list overlaps the toolbar or has insufficient height.'
+    }
+    # Verify that asynchronous directory enumeration actually populates the list.
     $populated = $false
     for ($i = 0; $i -lt 100; $i++) {
         $count = [UIntPtr]::Zero

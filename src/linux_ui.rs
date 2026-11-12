@@ -611,7 +611,7 @@ pub fn run() -> Result<(), String> {
             return Err("could not connect to a graphical display".into());
         }
         let css = (api().gtk_css_provider_new)();
-        let style = c("* { background-image: none; } window, box, scrolledwindow, list, row { background-color: #080808; color: #f3f3f3; } button, entry { background: #161616; color: #fff; border: 1px solid #444; border-radius: 0; padding: 7px; box-shadow: none; } button:hover { background: #333; } row:selected, row:selected box, row:selected label { background: #eee; color: #080808; } label { color: inherit; } ");
+        let style = c("* { background-image: none; } window, box, scrolledwindow { background-color: #f2f5f8; color: #202d3c; } list, row, row box { background-color: #ffffff; color: #202d3c; } button { background: #e4ebf3; color: #202d3c; border: 1px solid #cdd8e4; border-radius: 4px; padding: 6px; box-shadow: none; } button:hover { background: #d7e4f2; } button:active { background: #c6d9ec; } entry { background: #ffffff; color: #202d3c; border: 1px solid #cdd8e4; border-radius: 4px; padding: 6px; box-shadow: none; } row:selected, row:selected box, row:selected label { background-color: #3265b8; color: #ffffff; } label { color: inherit; } ");
         (api().gtk_css_provider_load_from_data)(css, style.as_ptr(), -1, ptr::null_mut());
         (api().gtk_style_context_add_provider_for_screen)(
             (api().gdk_screen_get_default)(),
