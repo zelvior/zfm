@@ -1,0 +1,154 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install native and 32-bit dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386 libarchive13 libarchive13:i386 libglib2.0-0 libglib2.0-0:i386 python3
+      - name: Install Rust target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euxo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup target add --toolchain stable "$TARGET"
+          rustup component add --toolchain stable rustfmt
+          rustc +stable --version
+          cargo +stable --version
+      - name: Check formatting and build script
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo +stable fmt --all -- --check
+          bash -n scripts/build-linux.sh tests/build-script.sh
+          ./tests/build-script.sh
+      - name: Test
+        env:
+          TARGET: ${{ matrix.target }}
+          ZFM_REQUIRE_ARCHIVE_TESTS: '1'
+        run: cargo +stable test --locked --target "$TARGET"
+      - name: Build and package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euxo pipefail
+          cargo +stable build --release --locked --target "$TARGET"
+          name="zfm-$TARGET"
+          mkdir -p "package/$name" dist
+          cp "target/$TARGET/release/zfm" README.md LICENSE "package/$name/"
+          tar -czf "dist/$name.tar.gz" -C package "$name"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zfm-${{ matrix.target }}
+          path: dist/zfm-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.target }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust target
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add --toolchain stable $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc +stable --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo +stable test --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and package
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +stable build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $name = "zfm-$env:TARGET"
+          New-Item -ItemType Directory -Path "package/$name", dist -Force | Out-Null
+          Copy-Item "target/$env:TARGET/release/zfm.exe", README.md, LICENSE -Destination "package/$name/"
+          Compress-Archive -Path "package/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zfm-${{ matrix.target }}
+          path: dist/zfm-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: zfm-*
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+          cd dist
+          assets=(
+            zfm-x86_64-unknown-linux-gnu.tar.gz
+            zfm-i686-unknown-linux-gnu.tar.gz
+            zfm-x86_64-pc-windows-msvc.zip
+            zfm-i686-pc-windows-msvc.zip
+          )
+          for asset in "${assets[@]}"; do test -s "$asset"; done
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            prerelease=()
+            if [[ "$TAG" == *-* ]]; then prerelease+=(--prerelease); fi
+            gh release create "$TAG" --verify-tag --title "$TAG" "${prerelease[@]}" \
+              --notes 'Automated builds. Linux requires compatible system GTK 3, libc and libarchive. The Windows browser is experimental and incomplete. Old-platform compatibility has not been verified; see the included README.'
+          fi
+          gh release upload "$TAG" "${assets[@]}" SHA256SUMS.txt --clobber

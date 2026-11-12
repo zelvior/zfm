@@ -13,7 +13,7 @@ A small native file manager written in Rust. **This repository currently contain
 - The archive manager browses and extracts TAR, ZIP, TAR.GZ/TGZ, TAR.BZ2 and TAR.XZ; ZIP and compressed TAR require the system libarchive runtime. It tests ZIP/compressed archives and creates a TAR or ZIP from one regular file. Operations run in the background with cancellation and no-overwrite behavior. See the limitations below before use.
 - The offline converter supports CSV → JSON and a restricted JSON → CSV mode, on a worker with progress and cancellation. Select a CSV or JSON file first to pre-fill paths and direction.
 - Linux tabs retain independent navigation histories; use Ctrl+T, Ctrl+W, or the folder context menu. File clipboard actions support one local item via GNOME copied-files and URI-list targets (Ctrl+C/X/V with the list focused). Copy is regular-file only; cut uses the same same-filesystem move operation as Move to.
-- An initial native Win32 browser implements navigation, directory listing and opening files, without Linux feature parity. It has not yet been linked or run.
+- An initial native Win32 browser implements navigation, directory listing and opening files, without Linux feature parity. MSVC builds and core tests have passed in CI; the GUI itself has not been tested interactively.
 - No third-party Rust crates. GTK 3 is loaded at runtime through a small platform adapter; filesystem and navigation code are separate.
 
 Sidebar locations currently use conventional subdirectories of `$HOME`, **not** customized XDG user directories. The file list supports a single selection. The list is batched but not virtualized: very large directories still consume memory for all entries and widgets. Directory sorting happens after enumeration; a slow network filesystem call cannot be interrupted until it returns. Displayed non-UTF-8 filenames are lossily decoded, although double-clicking uses the original path. Entering a non-UTF-8 path in the address bar is not supported. File opening depends on `xdg-open` and an installed application for the file type.
@@ -38,9 +38,9 @@ TAR and ZIP creation are limited to one regular file with a safe UTF-8 basename 
 
 | Target | Status |
 | --- | --- |
-| Linux x86_64 | Core tests and release build passed on Debian 12 with Rust 1.85. GTK window **not tested** in the available environment (no GTK runtime or display). |
+| Linux x86 / x86_64 | Core tests and release builds passed on GitHub's Ubuntu 22.04 runners for both targets; x86_64 also passed locally on Debian 12 with Rust 1.85. GTK window **not tested interactively**. |
 | Linux Mint 19 / Ubuntu 18.04, x86 or x86_64 | Intended target, **not verified**. GTK 3.22+ and Rust 1.70 are the baseline chosen for this foundation; actual package, toolchain and GUI compatibility still require testing on each system. |
-| Windows x86 / x86_64 | Initial native browser only; GNU targets type-checked with Rust 1.85 but neither linked nor run. File operations, tabs, clipboard, archives and converter UI are not implemented on Windows. Windows 7 support is not claimed. |
+| Windows x86 / x86_64 | MSVC core tests and release builds passed on GitHub's Windows Server 2022 runners; the native browser has not been tested interactively. GNU targets were type-checked only. File operations, tabs, clipboard, archives and converter UI are not implemented on Windows. Windows 7 support is not claimed. |
 
 A Rust build produced on a newer distribution can require a newer glibc than Mint 19 provides. Build on the oldest supported distribution, or in a compatible build environment, and test the actual artifact on the target. Architecture support is not guaranteed merely by installing a Rust target.
 
@@ -101,7 +101,7 @@ rustup target add i686-unknown-linux-gnu
 cargo build --release --locked --target i686-unknown-linux-gnu
 ```
 
-For example, on a 64-bit Debian-family host, `gcc-multilib` and `libc6-dev-i386` may supply the cross-linker and C library. The target machine also needs the **32-bit** GTK 3 runtime and its dependencies. Neither 32-bit setup nor Mint 19 has been tested here.
+For example, on a 64-bit Debian-family host, `gcc-multilib` and `libc6-dev-i386` may supply the cross-linker and C library. The target machine also needs the **32-bit** GTK 3 runtime and its dependencies. The 32-bit build and core tests have passed on the GitHub Ubuntu runner, but Mint 19 and interactive 32-bit GUI use remain unverified.
 
 Create a simple tarball after a native release build:
 
@@ -125,7 +125,21 @@ Use `-NativeOnly` for the host Windows architecture, `-Toolchain 1.85.0` (for ex
 
 For Linux executables **as well**, install Windows Subsystem for Linux (WSL) and a Linux distribution, set up Linux C compilers and multilib in that distribution, then run `.\scripts\build-windows.cmd -IncludeLinux`. It calls the Linux script in WSL with `--linux-only`: that script installs/updates its own Linux Rust stable, runs Linux tests, and builds 32-bit and 64-bit Linux binaries in a separate `artifacts/build-*/` directory. `-SkipTests` applies to both; `-Toolchain` applies to Windows only. On Debian/Ubuntu x86_64 in WSL, you can first run `./scripts/build-linux.sh --linux-only --install-deps` to install Linux prerequisites. WSL is not available on Windows 7. Builds on newer Linux may not run on older glibc systems.
 
-Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. The Windows GUI and Windows build script remain untested here; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
+Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. The Windows GUI and Windows build script remain untested interactively; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
+
+## GitHub Actions and releases
+
+The **Build and release** workflow runs on pull requests, pushes to `main`, version-tag pushes and manual runs. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets, and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. GUI interaction is not tested by this workflow. The four build jobs have passed on GitHub; tag-triggered release publication has not yet been exercised.
+
+To publish a release, first merge the intended source into `main`, then create and push a version tag (for example `v0.1.0`) pointing to the intended commit. The tag must already exist on GitHub. After **all four builds and tests pass**, the workflow creates a GitHub Release for that tag if necessary and uploads these assets:
+
+- `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
+- `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
+- `SHA256SUMS.txt` for verifying the four archives
+
+Each archive contains the executable, README and license. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Pull requests and manual runs do **not** publish releases. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
+
+These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
 
 ## Development roadmap
 
