@@ -1,6 +1,6 @@
 # Windows development notes
 
-The application has an experimental native Win32 browser: directory listing, back/forward/up, address, refresh and opening files. It does not yet provide Linux feature parity (including operations, tabs, clipboard, archives or converter UI). The Windows GNU 32-bit and 64-bit targets have been type-checked only; neither executable has been linked or run. These commands require a suitable toolchain and do not establish compatibility.
+The application has an experimental native Win32 browser: directory listing, back/forward/up, address, refresh and opening files. It does not yet provide Linux feature parity (including operations, tabs, clipboard, archives or converter UI). The Windows GNU 32-bit and 64-bit targets have been type-checked only. Windows MSVC 32-bit and 64-bit release builds and core tests passed on GitHub's Windows Server 2022 runners; the GUI itself has not been tested interactively. These commands require a suitable toolchain and do not establish compatibility.
 
 ## Automated builds
 
