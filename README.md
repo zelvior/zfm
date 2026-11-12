@@ -133,17 +133,19 @@ The **Build and release** workflow runs **only when manually requested**, and re
 
 To publish a release:
 
-1. Merge the intended source into `main`, then create and push a version tag (for example `v0.1.0`) pointing to the commit to release. The tag must already exist on GitHub; this workflow does not create tags. Use protected, immutable release tags when possible.
-2. In GitHub, open **Actions → Build and release → Run workflow**, select the branch containing the workflow (normally `main`), and enter that existing `v`-prefixed tag in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.1.0`.
-3. The workflow resolves the tag to a commit, builds that exact commit on all four targets and checks that the tag has not moved before publishing. After **all four builds and tests pass**, it creates a GitHub Release for the tag if necessary and uploads these assets:
+1. Merge the intended source into `main` (or choose another branch containing the workflow and the intended source).
+2. In GitHub, open **Actions → Build and release → Run workflow**, select that branch, and enter a `v`-prefixed version such as `v0.0.1` in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.0.1`.
+3. If the tag already exists, the workflow builds its commit. If it does not exist, it builds the selected branch's commit from the time the run was started. After **all four builds and tests pass**, it creates a missing tag at that exact commit, then creates or updates the GitHub Release and uploads these assets:
 
 - `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
 - `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
 - `SHA256SUMS.txt` for verifying the four archives
 
+If a tag existed when the run began but points to a different commit or disappears, publication fails. If a new tag is created by someone else while the build runs, the run fails rather than replacing it; check the tag and retry. A tag created after successful builds may remain if a later release upload fails. Use protected, immutable release tags when possible.
+
 Each archive contains the executable, README and license. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Each successful manual run publishes or updates the release; no release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
 
-The four earlier build jobs passed on GitHub; this manual, tag-input release flow has not yet been exercised on GitHub. These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+The four earlier build jobs passed on GitHub; the updated new-tag creation flow has not yet been exercised on GitHub. These builds use current stable Rust and hosted runners. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
 
 ## Development roadmap
 
