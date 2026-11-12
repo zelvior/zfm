@@ -122,20 +122,10 @@ pub fn read_filtered(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
-    use std::time::{SystemTime, UNIX_EPOCH};
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "zfm-test-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&p).unwrap();
-            Self(p)
+            Self(crate::test_support::scratch_dir("zfm-test"))
         }
     }
     impl Drop for Temp {

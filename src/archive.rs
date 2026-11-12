@@ -2,7 +2,13 @@
 //! Tar does not carry a checksum for file contents; header checksums are checked.
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom};
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,6 +27,8 @@ pub struct Entry {
     pub path: String,
     pub size: u64,
     pub kind: Kind,
+    /// Byte offset of the entry data; used by the Linux extractor only.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     offset: u64,
 }
 
@@ -376,20 +384,10 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "zfm-tar-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
+            Self(crate::test_support::scratch_dir("zfm-tar"))
         }
     }
     impl Drop for Temp {
@@ -461,20 +459,20 @@ mod tests {
             ("device", b'3'),
             ("pax", b'x'),
         ] {
+            let result = inspect(
+                &mut file_for(&t, &tar(&[(name, kind, b"")])),
+                &AtomicBool::new(false),
+            );
             assert!(
-                inspect(
-                    &mut file_for(&t, &tar(&[(name, kind, b"")])),
-                    &AtomicBool::new(false)
-                )
-                .is_err(),
-                "{name}"
+                result.is_err(),
+                "the header {name:?} with kind {kind} was accepted: {result:?}"
             );
         }
-        assert!(inspect(
+        let duplicate = inspect(
             &mut file_for(&t, &tar(&[("a", b'0', b""), ("./a", b'0', b"")])),
-            &AtomicBool::new(false)
-        )
-        .is_err());
+            &AtomicBool::new(false),
+        );
+        assert!(duplicate.is_err(), "duplicates were accepted: {duplicate:?}");
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -736,18 +734,9 @@ pub fn create_single_file<F: FnMut(u64)>(
 mod creation_tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
     fn creates_a_real_tar_without_overwriting_and_cleans_up_on_cancel() {
-        let dir = std::env::temp_dir().join(format!(
-            "zfm-create-tar-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&dir).unwrap();
+        let dir = crate::test_support::scratch_dir("zfm-create-tar");
         let input = dir.join("data.txt");
         let out = dir.join("archive.tar");
         let dest = dir.join("extract");

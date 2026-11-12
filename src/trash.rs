@@ -111,7 +111,6 @@ pub fn trash(_: &std::path::Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
     fn moves_files_and_symlinks_to_isolated_trash() {
         if std::env::var_os("ZFM_TRASH_TEST_DIR").is_some() {
@@ -130,15 +129,7 @@ mod tests {
             assert!(trash(&root.join("not-found")).is_err());
             return;
         }
-        let root = std::env::temp_dir().join(format!(
-            "zfm-trash-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::test_support::scratch_dir("zfm-trash");
         let data = root.join("data");
         fs::create_dir(&data).unwrap();
         let result = std::process::Command::new(std::env::current_exe().unwrap())

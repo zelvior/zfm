@@ -267,20 +267,10 @@ fn push_field(fields: &mut Vec<String>, field: Vec<u8>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "zfm-convert-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&p).unwrap();
-            Self(p)
+            Self(crate::test_support::scratch_dir("zfm-convert"))
         }
     }
     impl Drop for Temp {

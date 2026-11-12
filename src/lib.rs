@@ -20,3 +20,6 @@ pub mod packed_archive;
 pub mod file_clipboard;
 
 pub mod json_csv;
+
+#[cfg(test)]
+mod test_support;
