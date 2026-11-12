@@ -82,6 +82,17 @@ pub fn read_filtered(
                 None
             }
         };
+        #[cfg(windows)]
+        if !show_hidden {
+            use std::os::windows::fs::MetadataExt;
+            // Windows hidden attributes are separate from Unix-style dotfiles.
+            if metadata
+                .as_ref()
+                .map_or(false, |m| m.file_attributes() & 0x2 != 0)
+            {
+                continue;
+            }
+        }
         // Follow links for folder navigation, but never recurse while listing.
         let is_dir = match metadata.as_ref() {
             Some(m) if m.file_type().is_symlink() => {
@@ -167,6 +178,38 @@ mod tests {
         let l = read(&t.0, false, &AtomicU64::new(1), 1).unwrap().unwrap();
         assert_eq!(l.entries.len(), 1);
         assert!(!l.entries[0].is_dir);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_hidden_attribute_is_respected() {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
+        }
+        let t = Temp::new();
+        let path = t.0.join("invisible.txt");
+        fs::write(&path, b"hidden").unwrap();
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), 2) }, 0);
+        let generation = AtomicU64::new(1);
+        assert_eq!(
+            read(&t.0, false, &generation, 1)
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            0
+        );
+        assert_eq!(
+            read(&t.0, true, &generation, 1)
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), 0x80) }, 0);
     }
     #[test]
     fn thousands_of_entries() {

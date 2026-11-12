@@ -1,6 +1,6 @@
 # Windows development notes
 
-The application has an experimental native Win32 browser: directory listing, back/forward/up, address, refresh and opening files. It does not yet provide Linux feature parity (including operations, tabs, clipboard, archives or converter UI). The Windows GNU 32-bit and 64-bit targets have been type-checked only. Windows MSVC 32-bit and 64-bit release builds and core tests passed on GitHub's Windows Server 2022 runners; the GUI itself has not been tested interactively. These commands require a suitable toolchain and do not establish compatibility.
+The application has an experimental native Win32 browser with navigation, tabs, filename filtering, hidden-file toggle, file/folder creation, rename and confirmed permanent deletion of files or empty folders. Enter a single name in the New name field for creation or rename; operations run in a worker, do not intentionally replace existing destinations, and permanent deletion has no trash fallback. Clipboard, copying, moving, trash, archives, converter UI and many advanced features are still absent. Windows MSVC 32-bit and 64-bit builds and core tests passed on GitHub's Windows Server 2022 runners before these latest changes; these changes have only been GNU type-checked and the GUI has not been tested interactively. These commands require a suitable toolchain and do not establish compatibility.
 
 ## Automated builds
 

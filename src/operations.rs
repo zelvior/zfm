@@ -21,6 +21,31 @@ pub fn validate_name(name: &OsStr) -> io::Result<()> {
     if Path::new(name).file_name() != Some(name) {
         return Err(invalid("Enter a single file or folder name"));
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = name.encode_wide().collect();
+        if wide
+            .iter()
+            .any(|&c| c < 32 || matches!(c, 34 | 42 | 47 | 58 | 60 | 62 | 63 | 92 | 124))
+            || matches!(wide.last(), Some(32 | 46))
+        {
+            return Err(invalid("Invalid Windows filename"));
+        }
+        let base = name
+            .to_string_lossy()
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((base.starts_with("COM") || base.starts_with("LPT"))
+                && base.len() == 4
+                && matches!(base.as_bytes()[3], b'1'..=b'9'));
+        if reserved {
+            return Err(invalid("Reserved Windows filename"));
+        }
+    }
     Ok(())
 }
 
@@ -96,9 +121,28 @@ fn rename_no_replace(source: &Path, dest: &Path) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(target_os = "windows")]
+fn rename_no_replace(source: &Path, dest: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(source: *const u16, dest: *const u16, flags: u32) -> i32;
+    }
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let dest: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Flags zero: do not replace existing targets or copy across volumes.
+    if unsafe { MoveFileExW(source.as_ptr(), dest.as_ptr(), 0) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    )
 )))]
 fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::new(
@@ -275,6 +319,25 @@ mod tests {
             assert!(validate_name(OsStr::new(name)).is_ok());
         }
     }
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_streams_reserved_names_and_invalid_characters() {
+        for name in [
+            "file:stream",
+            "NUL",
+            "con.txt",
+            "COM1.txt",
+            "a?b",
+            "name.",
+            "name ",
+            "a\\b",
+        ] {
+            assert!(validate_name(OsStr::new(name)).is_err(), "{name}");
+        }
+        for name in ["COM10", "valid.txt", "é"] {
+            assert!(validate_name(OsStr::new(name)).is_ok());
+        }
+    }
     #[test]
     fn creation_does_not_overwrite() {
         let t = Temp::new();
@@ -285,7 +348,7 @@ mod tests {
         assert!(create_directory(&t.0, OsStr::new("dir")).unwrap().is_dir());
         assert!(create_directory(&t.0, OsStr::new("dir")).is_err());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn rename_files_directories_and_conflicts() {
         let t = Temp::new();

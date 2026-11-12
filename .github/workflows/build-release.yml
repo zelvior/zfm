@@ -86,10 +86,13 @@ jobs:
           mkdir -p "package/$name" dist
           cp "target/$TARGET/release/zfm" README.md LICENSE "package/$name/"
           tar -czf "dist/$name.tar.gz" -C package "$name"
+          cp "target/$TARGET/release/zfm" "dist/$name"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: dist/zfm-${{ matrix.target }}.tar.gz
+          path: |
+            dist/zfm-${{ matrix.target }}.tar.gz
+            dist/zfm-${{ matrix.target }}
           if-no-files-found: error
 
   windows:
@@ -136,10 +139,13 @@ jobs:
           New-Item -ItemType Directory -Path "package/$name", dist -Force | Out-Null
           Copy-Item "target/$env:TARGET/release/zfm.exe", README.md, LICENSE -Destination "package/$name/"
           Compress-Archive -Path "package/$name" -DestinationPath "dist/$name.zip"
+          Copy-Item "target/$env:TARGET/release/zfm.exe" -Destination "dist/$name.exe"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: dist/zfm-${{ matrix.target }}.zip
+          path: |
+            dist/zfm-${{ matrix.target }}.zip
+            dist/zfm-${{ matrix.target }}.exe
           if-no-files-found: error
 
   release:
@@ -174,6 +180,10 @@ jobs:
             zfm-i686-unknown-linux-gnu.tar.gz
             zfm-x86_64-pc-windows-msvc.zip
             zfm-i686-pc-windows-msvc.zip
+            zfm-x86_64-unknown-linux-gnu
+            zfm-i686-unknown-linux-gnu
+            zfm-x86_64-pc-windows-msvc.exe
+            zfm-i686-pc-windows-msvc.exe
           )
           for asset in "${assets[@]}"; do test -s "$asset"; done
           sha256sum "${assets[@]}" > SHA256SUMS.txt
