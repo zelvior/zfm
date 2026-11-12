@@ -3,6 +3,7 @@
 //! replaced. Keeping these here means they can be tested on any host.
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::payload;
@@ -104,8 +105,10 @@ pub fn validate_directory(text: &str) -> Result<PathBuf, String> {
 
 /// Refuse to install over files the installer does not own.
 ///
-/// Reinstalling into the folder recorded in the registry is an upgrade and is
-/// allowed; any other folder that already contains a managed file is not.
+/// Reinstalling into the folder recorded in the registry — or completing an
+/// earlier ZFM installation that copied its payload before registration could
+/// finish — is an upgrade and is allowed; any other folder that already
+/// contains a managed file is not.
 pub fn may_install(dir: &Path, registered: Option<&Path>) -> Result<(), String> {
     if let Some(registered) = registered {
         if same_directory(registered, dir) {
@@ -115,9 +118,9 @@ pub fn may_install(dir: &Path, registered: Option<&Path>) -> Result<(), String> 
     let existing: Vec<&str> = payload::MANAGED_FILES
         .iter()
         .copied()
-        .filter(|name| dir.join(name).exists())
+        .filter(|name| fs::symlink_metadata(dir.join(name)).is_ok())
         .collect();
-    if existing.is_empty() {
+    if existing.is_empty() || payload::is_previous_install(dir) {
         return Ok(());
     }
     Err(format!(
@@ -129,7 +132,7 @@ pub fn may_install(dir: &Path, registered: Option<&Path>) -> Result<(), String> 
 
 /// Compare two folders without requiring either to exist.
 pub fn same_directory(left: &Path, right: &Path) -> bool {
-    if let (Ok(left), Ok(right)) = (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+    if let (Ok(left), Ok(right)) = (fs::canonicalize(left), fs::canonicalize(right)) {
         return left == right;
     }
     #[cfg(windows)]
@@ -146,7 +149,6 @@ pub fn same_directory(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(|value| OsString::from(*value)).collect()
@@ -232,6 +234,22 @@ mod tests {
         assert!(error.contains("zfm.exe"), "{error}");
         // A folder previously installed by setup may be upgraded in place.
         assert!(may_install(&dir, Some(&dir)).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recovers_incomplete_zfm_install_without_trusting_foreign_files() {
+        let dir = scratch("incomplete");
+        payload::install_files(&dir).unwrap();
+        fs::write(dir.join("Uninstall.exe"), b"previous uninstaller").unwrap();
+        // A prior ZFM install that failed before writing its registry key may
+        // be completed in place.
+        assert!(may_install(&dir, None).is_ok());
+
+        // Tampering with the ZFM assets disqualifies the folder so unrelated
+        // files are still protected.
+        fs::write(dir.join("LICENSE.txt"), b"custom license").unwrap();
+        assert!(may_install(&dir, None).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

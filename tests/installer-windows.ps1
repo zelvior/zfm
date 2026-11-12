@@ -1,15 +1,46 @@
 #Requires -Version 5.1
-# Smoke test for the ZFM setup program: silent install, registry entries,
-# Start Menu shortcuts, reinstalling, and the uninstaller's promise to keep the
-# user's own files. Runs against the packaged download, so it also proves that
-# the shipped file is a working installer.
+# Smoke test for the ZFM setup program: interactive wizard flow, silent install,
+# registry entries, Start Menu shortcuts, reinstalling, recovering an
+# interrupted install, and the uninstaller's promise to keep the user's own
+# files. Runs against the packaged download, so it also proves that the shipped
+# file is a working installer.
 param([Parameter(Mandatory = $true)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 
+if (-not ('ZfmSetupSmoke' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ZfmSetupSmoke {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int left, top, right, bottom; }
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern IntPtr GetDlgItem(IntPtr parent, int id);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern int GetClassNameW(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+    public static extern IntPtr SendCommand(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+    public static extern IntPtr SendSetText(IntPtr window, uint message, UIntPtr wparam, [MarshalAs(UnmanagedType.LPWStr)] string lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+    public static extern IntPtr SendGetText(IntPtr window, uint message, UIntPtr wparam, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder lparam, uint flags, uint timeout, out UIntPtr result);
+}
+'@
+}
+
 $setup = (Resolve-Path -LiteralPath $Installer).Path
-$root = Join-Path $env:RUNNER_TEMP ('zfm-setup-smoke-' + [Guid]::NewGuid().ToString('N'))
+$tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$root = Join-Path $tempBase ('zfm-setup-smoke-' + [Guid]::NewGuid().ToString('N'))
 $first = Join-Path $root 'first'
 $second = Join-Path $root 'second'
+$wizard = Join-Path $root 'wizard'
 $conflict = Join-Path $root 'conflict'
 $managed = @('zfm.exe', 'zfm.ico', 'LICENSE.txt', 'README.txt', 'Uninstall.exe')
 $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'ZFM'
@@ -82,6 +113,148 @@ function Assert-Uninstalled {
     foreach ($path in @($appShortcut, $uninstallShortcut, $appKey, $uninstallKey)) {
         if (Test-Path -LiteralPath $path) {
             throw "The uninstaller left $path behind."
+        }
+    }
+}
+
+function Send-WizardCommand {
+    param([IntPtr]$Window, [int]$Id)
+    $ack = [UIntPtr]::Zero
+    if ([ZfmSetupSmoke]::SendCommand($Window, 0x0111, [UIntPtr]$Id, [IntPtr]::Zero, 2, 5000, [ref]$ack) -eq [IntPtr]::Zero) {
+        throw "Setup window did not respond to command $Id."
+    }
+}
+
+function Set-WizardText {
+    param([IntPtr]$Control, [string]$Value)
+    $ack = [UIntPtr]::Zero
+    if ([ZfmSetupSmoke]::SendSetText($Control, 0x000C, [UIntPtr]::Zero, $Value, 2, 3000, [ref]$ack) -eq [IntPtr]::Zero) {
+        throw 'Setup control did not respond to WM_SETTEXT.'
+    }
+}
+
+function Get-WizardText {
+    param([IntPtr]$Control)
+    $buffer = New-Object System.Text.StringBuilder 1024
+    $copied = [UIntPtr]::Zero
+    if ([ZfmSetupSmoke]::SendGetText($Control, 0x000D, [UIntPtr]$buffer.Capacity, $buffer, 2, 3000, [ref]$copied) -eq [IntPtr]::Zero) {
+        throw 'Setup control did not respond to WM_GETTEXT.'
+    }
+    return $buffer.ToString()
+}
+
+function Invoke-InteractiveSetup {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$TargetFolder
+    )
+    $wizardProcess = Start-Process -FilePath $Executable -PassThru
+    try {
+        $window = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $wizardProcess.Refresh()
+            if ($wizardProcess.HasExited) {
+                throw "Interactive setup exited before showing its window (exit code $($wizardProcess.ExitCode))."
+            }
+            $window = $wizardProcess.MainWindowHandle
+            if ($window -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($window -eq [IntPtr]::Zero) {
+            throw 'Interactive setup did not show its window within 10 seconds.'
+        }
+        $className = New-Object System.Text.StringBuilder 256
+        [void][ZfmSetupSmoke]::GetClassNameW($window, $className, $className.Capacity)
+        if ($className.ToString() -ne 'ZFMSetupWindow') {
+            throw "Expected ZFMSetupWindow, got '$className'."
+        }
+
+        $back = [ZfmSetupSmoke]::GetDlgItem($window, 101)
+        $next = [ZfmSetupSmoke]::GetDlgItem($window, 102)
+        $browse = [ZfmSetupSmoke]::GetDlgItem($window, 104)
+        $pathEdit = [ZfmSetupSmoke]::GetDlgItem($window, 105)
+        $licenseEdit = [ZfmSetupSmoke]::GetDlgItem($window, 106)
+        $launch = [ZfmSetupSmoke]::GetDlgItem($window, 107)
+        $status = [ZfmSetupSmoke]::GetDlgItem($window, 108)
+        $body = [ZfmSetupSmoke]::GetDlgItem($window, 110)
+        foreach ($handle in @($back, $next, $browse, $pathEdit, $licenseEdit, $launch, $status, $body)) {
+            if ($handle -eq [IntPtr]::Zero) {
+                throw 'Setup window is missing an expected wizard control.'
+            }
+        }
+
+        $bodyRect = New-Object 'ZfmSetupSmoke+Rect'
+        if (-not [ZfmSetupSmoke]::GetWindowRect($body, [ref]$bodyRect) -or ($bodyRect.bottom - $bodyRect.top) -lt 64) {
+            throw 'Wizard body control is too short for a three-line description.'
+        }
+
+        # Welcome -> Folder
+        if ((Get-WizardText $next) -ne 'Next' -or [ZfmSetupSmoke]::IsWindowVisible($pathEdit)) {
+            throw 'Unexpected initial wizard page state.'
+        }
+        Send-WizardCommand $window 102
+        if (-not [ZfmSetupSmoke]::IsWindowVisible($pathEdit) -or -not [ZfmSetupSmoke]::IsWindowVisible($browse)) {
+            throw 'Wizard did not advance to the folder page.'
+        }
+        $statusRect = New-Object 'ZfmSetupSmoke+Rect'
+        if (-not [ZfmSetupSmoke]::GetWindowRect($status, [ref]$statusRect) -or ($statusRect.bottom - $statusRect.top) -lt 90) {
+            throw 'Folder page status area is too short and would clip multiline messages.'
+        }
+
+        # Folder validation preserves typed text and reports errors inline.
+        Set-WizardText $pathEdit 'relative\folder'
+        Send-WizardCommand $window 102
+        if (-not [ZfmSetupSmoke]::IsWindowVisible($pathEdit)) {
+            throw 'Wizard accepted a relative installation folder.'
+        }
+        if ((Get-WizardText $pathEdit) -ne 'relative\folder') {
+            throw 'Wizard overwrote the typed folder on validation error.'
+        }
+        if ([string]::IsNullOrWhiteSpace((Get-WizardText $status))) {
+            throw 'Wizard did not explain why the folder was rejected.'
+        }
+
+        # Folder -> License
+        Set-WizardText $pathEdit $TargetFolder
+        Send-WizardCommand $window 102
+        if (-not [ZfmSetupSmoke]::IsWindowVisible($licenseEdit) -or (Get-WizardText $next) -ne 'Install') {
+            throw "Wizard did not advance to the license page (status: $(Get-WizardText $status))."
+        }
+
+        # License -> Installing -> Finish (runs on the background worker thread)
+        Send-WizardCommand $window 102
+        $finished = $false
+        $deadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $deadline) {
+            $wizardProcess.Refresh()
+            if ($wizardProcess.HasExited) {
+                throw "Interactive setup exited unexpectedly during installation (exit code $($wizardProcess.ExitCode))."
+            }
+            if (-not [ZfmSetupSmoke]::IsWindowEnabled($window)) {
+                $reason = Get-WizardText $status
+                throw "Interactive setup opened a modal error dialog during installation: $reason"
+            }
+            if ([ZfmSetupSmoke]::IsWindowVisible($launch) -and (Get-WizardText $next) -eq 'Finish') {
+                $finished = $true
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $finished) {
+            throw "Interactive setup did not reach the Finish page within 60 seconds (status: $(Get-WizardText $status))."
+        }
+
+        # Finish -> close without launching ZFM
+        Send-WizardCommand $window 102
+        if (-not $wizardProcess.WaitForExit(30000)) {
+            throw 'Interactive setup did not exit after clicking Finish.'
+        }
+        Assert-ExitCode $wizardProcess.ExitCode 0 'Interactive wizard setup'
+    } finally {
+        $wizardProcess.Refresh()
+        if (-not $wizardProcess.HasExited) {
+            Stop-Process -Id $wizardProcess.Id -Force -ErrorAction SilentlyContinue
+            $wizardProcess.WaitForExit()
         }
     }
 }
@@ -199,11 +372,35 @@ try {
         throw 'Setup /UNINSTALL left the installation folder behind.'
     }
 
-    Write-Host 'Setup, installed application, shortcuts, registry entries and uninstaller all behave as documented.'
+    # 9. Interactive wizard flow exercises the background worker thread and its
+    # COM shortcut creation end-to-end without /S.
+    Invoke-InteractiveSetup -Executable $setup -TargetFolder $wizard
+    Assert-Installed $wizard
+    $wizardLink = $shell.CreateShortcut($appShortcut)
+    if ($wizardLink.TargetPath -ne (Join-Path $wizard 'zfm.exe')) {
+        throw "Interactive wizard shortcut points at '$($wizardLink.TargetPath)'."
+    }
+
+    # 10. An incomplete prior ZFM installation (payload copied, registry and
+    # shortcuts absent) is recognized and completed cleanly on rerun.
+    foreach ($key in @($uninstallKey, $appKey)) {
+        Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $menu -Recurse -Force -ErrorAction SilentlyContinue
+    $code = Invoke-Setup $setup @('/S', "/D=`"$wizard`"")
+    Assert-ExitCode $code 0 'Completing an unregistered prior ZFM installation'
+    Assert-Installed $wizard
+    $code = Invoke-Setup (Join-Path $wizard 'Uninstall.exe') @('/S')
+    Assert-ExitCode $code 0 'Silent uninstall after interactive setup'
+    Wait-Until { -not (Test-Path -LiteralPath $wizard) } 'the interactive installation folder to be removed'
+
+    Write-Host 'Interactive wizard, silent setup, installed application, shortcuts, registry entries and uninstaller all behave as documented.'
 } finally {
-    $leftover = Join-Path $second 'Uninstall.exe'
-    if (Test-Path -LiteralPath $leftover) {
-        try { Invoke-Setup $leftover @('/S') -Timeout 60 | Out-Null } catch { }
+    foreach ($folder in @($second, $wizard)) {
+        $leftover = Join-Path $folder 'Uninstall.exe'
+        if (Test-Path -LiteralPath $leftover) {
+            try { Invoke-Setup $leftover @('/S') -Timeout 60 | Out-Null } catch { }
+        }
     }
     foreach ($key in @($uninstallKey, $appKey)) {
         Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
