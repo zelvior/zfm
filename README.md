@@ -1,10 +1,12 @@
 # ZFM — Zelvior File Manager
 
-A small native file manager written in Rust. **This repository currently contains an early foundation and a limited set of file operations, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
+<img src="packaging/zfm-wordmark.svg" alt="ZFM — Zelvior File Manager" width="320">
+
+A small native file manager written in Rust with a black-and-white interface. **This repository currently contains an early foundation and a limited set of file operations, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
 
 ## What works in this foundation
 
-- Linux GTK 3 window with a light theme, directory list, sidebar, and status line.
+- Linux GTK 3 window with a monochrome (black-and-white) theme, directory list, sidebar, and status line.
 - Enter a path and press Enter; double-click a folder to enter it or a file to open it with `xdg-open`. Back, forward, parent and refresh buttons; F5, Alt+Left/Right/Up and Ctrl+L shortcuts.
 - Hidden-file toggle, folder-first case-insensitive name ordering, file sizes and modification dates. Broken links remain visible. Errors opening a directory are shown in the status bar.
 - Directory enumeration and metadata run on a worker. New navigation cancels the *results* of earlier work; UI rows are added in batches on the GTK main loop. There is no persistent background service.
@@ -13,7 +15,7 @@ A small native file manager written in Rust. **This repository currently contain
 - The archive manager browses and extracts TAR, ZIP, TAR.GZ/TGZ, TAR.BZ2 and TAR.XZ; ZIP and compressed TAR require the system libarchive runtime. It tests ZIP/compressed archives and creates a TAR or ZIP from one regular file. Operations run in the background with cancellation and no-overwrite behavior. See the limitations below before use.
 - The offline converter supports CSV → JSON and a restricted JSON → CSV mode, on a worker with progress and cancellation. Select a CSV or JSON file first to pre-fill paths and direction.
 - Linux tabs retain independent navigation histories; use Ctrl+T, Ctrl+W, or the folder context menu. File clipboard actions support one local item via GNOME copied-files and URI-list targets (Ctrl+C/X/V with the list focused). Copy is regular-file only; cut uses the same same-filesystem move operation as Move to.
-- The native Win32 browser offers navigation, directory listing, opening files, tab histories, a current-folder name filter, a hidden-file toggle, creation of files and folders, rename, and confirmed permanent deletion of files or empty folders. File changes run on a worker and creation/rename refuse replacement. Enter the name in **New name** before creating or renaming. The Windows UI is experimental and remains incomplete; the redesigned interface has not yet been tested interactively.
+- The native Win32 browser uses the same black-and-white palette, with a solid black selection instead of the system accent colour. It offers navigation, directory listing, opening files, tab histories, a current-folder name filter, a hidden-file toggle, creation of files and folders, rename, and confirmed permanent deletion of files or empty folders. File changes run on a worker and creation/rename refuse replacement. Enter the name in **New name** before creating or renaming. The Windows UI is experimental and remains incomplete; the redesigned interface has not yet been tested interactively.
 - No third-party Rust crates. GTK 3 is loaded at runtime through a small platform adapter; filesystem and navigation code are separate.
 
 Sidebar locations currently use conventional subdirectories of `$HOME`, **not** customized XDG user directories. The file list supports a single selection. The list is batched but not virtualized: very large directories still consume memory for all entries and widgets. Directory sorting happens after enumeration; a slow network filesystem call cannot be interrupted until it returns. Displayed non-UTF-8 filenames are lossily decoded, although double-clicking uses the original path. Entering a non-UTF-8 path in the address bar is not supported. File opening depends on `xdg-open` and an installed application for the file type.
@@ -46,16 +48,16 @@ A Rust build produced on a newer distribution can require a newer glibc than Min
 
 ## Installing ZFM
 
-After a release containing the installers is published, download the asset matching your operating system and architecture from the GitHub Releases page. **The existing v0.0.2 release does not include these installers.** They need a new release tag and have not yet been tested on Windows 7 or Mint 19.
+Releases contain **installers only**; there are no portable archives or loose executables to unpack. Download the installer matching your operating system and architecture from the GitHub Releases page. **The existing v0.0.2 release predates these installers.** They need a new release tag and have not yet been tested on Windows 7 or Mint 19.
 
-- **Windows 7 SP1 or newer:** run `zfm-i686-pc-windows-msvc-setup.exe` for 32-bit Windows, or `zfm-x86_64-pc-windows-msvc-setup.exe` for 64-bit Windows. Setup installs for the current user by default, adds a Start Menu shortcut and an entry in Programs and Features, and includes an uninstaller. It does not install a service or require Rust. Choose a dedicated folder; unrelated files in that folder are preserved on uninstall. The installer is not code-signed, so Windows may display a security warning.
+- **Windows 7 SP1 or newer:** run `zfm-i686-pc-windows-msvc-setup.exe` for 32-bit Windows, or `zfm-x86_64-pc-windows-msvc-setup.exe` for 64-bit Windows. Setup is ZFM's own installer, written in Rust and built from this repository; it does not use NSIS, Inno Setup or any other third-party installer framework. It installs for the current user, shows the black-and-white ZFM wizard, adds a Start Menu shortcut and an entry in Programs and Features, and writes an uninstaller next to the application. It also supports unattended `setup.exe /S /D=C:\Path\To\ZFM`. It does not install a service or require Rust. Choose a dedicated folder; unrelated files in that folder are preserved on uninstall. The setup executable is not code-signed, so Windows may display a security warning.
 - **Linux Mint 19 / Ubuntu 18.04:** use the `i686` `.deb` for a 32-bit OS or the `x86_64` `.deb` for a 64-bit OS. Double-click the downloaded package to open your package installer, or run `sudo apt install ./zfm-i686-unknown-linux-gnu.deb` (use the x86_64 filename on 64-bit systems). The package declares the GTK 3, libarchive and `xdg-utils` dependencies and adds ZFM to the applications menu. Dependencies may require configured package repositories. Uninstall with the package manager or `sudo apt remove zfm`.
 
-Portable archives and direct executables remain available alongside the installers. The Windows interface is still an incomplete file manager; see the limitations above. Back up important files before testing.
+The Windows interface is still an incomplete file manager; see the limitations above. Back up important files before testing.
 
 ## Troubleshooting startup on older systems
 
-The old `v0.0.1` release was built on Ubuntu 22.04 with current Rust. It can fail before a window appears on Linux Mint 19 (glibc 2.27) or Windows 7. Download a newer release **after** the updated workflow has successfully built and published one; existing release files are not automatically replaced. For 32-bit systems use the `i686` assets, not `x86_64`. Windows needs Windows 7 SP1 or newer, although this has not yet been tested on a Windows 7 machine. On Linux, extract the `.tar.gz` and run its `zfm` file from a terminal; for a separately downloaded executable, first run `chmod +x` on it. Linux requires a graphical session and GTK 3; archive support additionally needs libarchive. A terminal will show startup errors if the desktop cannot display them.
+The old `v0.0.1` release was built on Ubuntu 22.04 with current Rust. It can fail before a window appears on Linux Mint 19 (glibc 2.27) or Windows 7. Download a newer release **after** the updated workflow has successfully built and published one; existing release files are not automatically replaced. For 32-bit systems use the `i686` installers, not `x86_64`. Windows needs Windows 7 SP1 or newer, although this has not yet been tested on a Windows 7 machine. On Linux, install the `.deb` with your package manager rather than running files by hand. Linux requires a graphical session and GTK 3; archive support additionally needs libarchive. A terminal will show startup errors if the desktop cannot display them.
 
 ## Linux build and run
 
@@ -116,13 +118,13 @@ cargo build --release --locked --target i686-unknown-linux-gnu
 
 For example, on a 64-bit Debian-family host, `gcc-multilib` and `libc6-dev-i386` may supply the cross-linker and C library. The target machine also needs the **32-bit** GTK 3 runtime and its dependencies. The 32-bit build and core tests have passed on the GitHub Ubuntu runner, but Mint 19 and interactive 32-bit GUI use remain unverified.
 
-Create a simple tarball after a native release build:
+Release builds are distributed only as installable packages. To build the `.deb` for an already-built executable:
 
 ```sh
-./scripts/package-linux.sh
+./scripts/package-deb.sh     target/release/zfm     x86_64-unknown-linux-gnu     v0.0.3     zfm-linux.deb
 ```
 
-This contains the executable, README and license, not GTK or `xdg-open`. Recipients need compatible system runtime libraries and a graphical session; no Rust installation is required. See [Linux notes](docs/linux.md).
+The package contains the executable, the applications-menu entry and the black-and-white ZFM icon, but not GTK or `xdg-open`; recipients need compatible system runtime libraries and a graphical session, and no Rust installation. See [Linux notes](docs/linux.md).
 
 ## Windows
 
@@ -138,11 +140,19 @@ Use `-NativeOnly` for the host Windows architecture, `-Toolchain 1.85.0` (for ex
 
 For Linux executables **as well**, install Windows Subsystem for Linux (WSL) and a Linux distribution, set up Linux C compilers and multilib in that distribution, then run `.\scripts\build-windows.cmd -IncludeLinux`. It calls the Linux script in WSL with `--linux-only`: that script installs/updates its own Linux Rust stable, runs Linux tests, and builds 32-bit and 64-bit Linux binaries in a separate `artifacts/build-*/` directory. `-SkipTests` applies to both; `-Toolchain` applies to Windows only. On Debian/Ubuntu x86_64 in WSL, you can first run `./scripts/build-linux.sh --linux-only --install-deps` to install Linux prerequisites. WSL is not available on Windows 7. Builds on newer Linux may not run on older glibc systems.
 
-Run the `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. For Windows 7, current Rust stable binaries target Windows 10 or later; to build for Windows 7 try `-Toolchain 1.77.2` with compatible Visual C++ tools. This older-platform setup is not yet verified here. The Windows GUI and Windows build script remain untested interactively; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
+To build the setup program, build the executable for the same architecture first and then point the installer package at it:
+
+```powershell
+$env:ZFM_APP_BINARY = (Resolve-Path "target\release\zfm.exe").Path
+$env:ZFM_VERSION = "v0.0.3"
+cargo build --release -p zfm-installer
+```
+
+This writes `target\release\zfm-setup.exe`: a self-contained setup executable that embeds the application, the icon, the license and the README, and that can also act as the uninstaller. Run the plain `zfm.exe` in the target subdirectory matching the Windows machine, using the exact `artifacts/build-windows-*/...` path printed by the script. The generated executables are local build outputs and are not committed to Git. For Windows 7, current Rust stable binaries target Windows 10 or later; to build for Windows 7 try `-Toolchain 1.77.2` with compatible Visual C++ tools. This older-platform setup is not yet verified here. The Windows GUI and Windows build script remain untested interactively; the GUI is an incomplete browser rather than a full file manager, and cross-building does not establish runtime compatibility. See [Windows notes](docs/windows.md).
 
 ## GitHub Actions and releases
 
-The **Build and release** workflow runs **only when manually requested**, and requires a version tag each time. Pushes, pull requests and tag pushes do not run it automatically. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets and makes the four packaged builds available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. The workflow includes GUI startup smoke tests and installer install/uninstall checks; these are not a substitute for testing on the target desktop systems.
+The **Build and release** workflow runs **only when manually requested**, and requires a version tag each time. Pushes, pull requests and tag pushes do not run it automatically. It tests and builds the 64-bit and 32-bit Linux GNU and Windows MSVC targets and makes the four installers available as workflow artifacts. Linux archive tests require both libarchive and Python; CI treats missing test prerequisites as a failure rather than silently skipping them. The workflow includes GUI startup smoke tests and installer install/uninstall checks; these are not a substitute for testing on the target desktop systems.
 
 To publish a release:
 
@@ -150,19 +160,19 @@ To publish a release:
 2. In GitHub, open **Actions → Build and release → Run workflow**, select that branch, and enter a `v`-prefixed version such as `v0.0.1` in the required **vtag** field. Alternatively run `gh workflow run build-release.yml --ref main -f vtag=v0.0.3 -f publish=true`.
 3. Check **publish** if you want a release; leave it unchecked to test only. If the tag already exists, the workflow builds its commit. If it does not exist, it builds the selected branch's commit from the time the run was started. After **all four builds and tests pass**, it creates a missing tag at that exact commit, then creates or updates the GitHub Release and uploads these assets:
 
-- `zfm-x86_64-unknown-linux-gnu.tar.gz` and `zfm-i686-unknown-linux-gnu.tar.gz`
-- `zfm-x86_64-pc-windows-msvc.zip` and `zfm-i686-pc-windows-msvc.zip`
-- `zfm-x86_64-pc-windows-msvc.exe` and `zfm-i686-pc-windows-msvc.exe` (direct Windows executables)
-- `zfm-x86_64-unknown-linux-gnu` and `zfm-i686-unknown-linux-gnu` (direct Linux executables)
-- `zfm-{x86_64,i686}-unknown-linux-gnu.deb` (Linux packages)
+- `zfm-{x86_64,i686}-unknown-linux-gnu.deb` (Linux installers)
 - `zfm-{x86_64,i686}-pc-windows-msvc-setup.exe` (Windows installers)
-- `SHA256SUMS.txt` for verifying all twelve downloads
+- `SHA256SUMS.txt` for verifying all four downloads
 
 If a tag existed when the run began but points to a different commit or disappears, publication fails. If a new tag is created by someone else while the build runs, the run fails rather than replacing it; check the tag and retry. A tag created after successful builds may remain if a later release upload fails. Use protected, immutable release tags when possible.
 
-Each archive contains the executable, README and license. Raw executables are also provided for convenience; after downloading a Linux executable, run `chmod +x` on it before starting it. Release assets from before this workflow update contain the executables inside the archives but not as separate downloads. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Manual runs default to test-only and still require a tag input; check **publish** to create or update the release after the tests pass. Test-only runs do not create tags or releases. No release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
+Each setup executable contains the application, icon, license and README, and the `.deb` installs the same files with a package-manager entry. Older releases contain portable archives and loose executables; those assets are no longer produced. Re-running the workflow for the same tag replaces assets with the same names; tags containing a hyphen create prereleases. Manual runs default to test-only and still require a tag input; check **publish** to create or update the release after the tests pass. Test-only runs do not create tags or releases. No release is published by a push or pull request. Release publication requires GitHub Actions to be enabled and the workflow token to be allowed to write repository contents.
 
-The release workflow uses Rust 1.77.2, builds Linux inside Ubuntu 18.04 (glibc 2.27), and statically links the Windows C runtime to target older systems. It checks that GUI windows appear on hosted runners before publishing. The v0.0.2 GitHub run passed both architectures' builds and GUI startup smoke tests. The newer interface and installer changes have not yet been verified by a release workflow. Neither installer has been verified on an actual Mint 19 or Windows 7 system. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+The release workflow uses Rust 1.77.2, builds Linux inside Ubuntu 18.04 (glibc 2.27), and statically links the Windows C runtime to target older systems. It builds each setup program with the matching embedded executable, checks that GUI windows appear on hosted runners, and installs, launches and uninstalls the result before publishing. The v0.0.2 GitHub run passed both architectures' builds and GUI startup smoke tests. The newer black-and-white interface and the rewritten installer have not yet been verified by a release workflow. Neither installer has been verified on an actual Mint 19 or Windows 7 system. Linux binaries require compatible system libraries (including GTK 3; libarchive for ZIP and compressed TAR); the Windows browser remains experimental and incomplete. The workflow does not establish Windows 7, Mint 19, or interactive GUI compatibility.
+
+## Branding
+
+The ZFM mark is a black-and-white badge: a paper-white rounded square, a solid black border and a black "Z" monogram. `packaging/zfm.svg` holds the mark, `packaging/zfm-wordmark.svg` the horizontal lockup, and `packaging/generate-icons.py` regenerates `packaging/zfm.ico` plus the 64 px and 256 px PNG files (Python 3 only, no third-party modules). The Windows executable, the Start Menu shortcuts and the setup wizard all use that icon.
 
 ## Development roadmap
 

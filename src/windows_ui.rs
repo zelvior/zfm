@@ -39,6 +39,7 @@ const WS_VSCROLL: u32 = 0x00200000;
 const WS_TABSTOP: u32 = 0x00010000;
 const LB_ADDSTRING: u32 = 0x180;
 const LB_SETITEMHEIGHT: u32 = 0x1a0;
+const LBS_OWNERDRAWFIXED: u32 = 0x0010;
 const BS_OWNERDRAW: u32 = 0x0b;
 const LB_RESETCONTENT: u32 = 0x184;
 const LB_GETCURSEL: u32 = 0x188;
@@ -177,6 +178,7 @@ extern "system" {
     fn FrameRect(dc: H, rect: *const Rect, brush: H) -> i32;
     fn DrawFocusRect(dc: H, rect: *const Rect) -> i32;
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
+    fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
 }
 type P = *mut c_void;
 #[cfg(target_pointer_width = "64")]
@@ -237,6 +239,30 @@ fn wide(s: &OsStr) -> Vec<u16> {
 fn text(s: &str) -> Vec<u16> {
     wide(OsStr::new(s))
 }
+const IMAGE_ICON: u32 = 1;
+const LR_LOADFROMFILE: u32 = 0x0010;
+/// The installer places zfm.ico next to the executable; use it for the window
+/// and taskbar icon when it is present.
+fn companion_icon() -> H {
+    let path = match std::env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            Some(dir) => dir.join("zfm.ico"),
+            None => return ptr::null_mut(),
+        },
+        Err(_) => return ptr::null_mut(),
+    };
+    unsafe {
+        let name = wide(path.as_os_str());
+        LoadImageW(
+            ptr::null_mut(),
+            name.as_ptr(),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE,
+        )
+    }
+}
 unsafe fn set_data(hwnd: H, data: isize) {
     #[cfg(target_pointer_width = "64")]
     {
@@ -257,15 +283,16 @@ unsafe fn get_data(hwnd: H) -> isize {
         GetWindowLongW(hwnd, GWLP_USERDATA) as isize
     }
 }
-// COLORREF uses 0x00BBGGRR.
-const BACKGROUND: u32 = 0xf8f5f2;
-const INK: u32 = 0x3c2d20;
-const MUTED: u32 = 0x756c60;
-const BUTTON_BG: u32 = 0xf3ebe4;
-const BUTTON_DOWN: u32 = 0xe6d8ca;
-const ACCENT: u32 = 0xb86532;
-const ACCENT_DOWN: u32 = 0x974e25;
-const BORDER: u32 = 0xe4d8cd;
+// COLORREF uses 0x00BBGGRR. The interface is strictly black and white:
+// paper-white surfaces, near-black ink, and solid black primary actions.
+const BACKGROUND: u32 = 0xffffff;
+const INK: u32 = 0x0a0a0a;
+const MUTED: u32 = 0x5a5a5a;
+const BUTTON_BG: u32 = 0xf5f5f5;
+const BUTTON_DOWN: u32 = 0xdedede;
+const ACCENT: u32 = 0x0a0a0a;
+const ACCENT_DOWN: u32 = 0x2e2e2e;
+const BORDER: u32 = 0x0a0a0a;
 
 struct Theme {
     background: H,
@@ -300,7 +327,7 @@ impl Theme {
         };
         let theme = Self {
             background: CreateSolidBrush(BACKGROUND),
-            surface: CreateSolidBrush(0xffffff),
+            surface: CreateSolidBrush(BACKGROUND),
             button: CreateSolidBrush(BUTTON_BG),
             pressed: CreateSolidBrush(BUTTON_DOWN),
             accent: CreateSolidBrush(ACCENT),
@@ -559,7 +586,7 @@ unsafe fn draw_button(app: *mut App, item: *mut DrawItem) -> LResult {
         if disabled {
             MUTED
         } else if primary {
-            0xffffff
+            BACKGROUND
         } else {
             INK
         },
@@ -591,6 +618,47 @@ unsafe fn draw_button(app: *mut App, item: *mut DrawItem) -> LResult {
     SelectObject(item.dc, old_font);
     1
 }
+fn entry_line(entry: &Entry) -> String {
+    if entry.is_dir {
+        format!("[Folder]  {}", entry.name)
+    } else {
+        format!("{}     {} bytes", entry.name, entry.size.unwrap_or(0))
+    }
+}
+
+// The list is owner-drawn so a selected row is solid black with white text,
+// matching the rest of the monochrome interface instead of the system accent.
+unsafe fn draw_list_item(app: *mut App, item: *mut DrawItem) -> LResult {
+    let item = &mut *item;
+    let theme = &*(*app).theme;
+    let selected = item.item_state & 1 != 0;
+    let brush = if selected { theme.accent } else { theme.surface };
+    FillRect(item.dc, &item.rect, brush);
+    let line = match (*app).entries.get(item.item_id as usize) {
+        Some(entry) => entry_line(entry),
+        None => String::new(),
+    };
+    let old_font = SelectObject(item.dc, theme.font);
+    SetBkMode(item.dc, 1);
+    SetTextColor(item.dc, if selected { BACKGROUND } else { INK });
+    let label = text(&line);
+    let mut bounds = Rect {
+        left: item.rect.left + 8,
+        top: item.rect.top,
+        right: item.rect.right - 4,
+        bottom: item.rect.bottom,
+    };
+    DrawTextW(
+        item.dc,
+        label.as_ptr(),
+        -1,
+        &mut bounds,
+        0x0004 | 0x0020 | 0x8000,
+    );
+    SelectObject(item.dc, old_font);
+    1
+}
+
 unsafe fn control_value(address: H) -> std::ffi::OsString {
     let length = GetWindowTextLengthW(address).max(0) as usize;
     let mut value = vec![0u16; length + 1];
@@ -683,7 +751,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             hwnd,
             "LISTBOX",
             "",
-            WS_BORDER | WS_TABSTOP | WS_VSCROLL | 1,
+            WS_BORDER | WS_TABSTOP | WS_VSCROLL | 1 | LBS_OWNERDRAWFIXED,
             LIST,
         );
         let status = child(hwnd, "STATIC", "", 0, STATUS);
@@ -782,7 +850,14 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             info.min_track_size.y = 480;
             0
         }
-        WM_DRAWITEM if lp != 0 => draw_button(app, lp as *mut DrawItem),
+        WM_DRAWITEM if lp != 0 => {
+            let item = &*(lp as *const DrawItem);
+            if item.control_id as usize == LIST {
+                draw_list_item(app, lp as *mut DrawItem)
+            } else {
+                draw_button(app, lp as *mut DrawItem)
+            }
+        }
         WM_SIZE => {
             layout(hwnd, app);
             0
@@ -813,12 +888,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     SetWindowTextW(address, path.as_ptr());
                     SendMessageW(list, LB_RESETCONTENT, 0, 0);
                     for index in 0..(*app).entries.len() {
-                        let entry = &(&(*app).entries)[index];
-                        let line = if entry.is_dir {
-                            format!("[Folder]  {}", entry.name)
-                        } else {
-                            format!("{}     {} bytes", entry.name, entry.size.unwrap_or(0))
-                        };
+                        let line = entry_line(&(&(*app).entries)[index]);
                         SendMessageW(list, LB_ADDSTRING, 0, text(&line).as_ptr() as isize);
                     }
                     set_status(app, &status);
@@ -1007,7 +1077,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 theme.background as LResult
             } else {
                 SetTextColor(wp as H, INK);
-                SetBkColor(wp as H, 0xffffff);
+                SetBkColor(wp as H, BACKGROUND);
                 theme.surface as LResult
             }
         }
@@ -1034,7 +1104,7 @@ pub fn run() -> Result<(), String> {
             cls_extra: 0,
             wnd_extra: 0,
             instance,
-            icon: ptr::null_mut(),
+            icon: companion_icon(),
             cursor: LoadCursorW(ptr::null_mut(), 32512usize as *const u16),
             background: theme.background,
             menu: ptr::null(),

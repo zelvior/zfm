@@ -5,3 +5,7 @@ version = 3
 [[package]]
 name = "zfm"
 version = "0.1.0"
+
+[[package]]
+name = "zfm-installer"
+version = "0.1.0"
