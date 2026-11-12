@@ -89,36 +89,6 @@ pub struct WndClass {
 }
 
 #[repr(C)]
-pub struct StartupInfo {
-    pub size: u32,
-    pub reserved: *mut u16,
-    pub desktop: *mut u16,
-    pub title: *mut u16,
-    pub x: u32,
-    pub y: u32,
-    pub x_size: u32,
-    pub y_size: u32,
-    pub x_chars: u32,
-    pub y_chars: u32,
-    pub fill: u32,
-    pub flags: u32,
-    pub show: u16,
-    pub reserved2: u16,
-    pub reserved_data: *mut u8,
-    pub stdin: Handle,
-    pub stdout: Handle,
-    pub stderr: Handle,
-}
-
-#[repr(C)]
-pub struct ProcessInformation {
-    pub process: Handle,
-    pub thread: Handle,
-    pub process_id: u32,
-    pub thread_id: u32,
-}
-
-#[repr(C)]
 pub struct BrowseInfo {
     owner: Hwnd,
     root: *mut c_void,
@@ -293,22 +263,8 @@ extern "system" {
     pub fn GetTempPathW(size: u32, buffer: *mut u16) -> u32;
     pub fn GetModuleFileNameW(module: Hinstance, buffer: *mut u16, size: u32) -> u32;
     pub fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    pub fn CreateProcessW(
-        application: *const u16,
-        command: *mut u16,
-        process_attributes: *mut c_void,
-        thread_attributes: *mut c_void,
-        inherit: i32,
-        flags: u32,
-        environment: *mut c_void,
-        directory: *const u16,
-        startup: *mut StartupInfo,
-        info: *mut ProcessInformation,
-    ) -> i32;
-    pub fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     pub fn CloseHandle(handle: Handle) -> i32;
     pub fn Sleep(milliseconds: u32);
-    pub fn GetCurrentProcessId() -> u32;
 }
 
 #[link(name = "advapi32")]
@@ -667,39 +623,6 @@ pub fn delete_on_reboot(path: &Path) {
     }
 }
 
-/// Start a detached process without a console window.
-pub fn spawn(exe: &Path, arguments: &str) -> bool {
-    let mut command: Vec<u16> = Vec::new();
-    command.push(b'"' as u16);
-    command.extend(wide(exe.as_os_str()));
-    command.push(b'"' as u16);
-    command.extend(arguments.encode_utf16());
-    command.push(0);
-    unsafe {
-        let mut startup: StartupInfo = std::mem::zeroed();
-        startup.size = std::mem::size_of::<StartupInfo>() as u32;
-        let mut info: ProcessInformation = std::mem::zeroed();
-        let started = CreateProcessW(
-            ptr::null(),
-            command.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-            0x0800_0000, // CREATE_NO_WINDOW
-            ptr::null_mut(),
-            ptr::null(),
-            &mut startup,
-            &mut info,
-        );
-        if started == 0 {
-            return false;
-        }
-        CloseHandle(info.thread);
-        CloseHandle(info.process);
-    }
-    true
-}
-
 /// Create a Windows shell shortcut. Returns an error instead of falling back to
 /// a plain file, so a broken Start Menu entry is reported by setup.
 pub fn create_shortcut(
@@ -724,7 +647,8 @@ pub fn create_shortcut(
                 link.display()
             ));
         }
-        let table = *(shell_link as *const *const c_void);
+        // The object starts with a pointer to its vtable; index that table.
+        let table = *(shell_link as *const *const *const c_void);
         let set_path: unsafe extern "system" fn(*mut c_void, *const u16) -> i32 =
             std::mem::transmute(*table.add(20));
         let set_description: unsafe extern "system" fn(*mut c_void, *const u16) -> i32 =
@@ -759,7 +683,7 @@ pub fn create_shortcut(
                 link.display()
             ));
         }
-        let persist_table = *(persist as *const *const c_void);
+        let persist_table = *(persist as *const *const *const c_void);
         let save: unsafe extern "system" fn(*mut c_void, *const u16, i32) -> i32 =
             std::mem::transmute(*persist_table.add(6));
         let release_persist: unsafe extern "system" fn(*mut c_void) -> u32 =

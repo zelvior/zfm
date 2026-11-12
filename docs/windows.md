@@ -34,9 +34,9 @@ The old v0.0.1 release used Rust stable targeting Windows 10+. The revised relea
 ZFM ships its own installer instead of using NSIS or another third-party framework. It lives in `installer/` (a separate `zfm-installer` package in the workspace) and is plain Rust with direct Win32 calls, like the application itself.
 
 - The setup executable embeds the release `zfm.exe`, `zfm.ico`, the license and the README at build time, so it needs no network access and no extra archive.
-- The wizard uses the ZFM black-and-white interface and offers welcome, folder, license, progress and finish pages. `/S` installs silently and `/D=<folder>` chooses the folder.
+- The wizard uses the ZFM black-and-white interface and offers welcome, folder, license, progress and finish pages. `/S` installs silently and `/D=<folder>` chooses the folder. A silent run never opens a dialog, not even for bad arguments: it reports through the exit code (0 success, 1 failure, 2 bad usage).
 - Setup installs for the current user in `%LOCALAPPDATA%\Programs\ZFM` by default, writes the Start Menu shortcuts and the Programs and Features entry under `HKCU`, and copies itself to `Uninstall.exe` next to the application.
-- Uninstall removes exactly the files setup created. Other files in the folder are kept, the folder itself is removed only when empty, and the running uninstaller is moved to `%TEMP%` (also scheduled for removal at the next restart, which may require elevation) so the folder can be removed.
+- Uninstall removes exactly the files setup created. Other files in the folder are kept, and the folder itself is removed only when empty. Windows cannot delete a running executable, so the uninstaller copies itself to `%TEMP%`, closes immediately and lets the copy remove the rest, including the original uninstaller; when that is impossible the file is deleted at the next restart.
 - Setup refuses to replace unrelated files: reinstalling into the recorded folder upgrades in place, while any other folder that already contains a managed file is rejected.
 
 Build it after the application for the same architecture:
@@ -48,4 +48,4 @@ $env:ZFM_VERSION = "v0.0.3"
 cargo build --release --locked --target x86_64-pc-windows-msvc -p zfm-installer
 ```
 
-`ZFM_APP_BINARY` is required at build time; without it the package builds a placeholder payload so `cargo test -p zfm-installer` still runs. The installer unit tests (`cargo test -p zfm-installer`) cover option parsing, folder selection and the file install/remove rules on any host; Windows CI also compiles the Win32 wizard and runs the install/uninstall smoke test in `tests/installer-windows.ps1`. That smoke test has not yet run on GitHub or on Windows 7, and the wizard has not been exercised interactively.
+`ZFM_APP_BINARY` is required at build time; without it the package builds a placeholder payload so `cargo test -p zfm-installer` still runs. The installer unit tests (`cargo test -p zfm-installer`) cover option parsing, folder selection and the file install/remove rules on any host. The Windows jobs of the release workflow build setup for both architectures and run `tests/installer-windows.ps1`, which performs a silent install, checks the files, the Start Menu shortcuts and the Programs and Features entry, upgrades in place, uninstalls, verifies that user files survive and that an emptied folder is removed, and finally checks `/UNINSTALL`. Windows 7 SP1 and the wizard pages have not been exercised by hand.

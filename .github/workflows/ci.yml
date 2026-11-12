@@ -1,0 +1,80 @@
+name: CI
+
+# Builds and tests both interfaces on every push to main and every pull
+# request. The installer package is compiled for Windows here, so a change that
+# only breaks the Win32 wizard or setup program fails before a release run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.77.2 --profile minimal
+          rustc +1.77.2 --version
+      - name: Test
+        run: |
+          cargo +1.77.2 test --locked
+          cargo +1.77.2 test --locked -p zfm-installer
+      - name: Build
+        run: cargo +1.77.2 build --release --locked
+
+  windows:
+    name: Windows ${{ matrix.target }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
+    env:
+      # Windows 7 SP1 has no UCRT update, so link the C runtime statically.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust target
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install 1.77.2 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add --toolchain 1.77.2 $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc +1.77.2 --version
+      - name: Test
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo +1.77.2 test --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.77.2 test --locked --target $env:TARGET -p zfm-installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and smoke-test the installer
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: v0.0.0-ci
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +1.77.2 build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
+          $env:ZFM_APP_BINARY = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
+          $env:ZFM_VERSION = $env:TAG
+          cargo +1.77.2 build --release --locked --target $env:TARGET -p zfm-installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./tests/installer-windows.ps1 -Installer "target/$env:TARGET/release/zfm-setup.exe"

@@ -1,6 +1,6 @@
 //! Conservative, non-overwriting filesystem operations used by the UI.
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -185,6 +185,32 @@ pub fn duplicate_file<F: FnMut(u64)>(
     copy_file(source, parent, new_name, cancel, progress)
 }
 
+/// Open a source file for a copy without following a final-component symlink
+/// and without blocking on FIFOs. Only Linux implements the safe copy path, so
+/// every other target fails closed before any destination is created.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn open_copy_source(source: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(0x800 | crate::linux_flags::O_NOFOLLOW);
+    options.open(source)
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+)))]
+fn open_copy_source(_source: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Safe copy is not supported on this platform",
+    ))
+}
+
 /// Copy a regular file to a directory without replacing a destination.
 pub fn copy_file<F: FnMut(u64)>(
     source: &Path,
@@ -195,27 +221,7 @@ pub fn copy_file<F: FnMut(u64)>(
 ) -> io::Result<PathBuf> {
     validate_name(new_name)?;
     let destination = parent.join(new_name);
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Avoid blocking on FIFOs and do not follow a final-component symlink.
-        options.custom_flags(0x800 | crate::linux_flags::O_NOFOLLOW);
-    }
-    #[cfg(not(all(
-        target_os = "linux",
-        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-    )))]
-    return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Safe copy is not supported on this platform",
-    ));
-    #[allow(unreachable_code)]
-    let mut input = options.open(source)?;
+    let mut input = open_copy_source(source)?;
     if !input.metadata()?.is_file() {
         return Err(invalid("Only regular files can be duplicated"));
     }
@@ -289,20 +295,10 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "zfm-ops-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&p).unwrap();
-            Self(p)
+            Self(crate::test_support::scratch_dir("zfm-ops"))
         }
     }
     impl Drop for Temp {

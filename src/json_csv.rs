@@ -255,20 +255,10 @@ pub fn json_to_csv<F: FnMut(u64)>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "zfm-json-csv-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&p).unwrap();
-            Self(p)
+            Self(crate::test_support::scratch_dir("zfm-json-csv"))
         }
     }
     impl Drop for Temp {
