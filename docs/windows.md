@@ -26,3 +26,5 @@ cargo build --release --locked --target i686-pc-windows-gnu
 ```
 
 Use the appropriate MinGW toolchain for both architectures and configure Cargo linkers if they are not automatically found. The native Windows adapter must be linked and tested on each supported OS and architecture; modern Rust/toolchains may not support Windows 7. Do not distribute this untested browser as a Windows release. A future release should include the executable, license, and any required runtime libraries, so end users do not need Rust.
+
+The old v0.0.1 release used Rust stable targeting Windows 10+. The revised release workflow pins Rust 1.77.2 and uses the static C runtime to target Windows 7 SP1+, but neither the revised artifact nor the GUI has yet been verified on an actual Windows 7 system.
