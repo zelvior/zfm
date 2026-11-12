@@ -1,0 +1,4 @@
+/target/
+*.swp
+
+/zfm-linux-*.tar.gz
