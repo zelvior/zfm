@@ -12,3 +12,11 @@ pub mod trash;
 
 #[cfg(target_os = "linux")]
 pub mod linux_flags;
+
+#[cfg(target_os = "linux")]
+pub mod packed_archive;
+
+#[cfg(unix)]
+pub mod file_clipboard;
+
+pub mod json_csv;
