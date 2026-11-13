@@ -81,7 +81,7 @@ function Assert-SetupMetadata {
     param([string]$Path)
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
     if ($info.CompanyName -ne 'Zelvior Labs' -or $info.FileDescription -ne 'ZFM Setup' -or $info.ProductName -ne 'ZFM - Zelvior File Manager') {
-        throw "Missing setup branding in $Path: $($info.CompanyName), $($info.FileDescription), $($info.ProductName)"
+        throw "Missing setup branding in ${Path}: $($info.CompanyName), $($info.FileDescription), $($info.ProductName)"
     }
     if ($env:ZFM_VERSION -and $info.ProductVersion -ne $env:ZFM_VERSION) {
         throw "Incorrect ProductVersion '$($info.ProductVersion)' in $Path"
