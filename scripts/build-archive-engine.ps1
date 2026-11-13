@@ -22,10 +22,22 @@ try {
     & tar.exe -xzf $source -C $temp --strip-components 1
     if ($LASTEXITCODE -ne 0) { throw 'Could not extract the upstream source archive' }
     $bundle = Join-Path $temp 'CPP\7zip\Bundles\Alone2'
-    # nmake inherits the exact architecture-specific MSVC environment from vcvarsall.
-    $cmd = 'call "' + $vcvars + '" ' + $arch + ' && cd /d "' + $bundle + '" && nmake /nologo PLATFORM=' + $arch
-    & cmd.exe /d /s /c "`"$cmd`""
-    if ($LASTEXITCODE -ne 0) { throw 'Archive engine build failed' }
+    # Use a batch file instead of nesting cmd /s quotes around multiple quoted
+    # paths. nmake inherits the architecture-specific MSVC environment.
+    $batch = Join-Path $temp 'build-engine.cmd'
+    $commands = @(
+        '@echo off',
+        ('call "' + $vcvars + '" ' + $arch),
+        'if errorlevel 1 exit /b %errorlevel%',
+        ('nmake /nologo PLATFORM=' + $arch),
+        'exit /b %errorlevel%'
+    )
+    $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+    [IO.File]::WriteAllLines($batch, [string[]]$commands, $encoding)
+    Push-Location -LiteralPath $bundle
+    try { & $env:ComSpec /d /c $batch; $buildExit = $LASTEXITCODE }
+    finally { Pop-Location }
+    if ($buildExit -ne 0) { throw 'Archive engine build failed' }
     $built = Join-Path $bundle "$arch\7zz.exe"
     if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "Archive engine was not produced: $built" }
     $destination = [IO.Path]::GetFullPath($Output)
