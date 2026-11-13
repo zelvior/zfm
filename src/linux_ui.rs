@@ -222,7 +222,6 @@ unsafe fn label(text: &str) -> P {
     (api().gtk_label_new)(c(text).as_ptr())
 }
 unsafe fn set_status(app: &App, text: &str) {
-    if std::env::var_os("ZFM_SMOKE_DEBUG").is_some() { eprintln!("STATUS: {text}"); }
     (api().gtk_label_set_text)(app.status, c(text).as_ptr());
 }
 unsafe fn connect(widget: P, signal: &str, callback: P, data: P) {
@@ -563,7 +562,6 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         return 0;
     }
     (api().gdk_event_get_state)(event, &mut state);
-    if std::env::var_os("ZFM_SMOKE_DEBUG").is_some() { eprintln!("KEY {key:x} state={state:x} list={} selected={}", list_has_focus(p), selected_rows((*(p as *mut App)).list).len()); }
     // Do not retain an App reference while callbacks run nested dialogs.
     let modifiers = state & (1 | 4 | 8 | 64);
     match (key, modifiers) {

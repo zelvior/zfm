@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 printf 'GUI smoke fixture\n' > "$work/example.txt"
-ZFM_SMOKE_DEBUG=1 GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
+GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
 pid=$!
 window=''
 for _ in $(seq 1 100); do
