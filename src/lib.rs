@@ -4,6 +4,7 @@ pub mod navigation;
 pub mod ui_theme;
 
 pub mod converter;
+pub mod image_convert;
 
 pub mod operations;
 

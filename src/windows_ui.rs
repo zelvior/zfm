@@ -2137,7 +2137,10 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     let result = match mode {
                         0 => zfm::converter::csv_to_json(&input, &output, &cancel, |_| {}),
                         1 => zfm::json_csv::json_to_csv(&input, &output, &cancel, |_| {}),
-                        _ => zfm::converter::text_to_html(&input, &output, &cancel, |_| {}),
+                        2 => zfm::converter::text_to_html(&input, &output, &cancel, |_| {}),
+                        3 => zfm::image_convert::convert(&input, &output, true, &cancel, |_| {}),
+                        4 => zfm::image_convert::convert(&input, &output, false, &cancel, |_| {}),
+                        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported conversion")),
                     };
                     result.map(|_| format!("Converted to {}", output.display()))
                 }
@@ -2397,7 +2400,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         let selected_items = selected_indices(app);
         if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ["csv", "json", "txt"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+            if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
             }
         }
@@ -3119,8 +3122,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             (1, "csv", "Convert JSON to CSV")
                         } else if ext.eq_ignore_ascii_case("txt") {
                             (2, "html", "Convert text to HTML")
+                        } else if ext.eq_ignore_ascii_case("bmp") {
+                            (3, "ico", "Convert BMP to ICO")
+                        } else if ext.eq_ignore_ascii_case("ico") {
+                            (4, "bmp", "Convert ICO to BMP")
                         } else {
-                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON and TXT inputs only.".into()));
+                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON, TXT, BMP and ICO inputs only.".into()));
                             return 0;
                         };
                         let proposed = input.with_extension(target_ext);
