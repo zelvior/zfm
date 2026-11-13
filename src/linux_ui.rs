@@ -1680,6 +1680,7 @@ enum Operation {
     Rename(PathBuf, String),
     Duplicate(PathBuf, String),
     CopyTo(PathBuf, PathBuf),
+    CopyItems(Vec<PathBuf>, PathBuf),
     MoveTo(PathBuf, PathBuf),
     Trash(PathBuf),
     Delete(PathBuf),
@@ -1750,6 +1751,9 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
                 let name = path.file_name().unwrap_or_default();
                 operations::copy_item(&path, &destination, name, &cancel, |_| {})
                     .map(|p| format!("Copied to {}", p.display()))
+            }
+            Operation::CopyItems(paths, destination) => {
+                operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
             }
             Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
                 .map(|p| format!("Moved to {}", p.display())),

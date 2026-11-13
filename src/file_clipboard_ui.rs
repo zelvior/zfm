@@ -43,45 +43,49 @@ unsafe extern "C" fn clipboard_clear(_: P, data: P) {
     drop(Box::from_raw(data as *mut ClipboardData));
 }
 unsafe fn set_file(data: P, cut: bool) {
-    let path = match selected_path(data) {
-        Some(path) => path,
-        None => return,
-    };
-    if !cut {
-        let app = &*(data as *mut App);
-        let row = selected_rows(app.list)
-            .first()
-            .copied()
-            .unwrap_or(ptr::null_mut());
-        let index = if row.is_null() {
-            -1
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS || (cut && rows.len() != 1) {
+        set_status(
+            app,
+            if cut {
+                "Cut supports exactly one item."
+            } else {
+                "Select between 1 and 1024 items to copy."
+            },
+        );
+        return;
+    }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        let entry = if index < 0 {
+            None
         } else {
-            (api().gtk_list_box_row_get_index)(row)
+            app.entries.get(index as usize)
         };
-        if index < 0
-            || !app
-                .entries
-                .get(index as usize)
-                .map_or(false, |e| e.is_file || e.is_dir)
-        {
-            set_status(
-                app,
-                "Copy supports regular files and folders; links are not copied.",
-            );
-            return;
+        match entry {
+            Some(entry) if cut || entry.is_file || entry.is_dir => paths.push(entry.path.clone()),
+            _ => {
+                set_status(
+                    app,
+                    "Copy supports regular files and folders; links are not copied.",
+                );
+                return;
+            }
         }
     }
-    let gnome = match file_clipboard::encode_gnome(&path, cut) {
+    let gnome = match file_clipboard::encode_gnome(&paths, cut) {
         Ok(v) => v,
         Err(e) => {
-            set_status(&*(data as *mut App), &e.to_string());
+            set_status(app, &e.to_string());
             return;
         }
     };
-    let uri = match file_clipboard::encode_uri_list(&path) {
+    let uri = match file_clipboard::encode_uri_list(&paths) {
         Ok(v) => v,
         Err(e) => {
-            set_status(&*(data as *mut App), &e.to_string());
+            set_status(app, &e.to_string());
             return;
         }
     };
@@ -181,14 +185,9 @@ unsafe extern "C" fn received(clip: P, selection: P, data: P) {
         }
     };
     let operation = if item.cut {
-        Operation::MoveTo(item.path, request.destination.clone())
+        Operation::MoveTo(item.paths[0].clone(), request.destination.clone())
     } else {
-        if item.path.parent() == Some(request.destination.as_path()) {
-            let name = zfm::operations::suggest_copy_name(&request.destination, &item.path);
-            Operation::Duplicate(item.path, name)
-        } else {
-            Operation::CopyTo(item.path, request.destination.clone())
-        }
+        Operation::CopyItems(item.paths, request.destination.clone())
     };
     start_operation(request.app as P, request.destination, operation);
 }

@@ -553,6 +553,80 @@ fn path_within(path: &Path, ancestor: &Path) -> bool {
     true
 }
 
+/// Maximum number of top-level items accepted for one clipboard copy.
+pub const MAX_COPY_ITEMS: usize = 1024;
+
+/// Copies items in order, stopping at the first failure. Already published items
+/// are not rolled back. The failed item and all later items remain untouched
+/// except for best-effort staging cleanup performed by `copy_item`.
+#[derive(Debug)]
+pub struct BatchCopyResult {
+    pub completed: usize,
+    pub failure: Option<(PathBuf, String)>,
+}
+
+impl BatchCopyResult {
+    pub fn message(&self, total: usize) -> String {
+        match &self.failure {
+            Some((path, error)) => format!(
+                "Copied {} of {total} items; stopped at {}: {error}. Remaining items were not copied.",
+                self.completed, path.display()
+            ),
+            None => format!("Copied {} items.", self.completed),
+        }
+    }
+}
+
+pub fn copy_items(
+    paths: &[PathBuf],
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<BatchCopyResult> {
+    if paths.is_empty() || paths.len() > MAX_COPY_ITEMS {
+        return Err(invalid("Select between 1 and 1024 items to copy"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if paths
+        .iter()
+        .any(|path| !path.is_absolute() || !seen.insert(path))
+    {
+        return Err(invalid("Copy paths must be absolute and unique"));
+    }
+    let mut completed = 0;
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BatchCopyResult {
+                completed,
+                failure: Some((path.clone(), "Copy cancelled".into())),
+            });
+        }
+        let name = if path.parent() == Some(destination) {
+            std::ffi::OsString::from(suggest_copy_name(destination, path))
+        } else {
+            match path.file_name() {
+                Some(name) => name.to_os_string(),
+                None => {
+                    return Ok(BatchCopyResult {
+                        completed,
+                        failure: Some((path.clone(), "Source has no filename".into())),
+                    })
+                }
+            }
+        };
+        if let Err(error) = copy_item(path, destination, &name, cancel, |_| {}) {
+            return Ok(BatchCopyResult {
+                completed,
+                failure: Some((path.clone(), error.to_string())),
+            });
+        }
+        completed += 1;
+    }
+    Ok(BatchCopyResult {
+        completed,
+        failure: None,
+    })
+}
+
 /// Permanently remove a file/symlink or an *empty* folder. Never recurse or
 /// follow the final symlink. Confirmation is the caller's responsibility.
 pub fn remove_one(path: &Path) -> io::Result<()> {
@@ -915,6 +989,55 @@ mod tests {
         )
         .is_err());
         assert!(!src.join("Nested/inside").exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn batch_copy_success_partial_conflict_and_cancellation() {
+        let t = Temp::new();
+        let source = t.0.join("src");
+        let target = t.0.join("out");
+        fs::create_dir_all(source.join("folder/empty")).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(source.join("first"), b"first").unwrap();
+        fs::write(source.join("folder/nested"), b"nested").unwrap();
+        fs::write(source.join("last"), b"last").unwrap();
+        let paths = vec![
+            source.join("first"),
+            source.join("folder"),
+            source.join("last"),
+        ];
+        let cancel = AtomicBool::new(false);
+        fs::write(target.join("last"), b"existing").unwrap();
+        let result = copy_items(&paths, &target, &cancel).unwrap();
+        assert_eq!(result.completed, 2);
+        assert_eq!(result.failure.as_ref().unwrap().0, paths[2]);
+        assert!(result.message(paths.len()).contains("Copied 2 of 3"));
+        assert_eq!(fs::read(target.join("first")).unwrap(), b"first");
+        assert_eq!(fs::read(target.join("folder/nested")).unwrap(), b"nested");
+        assert!(target.join("folder/empty").is_dir());
+        assert_eq!(fs::read(target.join("last")).unwrap(), b"existing");
+        let result = copy_items(&paths, &source, &cancel).unwrap();
+        assert_eq!(result.completed, 3);
+        assert!(result.failure.is_none());
+        assert_eq!(fs::read(source.join("first copy")).unwrap(), b"first");
+        assert_eq!(
+            fs::read(source.join("folder copy/nested")).unwrap(),
+            b"nested"
+        );
+        cancel.store(true, Ordering::Relaxed);
+        let result = copy_items(&paths, &source, &cancel).unwrap();
+        assert_eq!(result.completed, 0);
+        assert!(result.failure.unwrap().1.contains("cancelled"));
+        assert!(!source.join("first copy 2").exists());
+        assert!(copy_items(&[], &target, &cancel).is_err());
+        assert!(copy_items(&[paths[0].clone(), paths[0].clone()], &target, &cancel).is_err());
+        assert!(copy_items(
+            &vec![paths[0].clone(); MAX_COPY_ITEMS + 1],
+            &target,
+            &cancel
+        )
+        .is_err());
     }
 
     #[test]
