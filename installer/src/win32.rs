@@ -161,6 +161,7 @@ pub const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 pub const MB_OK: u32 = 0x0000_0000;
 pub const MB_YESNO: u32 = 0x0000_0004;
+pub const MB_RETRYCANCEL: u32 = 0x0000_0005;
 pub const MB_ICONERROR: u32 = 0x0000_0010;
 pub const MB_ICONQUESTION: u32 = 0x0000_0020;
 pub const MB_SETFOREGROUND: u32 = 0x0001_0000;
@@ -432,6 +433,17 @@ pub fn message(owner: Hwnd, body: &str, title: &str, kind: u32) {
             text(title).as_ptr(),
             kind | MB_SETFOREGROUND,
         );
+    }
+}
+
+pub fn retry(owner: Hwnd, body: &str, title: &str) -> bool {
+    unsafe {
+        MessageBoxW(
+            owner,
+            text(body).as_ptr(),
+            text(title).as_ptr(),
+            MB_RETRYCANCEL | MB_ICONERROR | MB_SETFOREGROUND,
+        ) == 4
     }
 }
 

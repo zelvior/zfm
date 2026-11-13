@@ -21,6 +21,10 @@ public static class ZfmSetupSmoke {
     public static extern IntPtr GetDlgItem(IntPtr parent, int id);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern int GetClassNameW(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern IntPtr FindWindowW(string className, string title);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", ExactSpelling=true)]
@@ -146,8 +150,10 @@ function Get-WizardText {
 function Invoke-InteractiveSetup {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string]$TargetFolder
+        [Parameter(Mandatory = $true)][string]$TargetFolder,
+        [switch]$LockThenRetry
     )
+    $lockedFile = $null
     $wizardProcess = Start-Process -FilePath $Executable -PassThru
     try {
         $window = [IntPtr]::Zero
@@ -227,6 +233,12 @@ function Invoke-InteractiveSetup {
             throw "Wizard did not advance to the license page (status: $(Get-WizardText $status))."
         }
 
+        # Reproduce an older executable held open without delete sharing.
+        if ($LockThenRetry) {
+            $appPath = Join-Path $TargetFolder 'zfm.exe'
+            Set-Content -LiteralPath $appPath -Value 'old executable must survive until retry'
+            $lockedFile = [IO.File]::Open($appPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        }
         # License -> Installing -> Finish (runs on the background worker thread)
         Send-WizardCommand $window 102
         $finished = $false
@@ -238,7 +250,24 @@ function Invoke-InteractiveSetup {
             }
             if (-not [ZfmSetupSmoke]::IsWindowEnabled($window)) {
                 $reason = Get-WizardText $status
-                throw "Interactive setup opened a modal error dialog during installation: $reason"
+                if (-not $LockThenRetry -or $null -eq $lockedFile) {
+                    throw "Interactive setup opened a modal error dialog during installation: $reason"
+                }
+                if ($reason -notmatch 'Close ZFM' -or $reason -notmatch 'permissions') {
+                    throw "Locked file error was not actionable: $reason"
+                }
+                $dialog = [ZfmSetupSmoke]::FindWindowW('#32770', 'ZFM Setup')
+                if ($dialog -eq [IntPtr]::Zero) { throw 'Retry dialog not found.' }
+                $retry = [ZfmSetupSmoke]::GetDlgItem($dialog, 4) # IDRETRY
+                if ($retry -eq [IntPtr]::Zero) { throw 'Retry button not found.' }
+                $lockedFile.Dispose()
+                $lockedFile = $null
+                if ((Get-Content -LiteralPath $appPath -Raw).Trim() -ne 'old executable must survive until retry') {
+                    throw 'Failed install changed the locked original.'
+                }
+                if (-not [ZfmSetupSmoke]::PostMessageW($retry, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not click Retry.' }
+                Start-Sleep -Milliseconds 200
+                continue
             }
             if ([ZfmSetupSmoke]::IsWindowVisible($launch) -and (Get-WizardText $next) -eq 'Finish') {
                 $finished = $true
@@ -257,6 +286,7 @@ function Invoke-InteractiveSetup {
         }
         Assert-ExitCode $wizardProcess.ExitCode 0 'Interactive wizard setup'
     } finally {
+        if ($null -ne $lockedFile) { $lockedFile.Dispose() }
         $wizardProcess.Refresh()
         if (-not $wizardProcess.HasExited) {
             Stop-Process -Id $wizardProcess.Id -Force -ErrorAction SilentlyContinue
@@ -344,6 +374,29 @@ try {
     Assert-ExitCode $code 0 'Reinstalling over an existing installation'
     Assert-Installed $first
 
+    # Reinstall the same build while the installed program is running. Identical
+    # binaries must not be replaced or require the user to quit ZFM.
+    $runningApp = Start-Process -FilePath (Join-Path $first 'zfm.exe') -ArgumentList ('"' + $first + '"') -PassThru
+    try {
+        Wait-Until { $runningApp.Refresh(); $runningApp.MainWindowHandle -ne [IntPtr]::Zero -or $runningApp.HasExited } 'the installed app to start'
+        if ($runningApp.HasExited) { throw 'Installed application exited unexpectedly.' }
+        $code = Invoke-Setup $setup @('/S', "/D=`"$first`"")
+        Assert-ExitCode $code 0 'Reinstall while ZFM is running'
+        $runningApp.Refresh()
+        if ($runningApp.HasExited) { throw 'Reinstall terminated the running application.' }
+    } finally {
+        $runningApp.Refresh()
+        if (-not $runningApp.HasExited) { Stop-Process -Id $runningApp.Id -Force; $runningApp.WaitForExit() }
+    }
+    # A changed, locked executable must remain intact until the user releases
+    # it and explicitly clicks Retry; setup then completes normally.
+    $originalHash = (Get-FileHash -LiteralPath (Join-Path $first 'zfm.exe') -Algorithm SHA256).Hash
+    Invoke-InteractiveSetup -Executable $setup -TargetFolder $first -LockThenRetry
+    if ((Get-FileHash -LiteralPath (Join-Path $first 'zfm.exe') -Algorithm SHA256).Hash -ne $originalHash) {
+        throw 'Retry did not restore the bundled application.'
+    }
+    Assert-Installed $first
+
     # 6. The uninstaller removes its own files and leaves the user's files.
     $notes = Join-Path $first 'notes.txt'
     Set-Content -LiteralPath $notes -Value 'must survive uninstall'
@@ -401,8 +454,11 @@ try {
     Wait-Until { -not (Test-Path -LiteralPath $wizard) } 'the interactive installation folder to be removed'
 
     Write-Host 'Interactive wizard, silent setup, installed application, shortcuts, registry entries and uninstaller all behave as documented.'
+} catch {
+    Write-Host "::error title=Installer smoke test::$($_.Exception.Message)"
+    throw
 } finally {
-    foreach ($folder in @($second, $wizard)) {
+    foreach ($folder in @($first, $second, $wizard)) {
         $leftover = Join-Path $folder 'Uninstall.exe'
         if (Test-Path -LiteralPath $leftover) {
             try { Invoke-Setup $leftover @('/S') -Timeout 60 | Out-Null } catch { }

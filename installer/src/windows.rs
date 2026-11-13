@@ -186,8 +186,28 @@ struct Progress {
     text: String,
 }
 
+struct InstallFailure {
+    message: String,
+    retryable: bool,
+}
+impl From<String> for InstallFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+}
+impl From<payload::InstallFileError> for InstallFailure {
+    fn from(error: payload::InstallFileError) -> Self {
+        Self {
+            message: error.message,
+            retryable: error.retryable,
+        }
+    }
+}
 struct Done {
-    result: Result<(), String>,
+    result: Result<(), InstallFailure>,
 }
 
 /// The single wizard instance, published before the window exists so the
@@ -296,14 +316,7 @@ fn remove_registry() -> Vec<String> {
     problems
 }
 
-fn install_uninstaller(dir: &Path, exe: &Path) -> Result<(), String> {
-    let target = dir.join("Uninstall.exe");
-    fs::copy(exe, &target)
-        .map_err(|error| format!("Could not install {}: {error}", target.display()))?;
-    Ok(())
-}
-
-fn perform_install<F>(dir: &Path, exe: &Path, mut report: F) -> Result<(), String>
+fn perform_install<F>(dir: &Path, exe: &Path, mut report: F) -> Result<(), InstallFailure>
 where
     F: FnMut(i32, &str),
 {
@@ -316,11 +329,11 @@ where
         || payload::is_previous_install(dir);
     plan::may_install(dir, registered.as_deref())?;
 
-    let outcome = (|| -> Result<(), String> {
+    let outcome = (|| -> Result<(), InstallFailure> {
         report(20, "Copying the application…");
         payload::install_files(dir)?;
         report(55, "Installing the uninstaller…");
-        install_uninstaller(dir, exe)?;
+        payload::install_uninstaller(dir, exe)?;
         report(70, "Creating Start Menu shortcuts…");
         create_shortcuts(dir)?;
         report(90, "Registering the application…");
@@ -1061,7 +1074,7 @@ unsafe fn command(hwnd: Hwnd, wizard: &mut Wizard, wparam: WParam) -> Option<Str
     None
 }
 
-unsafe fn completed(hwnd: Hwnd, wizard: &mut Wizard, lparam: LParam) -> Option<String> {
+unsafe fn completed(hwnd: Hwnd, wizard: &mut Wizard, lparam: LParam) -> Option<InstallFailure> {
     let message = Box::from_raw(lparam as *mut Done);
     wizard.busy = false;
     match message.result {
@@ -1074,9 +1087,9 @@ unsafe fn completed(hwnd: Hwnd, wizard: &mut Wizard, lparam: LParam) -> Option<S
         }
         Err(error) => {
             wizard.page = Page::Folder;
-            wizard.status = error.clone();
+            wizard.status = error.message.clone();
             render(hwnd, wizard);
-            Some(format!("Setup could not finish:\n\n{error}"))
+            Some(error)
         }
     }
 }
@@ -1092,6 +1105,7 @@ unsafe extern "system" fn window_proc(
     }
     let wizard = &mut *WIZARD;
     let mut failure: Option<String> = None;
+    let mut install_failure: Option<InstallFailure> = None;
     let result = match message {
         WM_CLOSE => {
             if !wizard.busy {
@@ -1168,7 +1182,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DONE => {
             if lparam != 0 {
-                failure = completed(hwnd, wizard, lparam);
+                install_failure = completed(hwnd, wizard, lparam);
             }
             0
         }
@@ -1176,6 +1190,18 @@ unsafe extern "system" fn window_proc(
     };
     if let Some(error) = failure {
         win32::message(hwnd, &error, "ZFM Setup", win32::MB_ICONERROR);
+    }
+    if let Some(error) = install_failure {
+        let message = format!("Setup could not finish:\n\n{}", error.message);
+        if error.retryable {
+            if win32::retry(hwnd, &message, "ZFM Setup") {
+                // The Retry button explicitly authorizes another attempt; never
+                // terminate an application or modify permissions automatically.
+                begin_install(hwnd, &mut *WIZARD);
+            }
+        } else {
+            win32::message(hwnd, &message, "ZFM Setup", win32::MB_ICONERROR);
+        }
     }
     result
 }
