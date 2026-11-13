@@ -19,6 +19,8 @@ pub struct Entry {
 pub struct Listing {
     pub entries: Vec<Entry>,
     pub skipped: usize,
+    /// Search stopped at an entry, result or depth limit.
+    pub truncated: bool,
 }
 
 /// Read metadata on the worker, not the UI thread. Symlinks are not traversed
@@ -115,7 +117,84 @@ pub fn read_filtered(
     if generation.load(Ordering::Relaxed) != expected {
         return Ok(None);
     }
-    Ok(Some(Listing { entries, skipped }))
+    Ok(Some(Listing { entries, skipped, truncated: false }))
+}
+
+/// Hard bounds keep recursive searches from consuming unbounded time/memory.
+pub const SEARCH_MAX_ENTRIES: usize = 100_000;
+pub const SEARCH_MAX_RESULTS: usize = 5_000;
+pub const SEARCH_MAX_DEPTH: usize = 64;
+
+/// Find names beneath `root` without descending into symbolic links or Windows
+/// reparse points. This is a best-effort walk, not a defense against a hostile
+/// process concurrently replacing path components. Cancellation is cooperative.
+pub fn search_recursive(root: &Path, show_hidden: bool, query: &str, case_sensitive: bool,
+    generation: &AtomicU64, expected: u64) -> io::Result<Option<Listing>> {
+    search_with_limits(root, show_hidden, query, case_sensitive, generation, expected,
+        SearchLimits { entries: SEARCH_MAX_ENTRIES, results: SEARCH_MAX_RESULTS, depth: SEARCH_MAX_DEPTH })
+}
+
+#[derive(Clone, Copy)]
+struct SearchLimits { entries: usize, results: usize, depth: usize }
+fn search_with_limits(root: &Path, show_hidden: bool, query: &str, case_sensitive: bool,
+    generation: &AtomicU64, expected: u64, limits: SearchLimits) -> io::Result<Option<Listing>> {
+    if query.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Enter a search term first")); }
+    if generation.load(Ordering::Relaxed) != expected { return Ok(None); }
+    let query = if case_sensitive { query.to_owned() } else { query.to_lowercase() };
+    let mut todo = vec![(root.to_path_buf(), 0usize)];
+    let mut entries = Vec::new();
+    let mut visited = 0usize;
+    let mut skipped = 0usize;
+    let mut truncated = false;
+    while let Some((directory, depth)) = todo.pop() {
+        if generation.load(Ordering::Relaxed) != expected { return Ok(None); }
+        let children = match fs::read_dir(&directory) {
+            Ok(children) => children,
+            Err(error) if depth == 0 => return Err(error),
+            Err(_) => { skipped += 1; continue; }
+        };
+        for child in children {
+            if generation.load(Ordering::Relaxed) != expected { return Ok(None); }
+            if visited >= limits.entries { truncated = true; break; }
+            visited += 1;
+            let child = match child { Ok(child) => child, Err(_) => { skipped += 1; continue; } };
+            let name = child.file_name().to_string_lossy().into_owned();
+            if !show_hidden && name.starts_with('.') { continue; }
+            let path = child.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta, Err(_) => { skipped += 1; continue; }
+            };
+            #[cfg(windows)]
+            let (hidden, reparse) = {
+                use std::os::windows::fs::MetadataExt;
+                (meta.file_attributes() & 0x2 != 0, meta.file_attributes() & 0x400 != 0)
+            };
+            #[cfg(not(windows))]
+            let (hidden, reparse) = (false, false);
+            if !show_hidden && hidden { continue; }
+            let link = meta.file_type().is_symlink() || reparse;
+            if meta.is_dir() && !link {
+                if depth < limits.depth { todo.push((path.clone(), depth + 1)); }
+                else { truncated = true; }
+            }
+            let matches = if case_sensitive { name.contains(&query) } else { name.to_lowercase().contains(&query) };
+            if !matches { continue; }
+            if entries.len() >= limits.results { truncated = true; break; }
+            let is_dir = if link { fs::metadata(&path).map_or(false, |m| m.is_dir()) } else { meta.is_dir() };
+            entries.push(Entry { path, name, is_dir, is_file: !link && meta.is_file(),
+                size: if is_dir { None } else { Some(meta.len()) }, modified: meta.modified().ok() });
+        }
+        if visited >= limits.entries || entries.len() >= limits.results { truncated = true; break; }
+    }
+    if generation.load(Ordering::Relaxed) != expected { return Ok(None); }
+    Ok(Some(Listing { entries, skipped, truncated }))
+}
+
+/// Display search hits relative to their search root; preserve the actual path
+/// and name for file actions, even when different folders contain the same name.
+pub fn display_name(entry: &Entry, root: &Path, recursive: bool) -> String {
+    if recursive { entry.path.strip_prefix(root).unwrap_or(&entry.path).to_string_lossy().into_owned() }
+    else { entry.name.clone() }
 }
 
 #[cfg(test)]
@@ -132,6 +211,59 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn recursive_search_matches_nested_names_and_reports_relative_paths() {
+        let t = Temp::new();
+        fs::create_dir_all(t.0.join("nested/deep")).unwrap();
+        fs::create_dir_all(t.0.join(".hidden")).unwrap();
+        fs::write(t.0.join("needle.txt"), b"root").unwrap();
+        fs::write(t.0.join("nested/deep/Needle.txt"), b"nested").unwrap();
+        fs::write(t.0.join(".hidden/needle.txt"), b"hidden").unwrap();
+        let generation = AtomicU64::new(1);
+        let found = search_recursive(&t.0, false, "needle", false, &generation, 1).unwrap().unwrap();
+        assert_eq!(found.entries.len(), 2);
+        assert!(!found.truncated);
+        assert!(found.entries.iter().any(|e| display_name(e, &t.0, true) == Path::new("nested/deep/Needle.txt").to_string_lossy()));
+        assert_eq!(search_recursive(&t.0, true, "needle", false, &generation, 1).unwrap().unwrap().entries.len(), 3);
+        assert_eq!(search_recursive(&t.0, true, "needle", true, &generation, 1).unwrap().unwrap().entries.len(), 2);
+        assert!(search_recursive(&t.0, true, "", false, &generation, 1).is_err());
+        assert!(search_recursive(&t.0, false, "needle", false, &generation, 0).unwrap().is_none());
+        assert!(search_recursive(&t.0.join("missing"), false, "x", false, &generation, 1).is_err());
+    }
+    #[test]
+    fn recursive_search_reports_entry_and_result_limits() {
+        let t = Temp::new();
+        for i in 0..5 { fs::write(t.0.join(format!("hit-{i}")), b"x").unwrap(); }
+        let generation = AtomicU64::new(1);
+        let results = search_with_limits(&t.0, false, "hit", false, &generation, 1,
+            SearchLimits { entries: 100, results: 2, depth: 64 }).unwrap().unwrap();
+        assert_eq!(results.entries.len(), 2);
+        assert!(results.truncated);
+        let entries = search_with_limits(&t.0, false, "absent", false, &generation, 1,
+            SearchLimits { entries: 2, results: 100, depth: 64 }).unwrap().unwrap();
+        assert!(entries.truncated);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn recursive_search_does_not_traverse_symlinks() {
+        use std::os::unix::fs::symlink;
+        let t = Temp::new();
+        let external = Temp::new();
+        fs::write(external.0.join("only-external-hit"), b"x").unwrap();
+        symlink(&external.0, t.0.join("external")).unwrap();
+        symlink(&t.0, t.0.join("cycle")).unwrap();
+        let result = search_recursive(&t.0, true, "hit", false, &AtomicU64::new(1), 1).unwrap().unwrap();
+        assert!(result.entries.is_empty());
+    }
+    #[test]
+    fn recursive_search_limits_depth() {
+        let t = Temp::new();
+        let mut path = t.0.clone();
+        for _ in 0..4 { path.push("a"); fs::create_dir(&path).unwrap(); }
+        let result = search_with_limits(&t.0, false, "absent", false, &AtomicU64::new(1), 1,
+            SearchLimits { entries: 100, results: 100, depth: 2 }).unwrap().unwrap();
+        assert!(result.truncated);
     }
     #[test]
     fn empty_hidden_unicode_and_sorting() {
@@ -199,6 +331,8 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(search_recursive(&t.0, false, "invisible", false, &generation, 1).unwrap().unwrap().entries.len(), 0);
+        assert_eq!(search_recursive(&t.0, true, "invisible", false, &generation, 1).unwrap().unwrap().entries.len(), 1);
         assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), 0x80) }, 0);
     }
     #[test]

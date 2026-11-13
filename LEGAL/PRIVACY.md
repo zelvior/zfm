@@ -8,6 +8,7 @@
 | User-selected files, filenames, metadata and directory paths | Read or modified on selected local or mounted storage; archive/conversion outputs and temporary staging files may remain after a crash/failure. User controls paths; no universal deletion schedule. |
 | User settings | Hidden-file visibility and sort direction, plus Windows folder-refresh, drive-label, startup-view and sidebar preferences, are stored in a per-user configuration file when Apply is used. The file remains after uninstall; see the README for its location. |
 | Windows drive and folder refresh | ZFM periodically queries Windows logical drives and their volume names, and by default rescans the current folder. Mapped network storage may be contacted by these OS filesystem calls; results are held in memory. |
+| Folder bookmarks | User-selected folder paths are stored in the per-user bookmarks file and retained across restarts and uninstall until removed by the user. Hex encoding is not encryption. |
 | Navigation history | In process memory (`src/navigation.rs`); OS, desktop or applications may separately retain histories or logs. |
 | Clipboard | File paths and copy/cut metadata or text go to the OS clipboard (`file_clipboard_ui.rs`, `windows_actions.rs`); clipboard managers/other applications may access or retain them. |
 | PDF preview passwords | A supplied PDF password is held in application memory while the document is open and passed to PDFium; it is not guaranteed to be erased. |

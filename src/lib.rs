@@ -2,10 +2,12 @@
 //! Filesystem and navigation logic independent of the user interface.
 pub mod directory;
 pub mod navigation;
+pub mod bookmarks;
 pub mod ui_theme;
 
 pub mod converter;
 pub mod image_convert;
+pub mod audio_convert;
 
 pub mod operations;
 

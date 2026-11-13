@@ -28,6 +28,19 @@ if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&
 # Exercise the GTK event loop without requiring a window manager.
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
+# Ctrl+B bookmarks the current folder without modifying settings.
+xdotool key --window "$window" ctrl+b
+for _ in $(seq 1 100); do
+    [ ! -f "$config/zfm/bookmarks.conf" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while bookmarking:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+python3 - "$config/zfm/bookmarks.conf" "$work" <<'PYBOOKMARK'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert lines == ['version=1', sys.argv[2].encode().hex()], lines
+PYBOOKMARK
+xdotool key --window "$window" ctrl+b
 # The settings dialog opens and can be cancelled without changing the list.
 xdotool key --window "$window" ctrl+comma
 settings=''
@@ -94,6 +107,28 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 if [ ! -f "$work/created.txt" ]; then echo 'Enter did not create the new file:' >&2; cat "$work/stderr" >&2; exit 1; fi
+# Recursive search finds a nested file and previews its actual path.
+mkdir -p "$work/search-fixture/nested"
+printf 'recursive fixture\n' > "$work/search-fixture/nested/needle-search.txt"
+xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+f
+xdotool type --clearmodifiers 'needle-search.txt'
+xdotool key --window "$window" ctrl+shift+f
+sleep 1
+xdotool key --window "$window" Escape ctrl+a ctrl+p
+search_preview=''
+for _ in $(seq 1 100); do
+    search_preview=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Preview — needle-search.txt$' 2>/dev/null | head -n 1 || true)
+    [ -z "$search_preview" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during recursive search:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+if [ -z "$search_preview" ]; then echo 'Recursive search result did not open its preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
+xdotool windowfocus --sync "$search_preview"
+xdotool key --window "$search_preview" Escape
+xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+f ctrl+a BackSpace Return
+sleep 1
 # Exercise multi-item copy (including a folder) through native clipboard shortcuts.
 mkdir -p "$work/folder-test/source/nested/empty"
 printf 'nested content\n' > "$work/folder-test/source/nested/file.txt"

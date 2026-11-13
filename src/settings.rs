@@ -81,7 +81,7 @@ fn safe_metadata(meta: &fs::Metadata, want_dir: bool) -> bool {
     }
     !meta.file_type().is_symlink() && if want_dir { meta.is_dir() } else { meta.is_file() }
 }
-fn check_directory(dir: &Path) -> io::Result<bool> {
+pub(crate) fn check_directory(dir: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if safe_metadata(&meta, true) => Ok(true),
         Ok(_) => Err(invalid("Settings directory is not a regular directory")),
@@ -89,7 +89,7 @@ fn check_directory(dir: &Path) -> io::Result<bool> {
         Err(e) => Err(e),
     }
 }
-fn open_existing(path: &Path) -> io::Result<File> {
+pub(crate) fn open_existing(path: &Path) -> io::Result<File> {
     #[cfg(all(target_os = "linux", not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))))]
     return Err(io::Error::new(io::ErrorKind::Unsupported, "Safe settings access is unavailable on this architecture"));
     let meta = fs::symlink_metadata(path)?;
@@ -128,9 +128,9 @@ pub fn load(path: &Path) -> io::Result<Settings> {
 }
 
 #[cfg(not(windows))]
-fn replace(from: &Path, to: &Path) -> io::Result<()> { fs::rename(from, to) }
+pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> { fs::rename(from, to) }
 #[cfg(windows)]
-fn replace(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }

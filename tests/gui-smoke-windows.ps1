@@ -65,6 +65,15 @@ try {
     }
     if (-not [ZfmSmoke]::IsWindowVisible($window)) { throw 'ZFM main window is not visible.' }
 
+    # Bookmark the current folder and ensure adding it twice is idempotent.
+    $result = [UIntPtr]::Zero
+    foreach ($attempt in @(1, 2)) {
+        if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]167, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not bookmark folder.' }
+    }
+    $bookmarkFile = Join-Path $configRoot 'zfm\bookmarks.conf'
+    $bookmarkHex = [BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($work)).Replace('-', '').ToLowerInvariant()
+    if (-not (Test-Path -LiteralPath $bookmarkFile) -or ((Get-Content -LiteralPath $bookmarkFile) -join "`n") -ne ("version=1`n" + $bookmarkHex)) { throw 'Bookmark was not saved correctly.' }
+
     # Identify controls by their Win32 IDs. Passing PowerShell $null to a .NET
     # string argument can become an empty string, so FindWindowEx's title filter
     # accidentally searched for an unlabelled button instead of any button.
@@ -294,6 +303,9 @@ try {
     [byte[]]$pixels = @(255, 0, 0, 0, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0)
     $pixels.CopyTo($bmp, 54)
     [IO.File]::WriteAllBytes((Join-Path $work 'source.bmp'), $bmp)
+    # Mono, 16-bit, 8 kHz PCM with two samples.
+    [byte[]]$wav = @(82,73,70,70,40,0,0,0,87,65,86,69,102,109,116,32,16,0,0,0,1,0,1,0,64,31,0,0,128,62,0,0,2,0,16,0,100,97,116,97,4,0,0,0,0,128,255,127)
+    [IO.File]::WriteAllBytes((Join-Path $work 'source-audio.wav'), $wav)
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]104, [IntPtr]::Zero, 2, 3000, [ref]$result)
     function Convert-Fixture([string]$inputName, [string]$dialogTitle, [string]$outputName) {
@@ -349,6 +361,9 @@ try {
         } finally { $decoded.Dispose() }
     } finally { $icon.Dispose() }
     Convert-Fixture 'image.ico' 'Convert ICO to BMP' 'roundtrip.bmp'
+    Convert-Fixture 'source-audio.wav' 'Convert PCM WAV to AIFF (metadata omitted)' 'source-audio.aiff'
+    Convert-Fixture 'source-audio.aiff' 'Convert PCM AIFF to WAV (metadata omitted)' 'roundtrip-audio.wav'
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work 'roundtrip-audio.wav'))) -ne [Convert]::ToBase64String($wav)) { throw 'Audio conversion round trip differs.' }
     $decoded = [Drawing.Bitmap]::new((Join-Path $work 'roundtrip.bmp'))
     try {
         if ($decoded.Width -ne 2 -or $decoded.Height -ne 2 -or $decoded.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::Red.ToArgb()) { throw 'Windows could not correctly decode the generated bitmap.' }
@@ -489,6 +504,36 @@ try {
         for ($i = 0; $i -lt 200 -and -not (Test-Path -LiteralPath $extracted); $i++) { Start-Sleep -Milliseconds 100 }
         if (-not (Test-Path -LiteralPath $extracted) -or [IO.File]::ReadAllText($extracted) -ne [IO.File]::ReadAllText((Join-Path $work 'example.txt'))) { throw 'Archive extraction failed.' }
     } else { Write-Host 'Archive GUI smoke skipped: engine not present beside executable.' }
+
+    # Search nested names and navigate to the result's containing directory.
+    $searchFolder = Join-Path $work 'search-fixture'
+    New-Item -ItemType Directory -Path $searchFolder -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $searchFolder 'needle-search.txt'), 'nested search fixture')
+    $filter = [ZfmSmoke]::GetDlgItem($window, 112)
+    if ([ZfmSmoke]::SendMessageW($filter, 0x000c, [UIntPtr]::Zero, 'needle-search.txt') -eq [IntPtr]::Zero) { throw 'Could not set search query.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]168, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not start recursive search.' }
+    $searchIndex = -1
+    for ($i = 0; $i -lt 100; $i++) {
+        $searchIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'search-fixture\needle-search.txt').ToInt64()
+        if ($searchIndex -ge 0) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($searchIndex -lt 0) { throw 'Recursive search did not list the nested path.' }
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$searchIndex, 2, 3000, [ref]$result)
+    if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]169, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not open containing folder.' }
+    $address = [ZfmSmoke]::GetDlgItem($window, 106)
+    $opened = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $value = New-Object System.Text.StringBuilder 2048
+        [void][ZfmSmoke]::GetControlText($address, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$result)
+        if ($value.ToString() -eq $searchFolder) { $opened = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $opened) { throw 'Containing folder did not open.' }
+    [void][ZfmSmoke]::SendMessageW($address, 0x000c, [UIntPtr]::Zero, $work)
+    [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]105, [IntPtr]::Zero, 2, 3000, [ref]$result)
 
     # Save a changed value after the other list tests, then verify it survives restart.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings for saving.' }

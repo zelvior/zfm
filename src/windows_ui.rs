@@ -158,6 +158,11 @@ const ARCHIVE_EXTRACT_PASSWORD: usize = 163;
 const COPY_TO: usize = 164;
 const MOVE_TO: usize = 165;
 const CANCEL_OPERATION: usize = 166;
+const BOOKMARK_ADD: usize = 167;
+const SEARCH_RECURSIVE: usize = 168;
+const OPEN_CONTAINING: usize = 169;
+const BOOKMARK_OPEN_BASE: usize = 500;
+const BOOKMARK_REMOVE_BASE: usize = 600;
 
 #[repr(C)]
 struct WndClass {
@@ -740,6 +745,8 @@ struct App {
     theme: *const Theme,
     tabs: Tabs,
     filter: String,
+    recursive_search: bool,
+    search_root: Option<PathBuf>,
     show_hidden: bool,
     drives_expanded: bool,
     preferences: zfm::settings::Settings,
@@ -1860,6 +1867,7 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
     let modified_text = format_local_modified(entry.modified);
     let type_text = ui_theme::entry_type_label(entry);
     let size_text = ui_theme::format_human_size(entry);
+    let display_name = directory::display_name(entry, app.tabs.current().current(), app.recursive_search);
     let theme = &*app.theme;
 
     blit_pixels(
@@ -1876,7 +1884,7 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
                     theme.semibold_font,
                     ui_theme::TEXT_BRIGHT,
                     BoxRect::new(44, 2, (w - 56).max(20), h / 2),
-                    &entry.name,
+                    &display_name,
                     DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
                 );
                 let sub = if size_text.is_empty() {
@@ -1898,7 +1906,7 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
                     theme.font,
                     ui_theme::TEXT_BRIGHT,
                     BoxRect::new(44, 0, (name_end - 52).max(20), h),
-                    &entry.name,
+                    &display_name,
                     DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
                 );
                 draw_text_in(
@@ -2025,7 +2033,7 @@ unsafe fn populate_listbox(app: &App, preserve_path: Option<&Path>) {
             app.list,
             LB_ADDSTRING,
             0,
-            text(&entry.name).as_ptr() as isize,
+            text(&directory::display_name(entry, app.tabs.current().current(), app.recursive_search)).as_ptr() as isize,
         );
     }
     if let Some(idx) = select_idx {
@@ -2142,7 +2150,7 @@ unsafe fn poll_folder(hwnd: H, app: &mut App) {
         _ => None,
     };
     if let Some(message) = received {
-        if app.preferences.windows_live_refresh && !app.listing_pending && !app.operation_busy
+        if app.preferences.windows_live_refresh && !app.recursive_search && !app.listing_pending && !app.operation_busy
             && app.token.load(Ordering::Relaxed) == message.generation
             && app.tabs.current().current() == message.path {
             if let Ok(Some(mut listing)) = message.result {
@@ -2170,7 +2178,7 @@ unsafe fn poll_folder(hwnd: H, app: &mut App) {
             }
         }
     }
-    if !app.preferences.windows_live_refresh || app.listing_pending || app.operation_busy
+    if !app.preferences.windows_live_refresh || app.recursive_search || app.listing_pending || app.operation_busy
         || app.folder_scan.is_some() || Instant::now() < app.next_folder_scan { return; }
     app.next_folder_scan = Instant::now() + Duration::from_secs(3);
     let path = app.tabs.current().current().to_path_buf();
@@ -2191,19 +2199,29 @@ unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice
         Some(path) => path,
         None => return,
     };
+    if app.recursive_search && (!matches!(destination, Destination::Refresh) || app.search_root.as_deref() != Some(path.as_path())) {
+        app.recursive_search = false;
+        app.search_root = None;
+        app.filter.clear();
+        SetWindowTextW(app.filter_control, text("").as_ptr());
+    }
     let generation = app.token.fetch_add(1, Ordering::Relaxed) + 1;
     app.listing_pending = true;
     let token = app.token.clone();
     let target = hwnd as usize;
     let filter = app.filter.clone();
+    let recursive = app.recursive_search;
     let show_hidden = app.show_hidden;
     let notice = if preserve_notice { app.notice.clone() } else { None };
     if !preserve_notice {
         set_status(hwnd, app, Some(format!("Loading {}…", path.display())));
     }
     thread::spawn(move || {
-        let result =
-            directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
+        let result = if recursive {
+            directory::search_recursive(&path, show_hidden, &filter, false, &token, generation)
+        } else {
+            directory::read_filtered(&path, show_hidden, &filter, false, &token, generation)
+        };
         if token.load(Ordering::Relaxed) != generation {
             return;
         }
@@ -2284,6 +2302,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                         2 => zfm::converter::text_to_html(&input, &output, &cancel, |_| {}),
                         3 => zfm::image_convert::convert(&input, &output, true, &cancel, |_| {}),
                         4 => zfm::image_convert::convert(&input, &output, false, &cancel, |_| {}),
+                        5 => zfm::audio_convert::convert(&input, &output, true, &cancel, |_| {}),
+                        6 => zfm::audio_convert::convert(&input, &output, false, &cancel, |_| {}),
                         _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported conversion")),
                     };
                     result.map(|_| format!("Converted to {}", output.display()))
@@ -2544,6 +2564,9 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
     }
     if selected {
         AppendMenuW(menu, 0, 1, text("Open").as_ptr());
+        if app.recursive_search && selected_indices(app).len() == 1 {
+            AppendMenuW(menu, 0, OPEN_CONTAINING, text("Open containing folder").as_ptr());
+        }
         if selected_indices(app).len() == 1 && app.entries[selected_indices(app)[0]].is_dir {
             AppendMenuW(menu, 0, OPEN_TAB, text("Open in new tab").as_ptr());
         }
@@ -2557,7 +2580,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
                 AppendMenuW(menu, 0, ARCHIVE_EXTRACT_TO, text("Extract to folder…").as_ptr());
                 AppendMenuW(menu, 0, ARCHIVE_EXTRACT_PASSWORD, text("Extract with password…").as_ptr());
             }
-            if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+            if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
             }
         }
@@ -2624,6 +2647,29 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             AppendMenuW(menu, 0x10, view as usize, text("View").as_ptr());
         }
     }
+    AppendMenuW(menu, 0x800, 0, ptr::null());
+    AppendMenuW(menu, 0, SEARCH_RECURSIVE, text("Search subfolders (Ctrl+Shift+F)").as_ptr());
+    // Retain this snapshot while the menu is open; commands refer to its indices.
+    let bookmark_paths = match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::load(&file)) {
+        Ok(paths) => paths,
+        Err(error) => { set_status(hwnd, app, Some(format!("Could not load bookmarks: {error}"))); Vec::new() }
+    };
+    let bookmarks = CreatePopupMenu();
+    if !bookmarks.is_null() {
+        AppendMenuW(bookmarks, 0, BOOKMARK_ADD, text("Bookmark current folder (Ctrl+B)").as_ptr());
+        if !bookmark_paths.is_empty() {
+            AppendMenuW(bookmarks, 0x800, 0, ptr::null());
+            let remove = CreatePopupMenu();
+            for (index, path) in bookmark_paths.iter().enumerate() {
+                let display = path.to_string_lossy().replace('&', "&&");
+                let title = if display.chars().count() > 100 { format!("{}…", display.chars().take(100).collect::<String>()) } else { display };
+                AppendMenuW(bookmarks, 0, BOOKMARK_OPEN_BASE + index, text(&title).as_ptr());
+                if !remove.is_null() { AppendMenuW(remove, 0, BOOKMARK_REMOVE_BASE + index, text(&title).as_ptr()); }
+            }
+            if !remove.is_null() { AppendMenuW(bookmarks, 0x10, remove as usize, text("Remove bookmark").as_ptr()); }
+        }
+        AppendMenuW(menu, 0x10, bookmarks as usize, text("Bookmarks").as_ptr());
+    }
     if app.operation_busy {
         AppendMenuW(menu, 0x800, 0, ptr::null());
         AppendMenuW(menu, 0, CANCEL_OPERATION, text("Cancel current operation").as_ptr());
@@ -2638,7 +2684,16 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         ptr::null(),
     );
     DestroyMenu(menu);
-    if id == 1 {
+    if (BOOKMARK_OPEN_BASE..BOOKMARK_OPEN_BASE + bookmark_paths.len()).contains(&(id as usize)) {
+        load(hwnd, app, Destination::Visit(bookmark_paths[id as usize - BOOKMARK_OPEN_BASE].clone()), false);
+    } else if (BOOKMARK_REMOVE_BASE..BOOKMARK_REMOVE_BASE + bookmark_paths.len()).contains(&(id as usize)) {
+        let path = &bookmark_paths[id as usize - BOOKMARK_REMOVE_BASE];
+        let status = match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::remove(&file, path)) {
+            Ok(true) => "Bookmark removed.".to_string(), Ok(false) => "Bookmark was already removed.".to_string(),
+            Err(error) => format!("Could not remove bookmark: {error}"),
+        };
+        set_status(hwnd, app, Some(status));
+    } else if id == 1 {
         SendMessageW(hwnd, WM_COMMAND, LIST | (2 << 16), app.list as isize);
     } else if (201..=206).contains(&id) {
         let mut r: Rect = std::mem::zeroed();
@@ -3138,6 +3193,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     );
                     let path = wide(app.tabs.current().current().as_os_str());
                     SetWindowTextW(app.address, path.as_ptr());
+                    let search_note = if app.recursive_search {
+                        Some(if listing.truncated { format!("Recursive search: {} results; limit reached, results may be incomplete", listing.entries.len()) }
+                        else { format!("Recursive search: {} results", listing.entries.len()) })
+                    } else { None };
                     let skipped_note = if listing.skipped > 0 {
                         Some(format!(
                             "{}  ({} entries skipped)",
@@ -3150,7 +3209,11 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     app.entries = listing.entries;
                     populate_listbox(app, None);
                     rebuild_backdrop(hwnd, app);
-                    let notice = match (message.notice, skipped_note) {
+                    let extra = match (search_note, skipped_note) {
+                        (Some(search), Some(skipped)) => Some(format!("{search}  |  {skipped}")),
+                        (Some(search), None) => Some(search), (None, skipped) => skipped,
+                    };
+                    let notice = match (message.notice, extra) {
                         (Some(notice), Some(skipped)) => Some(format!("{notice}  |  {skipped}")),
                         (Some(notice), None) => Some(notice),
                         (None, skipped) => skipped,
@@ -3256,12 +3319,16 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     }
                 }
                 APPLY_FILTER if code == 0 => {
+                    app.recursive_search = false;
+                    app.search_root = None;
                     app.filter = control_value(app.filter_control)
                         .to_string_lossy()
                         .into_owned();
                     load(hwnd, app, Destination::Refresh, false);
                 }
                 CLEAR_FILTER if code == 0 => {
+                    app.recursive_search = false;
+                    app.search_root = None;
                     app.filter.clear();
                     SetWindowTextW(app.filter_control, text("").as_ptr());
                     load(hwnd, app, Destination::Refresh, false);
@@ -3377,8 +3444,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             (3, "ico", "Convert BMP to ICO")
                         } else if ext.eq_ignore_ascii_case("ico") {
                             (4, "bmp", "Convert ICO to BMP")
+                        } else if ext.eq_ignore_ascii_case("wav") {
+                            (5, "aiff", "Convert PCM WAV to AIFF (metadata omitted)")
+                        } else if ext.eq_ignore_ascii_case("aiff") || ext.eq_ignore_ascii_case("aif") {
+                            (6, "wav", "Convert PCM AIFF to WAV (metadata omitted)")
                         } else {
-                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON, TXT, BMP and ICO inputs only.".into()));
+                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON, TXT, BMP, ICO and PCM WAV/AIFF inputs only.".into()));
                             return 0;
                         };
                         let proposed = input.with_extension(target_ext);
@@ -3392,6 +3463,31 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             }
                         }
                     }
+                }
+                SEARCH_RECURSIVE if code == 0 => {
+                    let query = control_value(app.filter_control).to_string_lossy().into_owned();
+                    if query.is_empty() {
+                        set_status(hwnd, app, Some("Enter a search term, then choose Search subfolders.".into()));
+                        SetFocus(app.filter_control);
+                        return 0;
+                    }
+                    app.filter = query;
+                    app.recursive_search = true;
+                    app.search_root = Some(app.tabs.current().current().to_path_buf());
+                    load(hwnd, app, Destination::Refresh, false);
+                }
+                OPEN_CONTAINING if code == 0 => {
+                    if let Some(parent) = selected_path(hwnd, app).and_then(|path| path.parent().map(|p| p.to_path_buf())) {
+                        load(hwnd, app, Destination::Visit(parent), false);
+                    }
+                }
+                BOOKMARK_ADD if code == 0 => {
+                    let path = app.tabs.current().current().to_path_buf();
+                    let status = match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::add(&file, &path)) {
+                        Ok(true) => "Folder bookmarked.".to_string(), Ok(false) => "Folder is already bookmarked.".to_string(),
+                        Err(error) => format!("Could not save bookmark: {error}"),
+                    };
+                    set_status(hwnd, app, Some(status));
                 }
                 CANCEL_OPERATION if code == 0 => {
                     if let Some(cancel) = &app.operation_cancel {
@@ -3713,6 +3809,8 @@ pub fn run() -> Result<(), String> {
             theme: &theme,
             tabs: Tabs::new(initial),
             filter: String::new(),
+            recursive_search: false,
+            search_root: None,
             show_hidden: saved_settings.show_hidden,
             drives_expanded: saved_settings.windows_expand_drives,
             preferences: saved_settings,
@@ -3825,6 +3923,8 @@ pub fn run() -> Result<(), String> {
                     0x58 if ctrl && !alt && focus == (*app).list => Some(CUT),
                     0x56 if ctrl && !alt && focus == (*app).list => Some(PASTE),
                     0x44 if ctrl && !alt && focus == (*app).list => Some(DUPLICATE),
+                    0x42 if ctrl && !alt && !shift => Some(BOOKMARK_ADD),
+                    0x46 if ctrl && !alt && shift => Some(SEARCH_RECURSIVE),
                     0x4e if ctrl && !alt && shift => Some(PROMPT_FOLDER),
                     0x4e if ctrl && !alt => Some(PROMPT_FILE),
                     0x0d if alt && !ctrl && focus == (*app).list => Some(PROPERTIES),
