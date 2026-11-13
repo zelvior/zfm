@@ -1,0 +1,7 @@
+# Trademark review
+
+**ACTION REQUIRED.** ZFM, Zelvior Labs, logos and wordmarks are branding, not proof of registration or ownership. Web leads include an older unrelated [Zfm Linux file manager](https://www.softpile.com/zfm) and a [SourceForge zfm project](https://sourceforge.net/projects/zfm/). Neither proves current use, registration, priority or infringement. No complete registry, domain, app-store or common-law clearance was performed.
+
+Search IPO Pakistan, [WIPO Global Brand Database](https://www.wipo.int/en/web/global-brand-database/faqs_branddb), applicable national registers, phonetic/visual variations, existing software and domains; WIPO itself warns the database is not exhaustive. Have qualified trademark counsel assess similarity, scope, rights, territorial coverage, dates and relevant Nice classes (software often implicates class 9; other classes depend on activities). Check conflicts before costly branding and consider renaming if advised. Do not use ® without verified applicable registration.
+
+IPO's [FAQ](https://ipo.gov.pk/trademark_faqs) and [fee/forms](https://ipo.gov.pk/trademarks-fee-forms) may differ in numbering or reflect proposed revisions: verify current forms, fees and filing procedure directly with IPO. Gather actual applicant identity, authority, mark specimen, goods/services, class and any agent authorization; examine objections, opposition, registration and renewals. Madrid coverage is not automatic or global; eligibility, basic mark, designated territories and national review apply. Seek local advice.

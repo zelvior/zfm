@@ -208,3 +208,7 @@ The foundation and added actions need interactive GTK testing and compatibility 
 Licensed under [Apache-2.0](LICENSE). Created by Zelvior at Zelvior Labs.
 
 See [development phases and conversion matrix](docs/development-plan.md) for current scope, risks and reproducible baseline measurement.
+
+## Legal, privacy and security
+
+ZFM is distributed under [Apache License 2.0](LICENSE). Read the [release-readiness audit](LEGAL/RELEASE_READINESS.md), [third-party and runtime inventory](LEGAL/THIRD_PARTY.md), [privacy notes](LEGAL/PRIVACY.md), [operational terms](LEGAL/TERMS.md), and [security reporting policy](SECURITY.md). The [source-workspace SBOM](SBOM.spdx.json) is not a complete binary inventory. Ownership, trademark clearance, private security reporting and release-specific third-party obligations require further action; these materials are not legal advice or certification. Installed README copies include Rust 1.77.2 upstream reference notices; links to repository documents may require visiting the [source repository](https://github.com/zelvior/zfm).

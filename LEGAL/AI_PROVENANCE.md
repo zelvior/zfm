@@ -1,0 +1,3 @@
+# AI-assisted contributions
+
+**UNVERIFIED.** Git records include Arena-associated author identities, but Git metadata does not establish whether an AI system generated particular content, which tool or model was involved, its terms, human authorship or rights. The logo/installer commit `4dda824` requires specific provenance review. Owner should document actual tools, inputs, service terms and human review where available; check for copied third-party materials, privacy and permission issues. Do not assert that all code or assets are human-created, AI-created, original or assigned without evidence.

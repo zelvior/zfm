@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Check legal inventory and Debian packaging
+        run: |
+          python3 tests/legal-check.py
+          bash tests/package-deb.sh
       - name: Install Rust
         run: |
           rustup toolchain install 1.77.2 --profile minimal

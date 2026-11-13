@@ -19,7 +19,15 @@ pub const ICON: &[u8] = include_bytes!(env!("ZFM_ICON_PATH"));
 /// PNG logo used for the installer window icon.
 pub const LOGO: &[u8] = include_bytes!(env!("ZFM_LOGO_PATH"));
 pub const LICENSE: &str = include_str!(env!("ZFM_LICENSE_PATH"));
-pub const README: &str = include_str!(env!("ZFM_README_PATH"));
+pub const README: &str = concat!(
+    include_str!(env!("ZFM_README_PATH")),
+    "\n\n--- Upstream Rust 1.77.2 COPYRIGHT (reference for pinned release builds) ---\n",
+    include_str!(env!("ZFM_RUST_COPYRIGHT_PATH")),
+    "\n\n--- Upstream Rust 1.77.2 LICENSE-MIT ---\n",
+    include_str!(env!("ZFM_RUST_MIT_PATH")),
+    "\n\n--- Upstream Rust 1.77.2 LICENSE-APACHE ---\n",
+    include_str!(env!("ZFM_RUST_APACHE_PATH")),
+);
 /// Release tag supplied to the build, or `dev` for a local build.
 pub const VERSION: &str = env!("ZFM_VERSION");
 
@@ -265,6 +273,15 @@ mod tests {
             assert!(dir.join(name).is_file(), "{name} was not installed");
         }
         assert_eq!(fs::read(dir.join("zfm.exe")).unwrap(), APP);
+        assert_eq!(fs::read(dir.join("LICENSE.txt")).unwrap(), LICENSE.as_bytes());
+        assert_eq!(fs::read(dir.join("README.txt")).unwrap(), README.as_bytes());
+        for text in [
+            include_str!(env!("ZFM_RUST_COPYRIGHT_PATH")),
+            include_str!(env!("ZFM_RUST_MIT_PATH")),
+            include_str!(env!("ZFM_RUST_APACHE_PATH")),
+        ] {
+            assert!(README.contains(text), "missing upstream notice");
+        }
         for entry in fs::read_dir(&dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             assert!(!name.contains(".zfm-install"), "staging file left: {name}");

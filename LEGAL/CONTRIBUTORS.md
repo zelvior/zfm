@@ -1,0 +1,3 @@
+# Contributor process
+
+**NEEDS REVIEW.** Apache-2.0 section 5 addresses intentionally submitted contributions unless explicitly stated otherwise or superseded by an agreement; read the license rather than assuming an assignment or ownership transfer. Contributors should identify copied material, its source, license and modifications and only submit content they are authorized to license. Do not submit secrets, private user data or material with incompatible restrictions. Reviewers should record provenance, security impact and any required notices. No CLA, DCO, identity verification or grant beyond the actual license is currently asserted. Keep sensitive legal records outside the public repository.
