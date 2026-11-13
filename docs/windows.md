@@ -8,7 +8,7 @@ Press Ctrl+B to bookmark the current folder; use the file-list context menu → 
 
 Enter a filename term and use Ctrl+Shift+F or the file-list context menu → **Search subfolders**. Results show relative paths and support **Open containing folder**. Search is case-insensitive; Clear exits search mode. See the README for limits and filesystem caveats.
 
-The built-in converter offers uncompressed PCM WAV ↔ AIFF (8/16-bit mono/stereo only) from the file context menu; metadata is not preserved. See the README for limits.
+The built-in converter offers uncompressed PCM WAV ↔ AIFF and WAV ↔ AU (8/16-bit mono/stereo only) from the file context menu; metadata is not preserved. See the README for limits.
 
 ## Automated builds
 

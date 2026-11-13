@@ -161,6 +161,7 @@ const CANCEL_OPERATION: usize = 166;
 const BOOKMARK_ADD: usize = 167;
 const SEARCH_RECURSIVE: usize = 168;
 const OPEN_CONTAINING: usize = 169;
+const CONVERT_WAV_TO_AU: usize = 170;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2304,6 +2305,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                         4 => zfm::image_convert::convert(&input, &output, false, &cancel, |_| {}),
                         5 => zfm::audio_convert::convert(&input, &output, true, &cancel, |_| {}),
                         6 => zfm::audio_convert::convert(&input, &output, false, &cancel, |_| {}),
+                        7 => zfm::audio_convert::convert_au(&input, &output, true, &cancel, |_| {}),
+                        8 => zfm::audio_convert::convert_au(&input, &output, false, &cancel, |_| {}),
                         _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported conversion")),
                     };
                     result.map(|_| format!("Converted to {}", output.display()))
@@ -2580,8 +2583,11 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
                 AppendMenuW(menu, 0, ARCHIVE_EXTRACT_TO, text("Extract to folder…").as_ptr());
                 AppendMenuW(menu, 0, ARCHIVE_EXTRACT_PASSWORD, text("Extract with password…").as_ptr());
             }
-            if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+            if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif", "au"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
+            }
+            if extension.eq_ignore_ascii_case("wav") {
+                AppendMenuW(menu, 0, CONVERT_WAV_TO_AU, text("Convert PCM WAV to AU (metadata omitted)…").as_ptr());
             }
         }
         if !selected_items.is_empty() && selected_items.len() <= 1024 && selected_items.iter().all(|i| app.entries[*i].is_file || app.entries[*i].is_dir) {
@@ -3431,10 +3437,15 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         }
                     }
                 }
-                CONVERT if code == 0 => {
+                CONVERT | CONVERT_WAV_TO_AU if code == 0 => {
                     if let Some(input) = selected_path(hwnd, app) {
                         let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
-                        let (mode, target_ext, title) = if ext.eq_ignore_ascii_case("csv") {
+                        let (mode, target_ext, title) = if id == CONVERT_WAV_TO_AU && ext.eq_ignore_ascii_case("wav") {
+                            (7, "au", "Convert PCM WAV to AU (metadata omitted)")
+                        } else if id == CONVERT_WAV_TO_AU {
+                            set_status(hwnd, app, Some("Select a PCM WAV file for AU conversion.".into()));
+                            return 0;
+                        } else if ext.eq_ignore_ascii_case("csv") {
                             (0, "json", "Convert CSV to JSON")
                         } else if ext.eq_ignore_ascii_case("json") {
                             (1, "csv", "Convert JSON to CSV")
@@ -3448,8 +3459,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             (5, "aiff", "Convert PCM WAV to AIFF (metadata omitted)")
                         } else if ext.eq_ignore_ascii_case("aiff") || ext.eq_ignore_ascii_case("aif") {
                             (6, "wav", "Convert PCM AIFF to WAV (metadata omitted)")
+                        } else if ext.eq_ignore_ascii_case("au") {
+                            (8, "wav", "Convert PCM AU to WAV (metadata omitted)")
                         } else {
-                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON, TXT, BMP, ICO and PCM WAV/AIFF inputs only.".into()));
+                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON, TXT, BMP, ICO and PCM WAV/AIFF/AU inputs only.".into()));
                             return 0;
                         };
                         let proposed = input.with_extension(target_ext);

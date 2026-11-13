@@ -1,4 +1,4 @@
-//! Streaming, bounded conversion between uncompressed PCM WAV and AIFF.
+//! Streaming, bounded conversion between uncompressed PCM WAV, AIFF and AU.
 //! Only 8/16-bit mono/stereo, integer 1–192000 Hz is supported. Metadata is
 //! not preserved. The converter uses no external codecs or processes.
 use std::fs;
@@ -99,6 +99,45 @@ fn parse<R: Read + Seek>(reader: &mut R, length: u64, wav: bool, cancel: &Atomic
     Ok(Audio { channels, bits, rate, frames, data_offset, data_len })
 }
 
+// AU stores signed linear PCM samples in big-endian order. An all-ones
+// data size denotes the remaining bytes of the file, as allowed by AU.
+fn parse_au<R: Read + Seek>(reader: &mut R, length: u64, cancel: &AtomicBool) -> io::Result<Audio> {
+    if cancel.load(Ordering::Relaxed) { return Err(cancelled()); }
+    if length < 24 || length > MAX_INPUT { return Err(invalid("AU input must be between 24 bytes and 512 MiB")); }
+    let mut header = [0; 24];
+    reader.read_exact(&mut header)?;
+    if &header[..4] != b".snd" { return Err(invalid("Invalid AU header")); }
+    let offset = be32(&header[4..8]);
+    let declared = be32(&header[8..12]);
+    let bits = match be32(&header[12..16]) {
+        2 => 8, 3 => 16,
+        _ => return Err(invalid("Only uncompressed 8-bit or 16-bit linear PCM AU is supported")),
+    };
+    let rate = be32(&header[16..20]);
+    let channels = u16::try_from(be32(&header[20..24])).map_err(|_| invalid("Unsupported AU channels"))?;
+    let align = validate_format(channels, bits, rate)?;
+    if offset < 24 || u64::from(offset) > length { return Err(invalid("Invalid AU data offset")); }
+    let available = length - u64::from(offset);
+    if declared != u32::MAX && u64::from(declared) != available { return Err(invalid("Inconsistent AU data size")); }
+    let data_len = u32::try_from(available).map_err(|_| invalid("AU data is too large"))?;
+    if data_len % align != 0 { return Err(invalid("Audio contains incomplete sample frames")); }
+    Ok(Audio { channels, bits, rate, frames: data_len / align, data_offset: u64::from(offset), data_len })
+}
+
+fn au_header(info: Audio) -> Vec<u8> {
+    let mut out = Vec::with_capacity(24);
+    out.extend_from_slice(b".snd");
+    out.extend_from_slice(&24u32.to_be_bytes());
+    out.extend_from_slice(&info.data_len.to_be_bytes());
+    out.extend_from_slice(&(if info.bits == 8 { 2u32 } else { 3u32 }).to_be_bytes());
+    out.extend_from_slice(&info.rate.to_be_bytes());
+    out.extend_from_slice(&u32::from(info.channels).to_be_bytes());
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Format { Wav, Aiff, Au }
+
 fn output_header(info: Audio, wav: bool) -> Vec<u8> {
     let mut out = Vec::new();
     let padding = info.data_len % 2;
@@ -122,14 +161,31 @@ fn output_header(info: Audio, wav: bool) -> Vec<u8> {
 /// Streams audio, never overwrites, and cleans the staged file on ordinary error.
 pub fn convert<F: FnMut(u64)>(input: &Path, output: &Path, wav_to_aiff: bool,
     cancel: &AtomicBool, mut progress: F) -> io::Result<u64> {
+    convert_formats(input, output, if wav_to_aiff { Format::Wav } else { Format::Aiff },
+        if wav_to_aiff { Format::Aiff } else { Format::Wav }, cancel, &mut progress)
+}
+
+/// Convert restricted linear PCM WAV to AU, or AU to WAV. AU annotation is omitted.
+pub fn convert_au<F: FnMut(u64)>(input: &Path, output: &Path, wav_to_au: bool,
+    cancel: &AtomicBool, mut progress: F) -> io::Result<u64> {
+    convert_formats(input, output, if wav_to_au { Format::Wav } else { Format::Au },
+        if wav_to_au { Format::Au } else { Format::Wav }, cancel, &mut progress)
+}
+
+fn convert_formats<F: FnMut(u64)>(input: &Path, output: &Path, from: Format, to: Format,
+    cancel: &AtomicBool, mut progress: F) -> io::Result<u64> {
     if cancel.load(Ordering::Relaxed) { return Err(cancelled()); }
     let mut source = crate::viewer::open_regular(input)?;
     let length = source.metadata()?.len();
-    let info = parse(&mut source, length, wav_to_aiff, cancel)?;
+    let info = match from {
+        Format::Au => parse_au(&mut source, length, cancel)?,
+        Format::Wav | Format::Aiff => parse(&mut source, length, from == Format::Wav, cancel)?,
+    };
     source.seek(SeekFrom::Start(info.data_offset))?;
     let (temp, file) = crate::converter::staged_output(output)?;
     let mut writer = BufWriter::new(file);
-    writer.write_all(&output_header(info, !wav_to_aiff))?;
+    let header = if to == Format::Au { au_header(info) } else { output_header(info, to == Format::Wav) };
+    writer.write_all(&header)?;
     let mut buffer = [0u8; 65536];
     let mut processed = 0u64;
     while processed < u64::from(info.data_len) {
@@ -142,7 +198,7 @@ pub fn convert<F: FnMut(u64)>(input: &Path, output: &Path, wav_to_aiff: bool,
         processed += take as u64;
         progress(info.data_offset + processed);
     }
-    if info.data_len % 2 != 0 { writer.write_all(&[0])?; }
+    if to != Format::Au && info.data_len % 2 != 0 { writer.write_all(&[0])?; }
     writer.flush()?;
     drop(writer);
     if cancel.load(Ordering::Relaxed) { return Err(cancelled()); }
@@ -289,6 +345,85 @@ with aifc.open(sys.argv[2], 'wb') as f:
         convert(&external, &output, false, &cancel, |_| {}).unwrap();
         let status = Command::new("python3").arg("-c").arg("import wave,sys; f=wave.open(sys.argv[1], 'rb'); assert (f.getnchannels(),f.getsampwidth(),f.getframerate(),f.getnframes()) == (1,2,44100,3); assert f.readframes(3) == bytes([0,128,255,127,52,18])").arg(&output).status().unwrap();
         assert!(status.success());
+    }
+    #[test]
+    fn au_roundtrips_pcm_and_signedness() {
+        let t = Temp::new(); let cancel = AtomicBool::new(false);
+        for (i, (channels, bits, rate, samples, expected)) in [
+            (1, 8, 8000, vec![0, 128, 255], vec![128, 0, 127]),
+            (2, 8, 44100, vec![0, 128, 255, 127], vec![128, 0, 127, 255]),
+            (1, 16, 48000, vec![0, 128, 255, 127], vec![128, 0, 127, 255]),
+            (2, 16, 192000, vec![1, 2, 3, 4], vec![2, 1, 4, 3]),
+        ].into_iter().enumerate() {
+            let wav = t.0.join(format!("{i}.wav")); let au = t.0.join(format!("{i}.au"));
+            let back = t.0.join(format!("{i}-back.wav"));
+            let source = fixture(channels, bits, rate, &samples);
+            fs::write(&wav, &source).unwrap();
+            convert_au(&wav, &au, true, &cancel, |_| {}).unwrap();
+            let bytes = fs::read(&au).unwrap();
+            assert_eq!(&bytes[..4], b".snd");
+            assert_eq!(&bytes[24..], expected.as_slice()); // AU has no pad byte
+            assert_eq!(be32(&bytes[8..]), samples.len() as u32);
+            convert_au(&au, &back, false, &cancel, |_| {}).unwrap();
+            assert_eq!(fs::read(back).unwrap(), source);
+        }
+    }
+    #[test]
+    fn au_rejects_bad_formats_and_handles_annotation_and_unknown_size() {
+        let t = Temp::new(); let input = t.0.join("in.au"); let output = t.0.join("out.wav");
+        let cancel = AtomicBool::new(false);
+        let info = Audio { channels: 1, bits: 8, rate: 8000, frames: 3, data_offset: 0, data_len: 3 };
+        let mut bytes = au_header(info);
+        bytes[4..8].copy_from_slice(&28u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        bytes.extend_from_slice(b"note"); bytes.extend_from_slice(&[128, 0, 127]);
+        fs::write(&input, &bytes).unwrap();
+        convert_au(&input, &output, false, &cancel, |_| {}).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), fixture(1, 8, 8000, &[0, 128, 255]));
+        fs::remove_file(&output).unwrap();
+        for (offset, value) in [(4, 23u32), (4, 99), (8, 4), (12, 1), (16, 0), (20, 3)] {
+            let mut invalid_data = bytes.clone();
+            invalid_data[offset..offset+4].copy_from_slice(&value.to_be_bytes());
+            fs::write(&input, invalid_data).unwrap();
+            assert!(convert_au(&input, &output, false, &cancel, |_| {}).is_err());
+            assert!(!output.exists());
+        }
+        let mut incomplete = bytes.clone();
+        incomplete[12..16].copy_from_slice(&3u32.to_be_bytes());
+        fs::write(&input, incomplete).unwrap();
+        assert!(convert_au(&input, &output, false, &cancel, |_| {}).is_err());
+        fs::write(&input, &bytes).unwrap();
+        fs::write(&output, b"keep").unwrap();
+        assert!(convert_au(&input, &output, false, &cancel, |_| {}).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"keep");
+        fs::remove_file(&output).unwrap();
+        let mut progress = |_| cancel.store(true, Ordering::Relaxed);
+        assert_eq!(convert_au(&input, &output, false, &cancel, &mut progress).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(!output.exists());
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+    }
+    #[test]
+    fn au_interoperates_with_python_sunau_when_available() {
+        use std::process::Command;
+        if !Command::new("python3").args(["-c", "import sunau"]).status().map_or(false, |s| s.success()) { return; }
+        let t = Temp::new(); let wav = t.0.join("in.wav"); let au = t.0.join("out.au");
+        let external = t.0.join("external.au"); let output = t.0.join("external.wav");
+        let source = fixture(1, 16, 8000, &[0, 128, 255, 127]);
+        fs::write(&wav, &source).unwrap();
+        let cancel = AtomicBool::new(false);
+        convert_au(&wav, &au, true, &cancel, |_| {}).unwrap();
+        let script = r#"
+import sunau, sys
+with sunau.open(sys.argv[1], 'rb') as f:
+    assert (f.getnchannels(), f.getsampwidth(), f.getframerate(), f.getnframes()) == (1, 2, 8000, 2)
+    assert f.readframes(2) == bytes([128, 0, 127, 255])
+with sunau.open(sys.argv[2], 'wb') as f:
+    f.setnchannels(1); f.setsampwidth(2); f.setframerate(8000); f.setcomptype('NONE', 'not compressed')
+    f.writeframes(bytes([128, 0, 127, 255]))
+"#;
+        assert!(Command::new("python3").arg("-c").arg(script).arg(&au).arg(&external).status().unwrap().success());
+        convert_au(&external, &output, false, &cancel, |_| {}).unwrap();
+        assert_eq!(fs::read(output).unwrap(), source);
     }
     #[cfg(unix)]
     #[test]
