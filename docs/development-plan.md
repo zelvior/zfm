@@ -71,7 +71,7 @@ performance guarantee. Windows and Mint 19 measurements remain outstanding.
 2. Add archive formats and Windows support with equivalent security tests;
    multi-file/folder creation, conflict resolution, encryption, and standalone
    compression are not implemented yet.
-3. Design and test bulk/recursive operations, cross-volume moves, batch rename,
+3. Expand beyond single-item bounded folder copy to bulk operations, cross-volume moves, batch rename,
    clipboard, drag-and-drop, bookmarks, recent files, recursive search, directory
    sizes and previews with cancellation and safe partial-failure handling.
 4. Measure and address directory virtualization, worker limits and notifications.

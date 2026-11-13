@@ -897,6 +897,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     };
     let is_directory = entry.is_dir;
     let can_duplicate = entry.is_file;
+    let can_copy = entry.is_file || entry.is_dir;
     let extension = entry
         .path
         .extension()
@@ -938,7 +939,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     if can_archive {
         menu_action(menu, "Open archive…", show_archive as P, data);
     }
-    if can_duplicate {
+    if can_copy {
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
@@ -951,9 +952,9 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     );
     menu_action(menu, "Rename…", rename as P, data);
     menu_action(menu, "Move to…", move_to as P, data);
-    if can_duplicate {
+    if can_copy {
         menu_action(menu, "Copy to…", copy_to as P, data);
-        menu_action(menu, "Duplicate file…", duplicate as P, data);
+        menu_action(menu, "Duplicate…", duplicate as P, data);
     }
     menu_action(menu, "Move to trash", move_to_trash as P, data);
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
@@ -1739,12 +1740,13 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             Operation::Rename(path, name) => operations::rename_child(&path, OsStr::new(&name))
                 .map(|p| format!("Renamed to {}", p.display())),
             Operation::Duplicate(path, name) => {
-                operations::duplicate_file(&path, OsStr::new(&name), &cancel, |_| {})
+                let dir = path.parent().unwrap_or_else(|| std::path::Path::new("/"));
+                operations::copy_item(&path, dir, OsStr::new(&name), &cancel, |_| {})
                     .map(|p| format!("Created {}", p.display()))
             }
             Operation::CopyTo(path, destination) => {
                 let name = path.file_name().unwrap_or_default();
-                operations::copy_file(&path, &destination, name, &cancel, |_| {})
+                operations::copy_item(&path, &destination, name, &cancel, |_| {})
                     .map(|p| format!("Copied to {}", p.display()))
             }
             Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
@@ -1841,8 +1843,8 @@ unsafe extern "C" fn duplicate(_: P, data: P) {
         .to_path_buf();
     if let Some(name) = prompt(
         parent,
-        "Duplicate file",
-        "Enter a name for the copy (regular files only):",
+        "Duplicate",
+        "Enter a name for the copy (links and special files are not supported):",
         Some(&initial_copy_name(&path)),
     ) {
         start_operation(data, dir, Operation::Duplicate(path, name));

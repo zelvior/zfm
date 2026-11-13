@@ -51,4 +51,21 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 if [ ! -f "$work/created.txt" ]; then echo 'Enter did not create the new file:' >&2; cat "$work/stderr" >&2; exit 1; fi
+# Exercise recursive folder copy through the native clipboard shortcuts.
+mkdir -p "$work/folder-test/source/nested/empty"
+printf 'nested content\n' > "$work/folder-test/source/nested/file.txt"
+xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+l
+xdotool key --window "$window" ctrl+a
+xdotool type --clearmodifiers "$work/folder-test"
+xdotool key --window "$window" Return
+sleep 1
+xdotool key --window "$window" Escape ctrl+a ctrl+c ctrl+v
+for _ in $(seq 1 100); do
+    [ ! -f "$work/folder-test/source copy/nested/file.txt" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during folder copy:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+cmp "$work/folder-test/source/nested/file.txt" "$work/folder-test/source copy/nested/file.txt"
+[ -d "$work/folder-test/source copy/nested/empty" ]
 echo "GTK navigation and name dialog smoke tests passed (window $window)."

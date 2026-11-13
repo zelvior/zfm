@@ -2127,7 +2127,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::Trash(path, owner) => zfm::trash::trash_with_owner(&path, owner)
                     .map(|_| format!("Moved {} to Recycle Bin", path.display())),
                 Operation::Copy(path, dir, name) => {
-                    zfm::operations::copy_file(&path, &dir, &name, &AtomicBool::new(false), |_| {})
+                    zfm::operations::copy_item(&path, &dir, &name, &AtomicBool::new(false), |_| {})
                         .map(|p| format!("Copied to {}", p.display()))
                 }
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
@@ -3042,11 +3042,11 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 COPY | CUT if code == 0 => {
                     if let Some(path) = selected_path(hwnd, app) {
-                        let copy_allowed = id == CUT
-                            || std::fs::symlink_metadata(&path)
-                                .map_or(false, |m| m.is_file() && !m.file_type().is_symlink());
+                        let indices = selected_indices(app);
+                        let copy_allowed = id == CUT || indices.first().and_then(|i| app.entries.get(*i))
+                            .map_or(false, |entry| entry.is_file || entry.is_dir);
                         let message = if !copy_allowed {
-                            "Copy supports regular files only."
+                            "Copy supports regular files and folders only."
                         } else if windows_actions::copy_file(hwnd, &path, id == CUT) {
                             "Item copied to clipboard."
                         } else {
@@ -3149,7 +3149,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         if let Some(name) = windows_actions::prompt(
                             hwnd,
                             app.theme,
-                            "Duplicate file",
+                            "Duplicate",
                             OsStr::new(&proposed),
                             true,
                         ) {
