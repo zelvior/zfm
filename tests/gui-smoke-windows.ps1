@@ -308,7 +308,7 @@ try {
     [IO.File]::WriteAllBytes((Join-Path $work 'source-audio.wav'), $wav)
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]104, [IntPtr]::Zero, 2, 3000, [ref]$result)
-    function Convert-Fixture([string]$inputName, [string]$dialogTitle, [string]$outputName) {
+    function Convert-Fixture([string]$inputName, [string]$dialogTitle, [string]$outputName, [int]$command = 141) {
         $index = -1
         for ($i = 0; $i -lt 100; $i++) {
             $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $inputName).ToInt64() # LB_FINDSTRINGEXACT
@@ -319,7 +319,7 @@ try {
         $result = [UIntPtr]::Zero
         [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
         [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$index, 2, 3000, [ref]$result)
-        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]141, [IntPtr]::Zero)) { throw 'Could not invoke converter.' }
+        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$command, [IntPtr]::Zero)) { throw 'Could not invoke converter.' }
         $dialog = [IntPtr]::Zero
         for ($i = 0; $i -lt 100; $i++) {
             $dialog = [ZfmSmoke]::FindWindowW('#32770', $dialogTitle)
@@ -363,6 +363,9 @@ try {
     Convert-Fixture 'image.ico' 'Convert ICO to BMP' 'roundtrip.bmp'
     Convert-Fixture 'source-audio.wav' 'Convert PCM WAV to AIFF (metadata omitted)' 'source-audio.aiff'
     Convert-Fixture 'source-audio.aiff' 'Convert PCM AIFF to WAV (metadata omitted)' 'roundtrip-audio.wav'
+    Convert-Fixture 'source-audio.wav' 'Convert PCM WAV to AU (metadata omitted)' 'source-audio.au' 170
+    Convert-Fixture 'source-audio.au' 'Convert PCM AU to WAV (metadata omitted)' 'roundtrip-au.wav'
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work 'roundtrip-au.wav'))) -ne [Convert]::ToBase64String($wav)) { throw 'AU conversion round trip differs.' }
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $work 'roundtrip-audio.wav'))) -ne [Convert]::ToBase64String($wav)) { throw 'Audio conversion round trip differs.' }
     $decoded = [Drawing.Bitmap]::new((Join-Path $work 'roundtrip.bmp'))
     try {

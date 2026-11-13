@@ -957,7 +957,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let can_convert = can_duplicate
-        && ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|ext| extension.eq_ignore_ascii_case(ext));
+        && ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif", "au"].iter().any(|ext| extension.eq_ignore_ascii_case(ext));
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
@@ -990,6 +990,8 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
                 "Convert PCM WAV to AIFF…"
             } else if extension.eq_ignore_ascii_case("aiff") || extension.eq_ignore_ascii_case("aif") {
                 "Convert PCM AIFF to WAV…"
+            } else if extension.eq_ignore_ascii_case("au") {
+                "Convert PCM AU to WAV…"
             } else {
                 "Convert CSV to JSON…"
             },
@@ -1585,6 +1587,8 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
             4 => zfm::image_convert::convert(&input, &output, false, &cancel, &mut report),
             5 => zfm::audio_convert::convert(&input, &output, true, &cancel, &mut report),
             6 => zfm::audio_convert::convert(&input, &output, false, &cancel, &mut report),
+            7 => zfm::audio_convert::convert_au(&input, &output, true, &cancel, &mut report),
+            8 => zfm::audio_convert::convert_au(&input, &output, false, &cancel, &mut report),
             _ => zfm::converter::csv_to_json(&input, &output, &cancel, &mut report),
         }
         .map_err(|e| e.to_string());
@@ -1601,6 +1605,21 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
             (api().g_idle_add)(converter_update, Box::into_raw(msg) as P);
         }
     });
+}
+// Only adjust a suggested audio output name; never replace a custom path.
+unsafe extern "C" fn converter_mode_changed(_: P, data: P) {
+    let converter = &*(data as *mut Converter);
+    let target = match (api().gtk_combo_box_get_active)(converter.mode) {
+        5 => "aiff", 6 | 8 => "wav", 7 => "au", _ => return,
+    };
+    let input = CStr::from_ptr((api().gtk_entry_get_text)(converter.input)).to_string_lossy().into_owned();
+    let output = CStr::from_ptr((api().gtk_entry_get_text)(converter.output)).to_string_lossy().into_owned();
+    if input.is_empty() || output.is_empty() { return; }
+    let input = PathBuf::from(input);
+    let output = PathBuf::from(output);
+    if ["aiff", "au", "wav"].iter().any(|ext| input.with_extension(ext) == output) {
+        (api().gtk_entry_set_text)(converter.output, c(&input.with_extension(target).to_string_lossy()).as_ptr());
+    }
 }
 unsafe extern "C" fn converter_cancel(_: P, data: P) {
     let converter = &mut *(data as *mut Converter);
@@ -1692,13 +1711,14 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                         .extension()
                         .and_then(|s| s.to_str())
                         .unwrap_or("");
-                    if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+                    if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif", "au"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                         let (mode, output_extension) = if extension.eq_ignore_ascii_case("json") { (1, "csv") }
                             else if extension.eq_ignore_ascii_case("txt") { (2, "html") }
                             else if extension.eq_ignore_ascii_case("bmp") { (3, "ico") }
                             else if extension.eq_ignore_ascii_case("ico") { (4, "bmp") }
                             else if extension.eq_ignore_ascii_case("wav") { (5, "aiff") }
                             else if extension.eq_ignore_ascii_case("aiff") || extension.eq_ignore_ascii_case("aif") { (6, "wav") }
+                            else if extension.eq_ignore_ascii_case("au") { (8, "wav") }
                             else { (0, "json") };
                         (api().gtk_combo_box_set_active)(converter.mode, mode);
                         (api().gtk_entry_set_text)(
@@ -1742,6 +1762,8 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_combo_box_text_append_text)(mode, c("Opaque 24-bit ICO → BMP").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("PCM WAV → AIFF (8/16-bit)").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("PCM AIFF → WAV (8/16-bit)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("PCM WAV → AU (8/16-bit)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("PCM AU → WAV (8/16-bit)").as_ptr());
     (api().gtk_combo_box_set_active)(mode, 0);
     (api().gtk_box_pack_start)(layout, mode, 0, 0, 0);
     let input_row = (api().gtk_box_new)(0, 4);
@@ -1788,6 +1810,7 @@ unsafe fn create_converter(parent: P) -> P {
         converter_open_folder as P,
         converter,
     );
+    connect(mode, "changed", converter_mode_changed as P, converter);
     connect(window, "delete-event", converter_hide as P, converter);
     converter
 }

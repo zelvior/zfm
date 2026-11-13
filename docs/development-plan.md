@@ -40,6 +40,8 @@ is never presented as conversion.
 | ICO | BMP | Converter window or context menu | Context menu | One opaque, 24-bit BMP-based icon with a zero AND mask; no PNG payloads, alpha, palettes or multiple images. |
 | WAV | AIFF | Converter window or context menu | Context menu | PCM, 8/16-bit, mono/stereo, integer 1–192000 Hz; metadata omitted, input ≤512 MiB. |
 | AIFF | WAV | Converter window or context menu | Context menu | Same PCM constraints; no AIFF-C, metadata omitted, input ≤512 MiB. |
+| WAV | AU | Converter window | Context menu (WAV to AU) | Linear PCM, 8/16-bit, mono/stereo, integer 1–192000 Hz; metadata omitted, input ≤512 MiB. |
+| AU | WAV | Converter window or context menu | Context menu | Same PCM constraints; μ-law, A-law and floating-point rejected, annotations omitted. |
 
 The core is tested on Linux and in Windows CI for both supported MSVC
 architectures. Linux has progress and cancellation. The Windows context menu
