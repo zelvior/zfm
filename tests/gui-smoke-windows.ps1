@@ -267,6 +267,29 @@ try {
     try {
         if ($decoded.Width -ne 2 -or $decoded.Height -ne 2 -or $decoded.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::Red.ToArgb()) { throw 'Windows could not correctly decode the generated bitmap.' }
     } finally { $decoded.Dispose() }
+    # Copy a folder with nested and empty directories through the real clipboard.
+    $folder = Join-Path $work 'folder-fixture'
+    New-Item -ItemType Directory -Path (Join-Path $folder 'nested\empty') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $folder 'nested\file.txt'), 'nested content')
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]104, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    $index = -1
+    for ($i = 0; $i -lt 100; $i++) {
+        $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-fixture').ToInt64()
+        if ($index -ge 0) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($index -lt 0) { throw 'Folder fixture was not listed.' }
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$index, 2, 3000, [ref]$result)
+    foreach ($id in @(130, 132)) {
+        if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]$id, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw "Folder clipboard command $id did not return." }
+    }
+    $copiedFolder = Join-Path $work 'folder-fixture copy'
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $copiedFolder 'nested\file.txt')); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath (Join-Path $copiedFolder 'nested\empty')) -or
+        -not (Test-Path -LiteralPath (Join-Path $copiedFolder 'nested\file.txt')) -or
+        [IO.File]::ReadAllText((Join-Path $copiedFolder 'nested\file.txt')) -ne 'nested content') { throw 'Folder copy was incomplete.' }
     Write-Host "Win32 window and basic controls detected: $title"
 } catch {
     Write-Host "::error title=GUI smoke test::$($_.Exception.Message)"

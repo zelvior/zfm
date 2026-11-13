@@ -351,6 +351,208 @@ pub fn copy_file<F: FnMut(u64)>(
     Ok(destination)
 }
 
+/// Copy one regular file or directory tree without overwriting a destination.
+/// Directory trees are staged beside the destination and published atomically;
+/// an error or cancellation removes the staging tree when possible. Links,
+/// reparse points and special files anywhere in the tree are rejected. Neither
+/// source nor destination should be writable by an untrusted concurrent actor:
+/// directory components are checked by path, not held as no-follow handles.
+pub fn copy_item<F: FnMut(u64)>(
+    source: &Path,
+    parent: &Path,
+    new_name: &OsStr,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> io::Result<PathBuf> {
+    validate_name(new_name)?;
+    let metadata = fs::symlink_metadata(source)?;
+    if is_link_or_reparse(&metadata) {
+        return Err(invalid(
+            "Copy does not follow symbolic links or reparse points",
+        ));
+    }
+    if metadata.is_file() {
+        return copy_file(source, parent, new_name, cancel, progress);
+    }
+    if !metadata.is_dir() {
+        return Err(invalid("Copy supports only regular files and folders"));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+    }
+    let source_real = fs::canonicalize(source)?;
+    let parent_real = fs::canonicalize(parent)?;
+    if path_within(&parent_real, &source_real) {
+        return Err(invalid(
+            "Cannot copy a folder into itself or one of its descendants",
+        ));
+    }
+    let destination = parent.join(new_name);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Destination already exists",
+            ))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e),
+    }
+    let staging = (0..100)
+        .find_map(|_| {
+            let path = parent.join(format!(
+                ".zfm-copy-tree-{}-{}.tmp",
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            #[allow(unused_mut)]
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => Some(Ok(path)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Cannot allocate a temporary folder",
+            ))
+        })?;
+    let outcome = (|| -> io::Result<()> {
+        const MAX_ENTRIES: usize = 100_000;
+        const MAX_DEPTH: usize = 128;
+        let mut stack = vec![(source.to_path_buf(), staging.clone(), 0usize)];
+        let mut entries = 0usize;
+        let mut total = 0u64;
+        while let Some((src, dst, depth)) = stack.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+            }
+            let meta = fs::symlink_metadata(&src)?;
+            if is_link_or_reparse(&meta) || !meta.is_dir() {
+                return Err(invalid(
+                    "A source folder changed or is a link/reparse point",
+                ));
+            }
+            for entry in fs::read_dir(&src)? {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+                }
+                let entry = entry?;
+                entries += 1;
+                if entries > MAX_ENTRIES {
+                    return Err(invalid("Folder exceeds the 100,000 entry copy limit"));
+                }
+                let name = entry.file_name();
+                validate_name(&name)?;
+                let child = entry.path();
+                let meta = fs::symlink_metadata(&child)?;
+                if is_link_or_reparse(&meta) {
+                    return Err(invalid("Folder contains a symbolic link or reparse point"));
+                }
+                if meta.is_dir() {
+                    if depth >= MAX_DEPTH {
+                        return Err(invalid("Folder exceeds the 128 level copy limit"));
+                    }
+                    let target = dst.join(name);
+                    #[allow(unused_mut)]
+                    let mut builder = fs::DirBuilder::new();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        builder.mode(0o700);
+                    }
+                    builder.create(&target)?;
+                    stack.push((child, target, depth + 1));
+                } else if meta.is_file() {
+                    let mut copied = 0;
+                    copy_file(&child, &dst, &name, cancel, |bytes| {
+                        copied = bytes;
+                        progress(total.saturating_add(bytes));
+                    })?;
+                    total = total.saturating_add(copied);
+                } else {
+                    return Err(invalid(
+                        "Folder contains a special file; nothing was copied",
+                    ));
+                }
+            }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
+        }
+        rename_no_replace(&staging, &destination)?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => Ok(destination),
+        Err(error) => match fs::remove_dir_all(&staging) {
+            Ok(()) => Err(error),
+            Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => Err(error),
+            Err(cleanup) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; could not remove temporary copy {}: {cleanup}",
+                    staging.display()
+                ),
+            )),
+        },
+    }
+}
+
+fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return meta.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(not(windows))]
+fn path_within(path: &Path, ancestor: &Path) -> bool {
+    path.starts_with(ancestor)
+}
+#[cfg(windows)]
+fn path_within(path: &Path, ancestor: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CompareStringOrdinal(
+            a: *const u16,
+            alen: i32,
+            b: *const u16,
+            blen: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    let mut parts = path.components();
+    for component in ancestor.components() {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        let a: Vec<u16> = part.as_os_str().encode_wide().collect();
+        let b: Vec<u16> = component.as_os_str().encode_wide().collect();
+        if unsafe {
+            CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1)
+        } != 2
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Permanently remove a file/symlink or an *empty* folder. Never recurse or
 /// follow the final symlink. Confirmation is the caller's responsibility.
 pub fn remove_one(path: &Path) -> io::Result<()> {
@@ -555,6 +757,166 @@ mod tests {
         assert_eq!(last, 160 * chunk.len() as u64);
         assert_eq!(fs::metadata(output).unwrap().len(), last);
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn copy_tree_nested_empty_and_conflict() {
+        let t = Temp::new();
+        let src = t.0.join("source");
+        fs::create_dir_all(src.join("nested/empty")).unwrap();
+        fs::write(src.join("one"), b"abc").unwrap();
+        fs::write(src.join("nested/two"), b"defgh").unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut total = 0;
+        let output = copy_item(&src, &t.0, OsStr::new("output"), &cancel, |n| {
+            assert!(n > total);
+            total = n;
+        })
+        .unwrap();
+        assert_eq!(total, 8);
+        assert_eq!(fs::read(output.join("one")).unwrap(), b"abc");
+        assert_eq!(fs::read(output.join("nested/two")).unwrap(), b"defgh");
+        assert!(output.join("nested/empty").is_dir());
+        assert_eq!(
+            copy_item(&src, &t.0, OsStr::new("output"), &cancel, |_| {})
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(output.join("one")).unwrap(), b"abc");
+        assert!(copy_item(&src, &src, OsStr::new("self"), &cancel, |_| {}).is_err());
+        assert!(copy_item(
+            &src,
+            &src.join("nested"),
+            OsStr::new("self"),
+            &cancel,
+            |_| {}
+        )
+        .is_err());
+        assert!(!src.join("self").exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn copy_tree_cancel_and_publication_conflict_clean_up() {
+        let t = Temp::new();
+        let src = t.0.join("source");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("file"), vec![1; 200_000]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let err = copy_item(&src, &t.0, OsStr::new("cancelled"), &cancel, |_| {
+            cancel.store(true, Ordering::Relaxed)
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(!t.0.join("cancelled").exists());
+        let cancel = AtomicBool::new(false);
+        let dest = t.0.join("raced");
+        let mut created = false;
+        let err = copy_item(&src, &t.0, OsStr::new("raced"), &cancel, |_| {
+            if !created {
+                fs::create_dir(&dest).unwrap();
+                fs::write(dest.join("keep"), b"keep").unwrap();
+                created = true;
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(fs::read(dest.join("keep")).unwrap(), b"keep");
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".zfm-copy-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_links_and_cleans_staging() {
+        use std::os::unix::fs::symlink;
+        let t = Temp::new();
+        let src = t.0.join("source");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("file"), b"keep").unwrap();
+        symlink(&t.0, src.join("link")).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(copy_item(&src, &t.0, OsStr::new("output"), &cancel, |_| {}).is_err());
+        assert!(!t.0.join("output").exists());
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".zfm-copy-")));
+        symlink(&src, t.0.join("alias")).unwrap();
+        assert!(copy_item(
+            &src,
+            &t.0.join("alias"),
+            OsStr::new("self"),
+            &cancel,
+            |_| {}
+        )
+        .is_err());
+        assert!(copy_item(
+            &t.0.join("alias"),
+            &t.0,
+            OsStr::new("output"),
+            &cancel,
+            |_| {}
+        )
+        .is_err());
+        assert_eq!(fs::read(src.join("file")).unwrap(), b"keep");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_tree_rejects_excess_depth_and_special_files() {
+        let t = Temp::new();
+        let src = t.0.join("source");
+        fs::create_dir(&src).unwrap();
+        let mut child = src.clone();
+        for _ in 0..130 {
+            child.push("d");
+            fs::create_dir(&child).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        assert!(copy_item(&src, &t.0, OsStr::new("deep"), &cancel, |_| {}).is_err());
+        assert!(!t.0.join("deep").exists());
+        fs::remove_dir_all(&src).unwrap();
+        fs::create_dir(&src).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let fifo = std::ffi::CString::new(src.join("fifo").as_os_str().as_bytes()).unwrap();
+        extern "C" {
+            fn mkfifo(path: *const std::os::raw::c_char, mode: u32) -> i32;
+        }
+        assert_eq!(unsafe { mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(copy_item(&src, &t.0, OsStr::new("special"), &cancel, |_| {}).is_err());
+        assert!(!t.0.join("special").exists());
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".zfm-copy-")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_descendant_check_is_case_insensitive() {
+        let t = Temp::new();
+        let src = t.0.join("CaseFolder");
+        fs::create_dir_all(src.join("Nested")).unwrap();
+        assert!(copy_item(
+            &src,
+            &t.0.join("casefolder/NESTED"),
+            OsStr::new("inside"),
+            &AtomicBool::new(false),
+            |_| {}
+        )
+        .is_err());
+        assert!(!src.join("Nested/inside").exists());
+    }
+
     #[test]
     fn suggest_copy_name_avoids_existing_names() {
         let t = Temp::new();

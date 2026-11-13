@@ -58,10 +58,15 @@ unsafe fn set_file(data: P, cut: bool) {
         } else {
             (api().gtk_list_box_row_get_index)(row)
         };
-        if index < 0 || !app.entries.get(index as usize).map_or(false, |e| e.is_file) {
+        if index < 0
+            || !app
+                .entries
+                .get(index as usize)
+                .map_or(false, |e| e.is_file || e.is_dir)
+        {
             set_status(
                 app,
-                "Copy supports regular files only; folders and links are not copied.",
+                "Copy supports regular files and folders; links are not copied.",
             );
             return;
         }
