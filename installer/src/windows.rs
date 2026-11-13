@@ -189,12 +189,14 @@ struct Progress {
 struct InstallFailure {
     message: String,
     retryable: bool,
+    blocked_path: Option<PathBuf>,
 }
 impl From<String> for InstallFailure {
     fn from(message: String) -> Self {
         Self {
             message,
             retryable: false,
+            blocked_path: None,
         }
     }
 }
@@ -203,6 +205,7 @@ impl From<payload::InstallFileError> for InstallFailure {
         Self {
             message: error.message,
             retryable: error.retryable,
+            blocked_path: error.blocked_path,
         }
     }
 }
@@ -910,7 +913,7 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
     }
 }
 
-unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
+unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard, close_existing: bool) {
     wizard.page = Page::Installing;
     wizard.busy = true;
     wizard.percent = 0;
@@ -932,7 +935,10 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
         // COM initialization is per-thread; the UI thread's apartment does not
         // cover this worker, which creates the Start Menu shell links.
         let _com = win32::ComGuard::new().ok();
-        let result = perform_install(&dir, &exe, |percent, text| {
+        let close_result = if close_existing {
+            crate::running_app::close_and_wait(&dir.join("zfm.exe"))
+        } else { Ok(()) };
+        let result = close_result.map_err(|message| InstallFailure { message, retryable: true, blocked_path: None }).and_then(|_| perform_install(&dir, &exe, |percent, text| {
             let message = Box::into_raw(Box::new(Progress {
                 percent,
                 text: text.to_string(),
@@ -942,7 +948,7 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
                     drop(Box::from_raw(message));
                 }
             }
-        });
+        }));
         let message = Box::into_raw(Box::new(Done { result }));
         unsafe {
             if win32::PostMessageW(window as Hwnd, WM_DONE, 0, message as LParam) == 0 {
@@ -988,7 +994,7 @@ unsafe fn advance(hwnd: Hwnd, wizard: &mut Wizard) {
                 }
             }
         }
-        Page::License => begin_install(hwnd, wizard),
+        Page::License => begin_install(hwnd, wizard, false),
         Page::Finish => finish(hwnd, wizard),
         Page::Installing => {}
     }
@@ -1194,10 +1200,14 @@ unsafe extern "system" fn window_proc(
     if let Some(error) = install_failure {
         let message = format!("Setup could not finish:\n\n{}", error.message);
         if error.retryable {
-            if win32::retry(hwnd, &message, "ZFM Setup") {
-                // The Retry button explicitly authorizes another attempt; never
-                // terminate an application or modify permissions automatically.
-                begin_install(hwnd, &mut *WIZARD);
+            let target = PathBuf::from(&(*WIZARD).dir).join("zfm.exe");
+            if error.blocked_path.as_deref() == Some(target.as_path()) && crate::running_app::is_running(&target) {
+                let prompt = format!("{}\n\nZFM is running from this installation. May setup ask it to close and retry? Save any work first. Choosing No leaves ZFM open.", message);
+                if win32::confirm(hwnd, &prompt, "ZFM Setup") {
+                    begin_install(hwnd, &mut *WIZARD, true);
+                }
+            } else if win32::retry(hwnd, &message, "ZFM Setup") {
+                begin_install(hwnd, &mut *WIZARD, false);
             }
         } else {
             win32::message(hwnd, &message, "ZFM Setup", win32::MB_ICONERROR);
