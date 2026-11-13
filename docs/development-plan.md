@@ -24,7 +24,7 @@ CI uses Rust 1.77.2, and tests real Windows builds and the GTK smoke workflow.
 
 ## Current conversion matrix
 
-All entries below are built-in, offline and use no external process. Input is
+All entries below are built-in, offline and use no external process. Text input is
 UTF-8; output must not already exist and the destination filesystem must support
 hard links. Conversion stages output and cleans up on normal errors and
 cancellation; forced termination can leave a temporary file. Avoid directories
@@ -36,14 +36,16 @@ is never presented as conversion.
 | CSV | JSON | Converter window or context menu | Context menu | Header keys unique/nonempty; all values are strings. |
 | JSON | CSV | Converter window or context menu | Context menu | Nonempty array of objects, identical nonempty unique keys, string values only. |
 | TXT | HTML | Converter window or context menu | Context menu | Plain text escaped into a `pre` element; valid UTF-8 and supported ASCII controls only; not a Markdown renderer. |
+| BMP | ICO | Converter window or context menu | Context menu | Uncompressed bottom-up 24-bit BITMAPINFOHEADER only, 1–256 pixels per side; creates one opaque icon. |
+| ICO | BMP | Converter window or context menu | Context menu | One opaque, 24-bit BMP-based icon with a zero AND mask; no PNG payloads, alpha, palettes or multiple images. |
 
 The core is tested on Linux and in Windows CI for both supported MSVC
 architectures. Linux has progress and cancellation. The Windows context menu
 is a first increment: output is limited to a filename in the input folder and
 there is no progress indicator or cancellation control. Other formats are not
-supported or advertised: PNG/JPEG/BMP/GIF/TIFF/WebP/ICO; Markdown/XML/PDF;
+supported or advertised: PNG/JPEG/GIF/TIFF/WebP; Markdown/XML/PDF;
 WAV/MP3/FLAC/OGG/AAC; MP4/MKV/AVI/WebM/MOV. FFmpeg integration is not yet
-implemented. No bidirectional support is implied.
+implemented. Other BMP and ICO variants are not supported; use an image editor to convert them to an opaque 24-bit BMP first. Image input is limited to 1 MiB. No universal bidirectional support is implied.
 
 ## Performance baseline procedure
 

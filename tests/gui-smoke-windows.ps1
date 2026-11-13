@@ -189,6 +189,20 @@ try {
     # Exercise the built-in converter through the real Win32 selection and dialog.
     # Keep fixtures in the GUI directory and wait for each async refresh.
     [IO.File]::WriteAllText((Join-Path $work 'source.csv'), "name`nZelvior`n", [Text.UTF8Encoding]::new($false))
+    # 2x2, 24-bit uncompressed bottom-up BMP with asymmetric pixels and row padding.
+    $bmp = [byte[]]::new(70)
+    $bmp[0] = 66; $bmp[1] = 77
+    [BitConverter]::GetBytes([uint32]70).CopyTo($bmp, 2)
+    [BitConverter]::GetBytes([uint32]54).CopyTo($bmp, 10)
+    [BitConverter]::GetBytes([uint32]40).CopyTo($bmp, 14)
+    [BitConverter]::GetBytes([uint32]2).CopyTo($bmp, 18)
+    [BitConverter]::GetBytes([uint32]2).CopyTo($bmp, 22)
+    [BitConverter]::GetBytes([uint16]1).CopyTo($bmp, 26)
+    [BitConverter]::GetBytes([uint16]24).CopyTo($bmp, 28)
+    [BitConverter]::GetBytes([uint32]16).CopyTo($bmp, 34)
+    [byte[]]$pixels = @(255, 0, 0, 0, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0)
+    $pixels.CopyTo($bmp, 54)
+    [IO.File]::WriteAllBytes((Join-Path $work 'source.bmp'), $bmp)
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]104, [IntPtr]::Zero, 2, 3000, [ref]$result)
     function Convert-Fixture([string]$inputName, [string]$dialogTitle, [string]$outputName) {
@@ -229,6 +243,20 @@ try {
     if (((Get-Content -Raw -LiteralPath (Join-Path $work 'source.json')) | ConvertFrom-Json)[0].name -ne 'Zelvior') { throw 'Incorrect CSV to JSON conversion.' }
     Convert-Fixture 'source.json' 'Convert JSON to CSV' 'roundtrip.csv'
     if ((Get-Content -Raw -LiteralPath (Join-Path $work 'roundtrip.csv')) -notmatch 'Zelvior') { throw 'Incorrect JSON to CSV conversion.' }
+    Convert-Fixture 'source.bmp' 'Convert BMP to ICO' 'image.ico'
+    Add-Type -AssemblyName System.Drawing
+    $icon = [Drawing.Icon]::new((Join-Path $work 'image.ico'), [Drawing.Size]::new(2, 2))
+    try {
+        $decoded = $icon.ToBitmap()
+        try {
+            if ($decoded.Width -ne 2 -or $decoded.Height -ne 2 -or $decoded.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::Red.ToArgb()) { throw 'Windows could not correctly decode the generated icon.' }
+        } finally { $decoded.Dispose() }
+    } finally { $icon.Dispose() }
+    Convert-Fixture 'image.ico' 'Convert ICO to BMP' 'roundtrip.bmp'
+    $decoded = [Drawing.Bitmap]::new((Join-Path $work 'roundtrip.bmp'))
+    try {
+        if ($decoded.Width -ne 2 -or $decoded.Height -ne 2 -or $decoded.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::Red.ToArgb()) { throw 'Windows could not correctly decode the generated bitmap.' }
+    } finally { $decoded.Dispose() }
     Write-Host "Win32 window and basic controls detected: $title"
 } catch {
     Write-Host "::error title=GUI smoke test::$($_.Exception.Message)"

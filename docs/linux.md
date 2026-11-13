@@ -10,7 +10,7 @@ File operations are deliberately limited: no-overwrite rename/move require Linux
 
 Trash delegates to GIO and reports failures; it never falls back to permanent deletion. Archive extraction supports uncompressed TAR and, with the system libarchive runtime, ZIP and gzip/bzip2/xz-compressed TAR on Linux x86/x86_64/aarch64. It rejects links and unsafe paths, uses no-follow directory-relative file operations, and applies resource limits. See the README for the exact supported TAR subset, partial-output semantics, and untrusted-directory restrictions.
 
-ZIP creation and compressed archive operations dynamically load `libarchive.so.13`; missing libraries or unsupported codecs produce an error. Linux tabs, clipboard, converters and archive GTK controls need further interactive testing; the GTK smoke test covers only a subset of actions. The converter additionally supports UTF-8 text to escaped HTML; see the [conversion matrix](development-plan.md).
+ZIP creation and compressed archive operations dynamically load `libarchive.so.13`; missing libraries or unsupported codecs produce an error. Linux tabs, clipboard, converters and archive GTK controls need further interactive testing; the GTK smoke test covers only a subset of actions. The converter additionally supports UTF-8 text to escaped HTML and restricted opaque 24-bit BMP/ICO conversion; see the [conversion matrix](development-plan.md).
 
 For automated rustup installation and native/cross-builds, use `./scripts/build-linux.sh`; see the README for options, dependencies, output locations and compatibility limits. System package installation is opt-in.
 

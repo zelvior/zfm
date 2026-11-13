@@ -903,7 +903,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let can_convert = can_duplicate
-        && (extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("txt"));
+        && ["csv", "json", "txt", "bmp", "ico"].iter().any(|ext| extension.eq_ignore_ascii_case(ext));
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
@@ -924,6 +924,10 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
                 "Convert JSON to CSV…"
             } else if extension.eq_ignore_ascii_case("txt") {
                 "Convert text to HTML…"
+            } else if extension.eq_ignore_ascii_case("bmp") {
+                "Convert BMP to ICO…"
+            } else if extension.eq_ignore_ascii_case("ico") {
+                "Convert ICO to BMP…"
             } else {
                 "Convert CSV to JSON…"
             },
@@ -1367,6 +1371,8 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
         let result = match mode {
             1 => zfm::json_csv::json_to_csv(&input, &output, &cancel, &mut report),
             2 => zfm::converter::text_to_html(&input, &output, &cancel, &mut report),
+            3 => zfm::image_convert::convert(&input, &output, true, &cancel, &mut report),
+            4 => zfm::image_convert::convert(&input, &output, false, &cancel, &mut report),
             _ => zfm::converter::csv_to_json(&input, &output, &cancel, &mut report),
         }
         .map_err(|e| e.to_string());
@@ -1474,13 +1480,13 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                         .extension()
                         .and_then(|s| s.to_str())
                         .unwrap_or("");
-                    if extension.eq_ignore_ascii_case("csv")
-                        || extension.eq_ignore_ascii_case("json")
-                        || extension.eq_ignore_ascii_case("txt")
-                    {
-                        let json = extension.eq_ignore_ascii_case("json");
-                        let plain_text = extension.eq_ignore_ascii_case("txt");
-                        (api().gtk_combo_box_set_active)(converter.mode, if json { 1 } else if plain_text { 2 } else { 0 });
+                    if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+                        let (mode, output_extension) = if extension.eq_ignore_ascii_case("json") { (1, "csv") }
+                            else if extension.eq_ignore_ascii_case("txt") { (2, "html") }
+                            else if extension.eq_ignore_ascii_case("bmp") { (3, "ico") }
+                            else if extension.eq_ignore_ascii_case("ico") { (4, "bmp") }
+                            else { (0, "json") };
+                        (api().gtk_combo_box_set_active)(converter.mode, mode);
                         (api().gtk_entry_set_text)(
                             converter.input,
                             c(&entry.path.to_string_lossy()).as_ptr(),
@@ -1489,7 +1495,7 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                             converter.output,
                             c(&entry
                                 .path
-                                .with_extension(if json { "csv" } else if plain_text { "html" } else { "json" })
+                                .with_extension(output_extension)
                                 .to_string_lossy())
                             .as_ptr(),
                         );
@@ -1511,13 +1517,15 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let caption = label("Built-in offline converter · UTF-8 · CSV/JSON values are strings");
+    let caption = label("Built-in offline converter · CSV/JSON values are strings · images: opaque 24-bit");
     (api().gtk_label_set_xalign)(caption, 0.0);
     (api().gtk_box_pack_start)(layout, caption, 0, 0, 0);
     let mode = (api().gtk_combo_box_text_new)();
     (api().gtk_combo_box_text_append_text)(mode, c("CSV → JSON").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("JSON → CSV (string-valued objects)").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("Plain text → HTML (escaped)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("24-bit BMP → ICO (up to 256 × 256)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("Opaque 24-bit ICO → BMP").as_ptr());
     (api().gtk_combo_box_set_active)(mode, 0);
     (api().gtk_box_pack_start)(layout, mode, 0, 0, 0);
     let input_row = (api().gtk_box_new)(0, 4);
