@@ -950,7 +950,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     if is_directory {
         menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
     }
-    if can_convert {
+    if can_convert && selected_rows(list).len() == 1 {
         menu_action(
             menu,
             if is_json {
@@ -974,7 +974,12 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         menu_action(menu, "Extract to folder…", archive_ui::extract_to as P, data);
         menu_action(menu, "Extract with password…", archive_ui::extract_password as P, data);
     }
-    if can_copy {
+    let selection = selected_rows(list);
+    let copy_selection = !selection.is_empty() && selection.len() <= zfm::operations::MAX_COPY_ITEMS && selection.iter().all(|row| {
+        let index = (api().gtk_list_box_row_get_index)(*row);
+        index >= 0 && app.entries.get(index as usize).map_or(false, |e| e.is_file || e.is_dir)
+    });
+    if copy_selection {
         let submenu = (api().gtk_menu_new)();
         for (title, callback, single) in [
             (".7z…", archive_ui::create_7z as P, false), (".zip…", archive_ui::create_zip as P, false),
@@ -985,7 +990,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
             ("Encrypted .7z…", archive_ui::create_encrypted_7z as P, false),
             ("Encrypted .zip…", archive_ui::create_encrypted_zip as P, false),
         ] {
-            if !single || (selected_rows(list).len() == 1 && entry.is_file) { menu_action(submenu, title, callback, data); }
+            if !single || (selection.len() == 1 && entry.is_file) { menu_action(submenu, title, callback, data); }
         }
         menu_action(submenu, "Custom filename…", archive_create_selection as P, data);
         let item = (api().gtk_menu_item_new_with_label)(c("Compress to").as_ptr());
@@ -1004,10 +1009,8 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     );
     menu_action(menu, "Rename…", rename as P, data);
     menu_action(menu, "Move to…", move_to as P, data);
-    if can_copy {
-        menu_action(menu, "Copy to…", copy_to as P, data);
-        menu_action(menu, "Duplicate…", duplicate as P, data);
-    }
+    if copy_selection { menu_action(menu, "Copy to…", copy_to as P, data); }
+    if selection.len() == 1 && can_copy { menu_action(menu, "Duplicate…", duplicate as P, data); }
     menu_action(menu, "Move to trash", move_to_trash as P, data);
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
@@ -1033,7 +1036,8 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Delete permanently…", delete_permanently as P),
         ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
         ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
-        ("Cancel copy", cancel_operation as P),
+        ("Cancel operation", cancel_operation as P),
+        ("Converter…", show_converter as P), ("Archive manager…", show_archive as P),
         ("Settings…", show_settings as P),
         ("Uninstall ZFM…", show_uninstaller as P),
     ] {
@@ -1795,7 +1799,6 @@ enum Operation {
     CreateDirectory(PathBuf, String),
     Rename(PathBuf, String),
     Duplicate(PathBuf, String),
-    CopyTo(PathBuf, PathBuf),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveTo(PathBuf, PathBuf),
     Trash(PathBuf),
@@ -1828,8 +1831,16 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
             }
         }
         Err(error) => {
-            app.error = Some(format!("Operation failed: {error}"));
-            set_status(app, app.error.as_ref().unwrap());
+            let notice = format!("Operation failed: {error}");
+            if app.tabs.current().current() == message.directory
+                && app.generation.load(Ordering::Relaxed) == message.generation {
+                // Extract/copy may have published earlier files before failing.
+                app.notice = Some(notice);
+                navigate(app, Destination::Refresh);
+            } else {
+                app.error = Some(notice);
+                set_status(app, app.error.as_ref().unwrap());
+            }
         }
     }
     0
@@ -1863,11 +1874,6 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
                 let dir = path.parent().unwrap_or_else(|| std::path::Path::new("/"));
                 operations::copy_item(&path, dir, OsStr::new(&name), &cancel, |_| {})
                     .map(|p| format!("Created {}", p.display()))
-            }
-            Operation::CopyTo(path, destination) => {
-                let name = path.file_name().unwrap_or_default();
-                operations::copy_item(&path, &destination, name, &cancel, |_| {})
-                    .map(|p| format!("Copied to {}", p.display()))
             }
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
@@ -2004,17 +2010,25 @@ unsafe fn choose_folder(parent: P) -> Option<PathBuf> {
     result
 }
 unsafe extern "C" fn copy_to(_: P, data: P) {
-    let path = match selected_path(data) {
-        Some(p) => p,
-        None => return,
-    };
-    let parent = (*(data as *mut App)).window;
-    let source_dir = path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("/"))
-        .to_path_buf();
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS {
+        set_status(app, "Select between 1 and 1024 files or folders to copy."); return;
+    }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) if entry.is_file || entry.is_dir => paths.push(entry.path.clone()),
+            _ => { set_status(app, "Copy supports regular files and folders only."); return; }
+        }
+    }
+    let parent = app.window;
+    let alive = app.alive.clone();
     if let Some(destination) = choose_folder(parent) {
-        start_operation(data, source_dir, Operation::CopyTo(path, destination));
+        if alive.load(Ordering::Relaxed) {
+            start_operation(data, destination.clone(), Operation::CopyItems(paths, destination));
+        }
     }
 }
 unsafe extern "C" fn move_to(_: P, data: P) {
@@ -2023,12 +2037,10 @@ unsafe extern "C" fn move_to(_: P, data: P) {
         None => return,
     };
     let parent = (*(data as *mut App)).window;
-    let source_dir = path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("/"))
-        .to_path_buf();
+    let alive = (*(data as *mut App)).alive.clone();
+    let source_dir = path.parent().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf();
     if let Some(destination) = choose_folder(parent) {
-        start_operation(data, source_dir, Operation::MoveTo(path, destination));
+        if alive.load(Ordering::Relaxed) { start_operation(data, source_dir, Operation::MoveTo(path, destination)); }
     }
 }
 unsafe extern "C" fn move_to_trash(_: P, data: P) {
