@@ -78,6 +78,8 @@ The Windows interface is still an incomplete file manager; see the limitations a
 
 ## Troubleshooting startup on older systems
 
+If Windows setup reports **Access is denied** for `zfm.exe`, close every running ZFM window and retry setup. If it still fails, check that your user can write to the installation folder and that security software is not blocking the file, or choose another writable folder. A newer installer can skip replacing identical files and offers a Retry button when a file is locked; existing downloaded installers will not acquire this behavior until you install a newly built release.
+
 The old `v0.0.1` release was built on Ubuntu 22.04 with current Rust. It can fail before a window appears on Linux Mint 19 (glibc 2.27) or Windows 7. Download a newer release **after** the updated workflow has successfully built and published one; existing release files are not automatically replaced. For 32-bit systems use the `i686` installers, not `x86_64`. Windows needs Windows 7 SP1 or newer, although this has not yet been tested on a Windows 7 machine. On Linux, install the `.deb` with your package manager rather than running files by hand. Linux requires a graphical session and GTK 3; archive support additionally needs libarchive. A terminal will show startup errors if the desktop cannot display them.
 
 ## Linux build and run

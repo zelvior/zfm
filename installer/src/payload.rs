@@ -8,8 +8,9 @@
 //! no separate archive and no third-party runtime.
 
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The release `zfm.exe` for the architecture this installer was built for.
 pub const APP: &[u8] = include_bytes!(env!("ZFM_PAYLOAD_PATH"));
@@ -53,40 +54,122 @@ pub fn installed_size() -> u64 {
         .sum()
 }
 
+/// A file installation error retains the OS error for retry decisions.
+#[derive(Debug)]
+pub struct InstallFileError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl InstallFileError {
+    fn new(action: &str, path: &Path, error: io::Error) -> Self {
+        // Access denied can also be a permissions or security software problem,
+        // not just an open executable. Never claim we know the exact cause.
+        let retryable = error.kind() == io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32 | 33));
+        let advice = if retryable {
+            "\n\nClose ZFM and other programs using this folder, then retry. If the problem continues, check folder permissions or security software, or choose another folder."
+        } else {
+            ""
+        };
+        Self {
+            message: format!("Could not {action} {}: {error}{advice}", path.display()),
+            retryable,
+        }
+    }
+}
+
+static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write the application files into `dir`, creating the folder if needed.
-///
-/// Each file is staged under a temporary name and then renamed into place, so
-/// a failed or interrupted install does not leave a half-written executable.
-pub fn install_files(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|error| {
-        format!(
-            "Could not create the installation folder {}: {error}",
-            dir.display()
-        )
-    })?;
+/// Identical files are left untouched, allowing a same-version reinstall while
+/// the application is running. Changed files are staged and replaced atomically.
+pub fn install_files(dir: &Path) -> Result<(), InstallFileError> {
+    fs::create_dir_all(dir)
+        .map_err(|error| InstallFileError::new("create the installation folder", dir, error))?;
     for (name, data) in payload_files() {
         write_file(&dir.join(name), data)?;
     }
     Ok(())
 }
 
-fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
-    let staged = staged_path(path);
-    fs::write(&staged, data)
-        .map_err(|error| format!("Could not write {}: {error}", staged.display()))?;
-    if let Err(error) = fs::rename(&staged, path) {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("Could not install {}: {error}", path.display()));
-    }
-    Ok(())
+/// Install setup itself as the uninstaller, also using staged replacement.
+pub fn install_uninstaller(dir: &Path, source: &Path) -> Result<(), InstallFileError> {
+    let data = fs::read(source)
+        .map_err(|error| InstallFileError::new("read the setup program", source, error))?;
+    write_file(&dir.join("Uninstall.exe"), &data)
 }
 
-fn staged_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "zfm".to_string());
-    path.with_file_name(format!(".{name}.zfm-install"))
+fn contents_match(path: &Path, expected: &[u8]) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() && m.len() == expected.len() as u64 => (),
+        _ => return false,
+    }
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 64 * 1024];
+    let mut offset = 0;
+    while offset < expected.len() {
+        let length = (expected.len() - offset).min(buf.len());
+        if file.read_exact(&mut buf[..length]).is_err()
+            || buf[..length] != expected[offset..offset + length]
+        {
+            return false;
+        }
+        offset += length;
+    }
+    // An additional read catches a concurrently growing file.
+    matches!(file.read(&mut buf[..1]), Ok(0))
+}
+
+fn write_file(path: &Path, data: &[u8]) -> Result<(), InstallFileError> {
+    if contents_match(path, data) {
+        return Ok(());
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut created = None;
+    for _ in 0..100 {
+        let counter = STAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let staged = path.with_file_name(format!(
+            ".{name}.zfm-install-{}-{counter}",
+            std::process::id()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+        {
+            Ok(file) => {
+                created = Some((staged, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(InstallFileError::new("write", &staged, error)),
+        }
+    }
+    let (staged, mut file) = created.ok_or_else(|| {
+        InstallFileError::new(
+            "stage",
+            path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Cannot allocate a temporary file",
+            ),
+        )
+    })?;
+    if let Err(error) = file.write_all(data).and_then(|_| file.flush()) {
+        drop(file);
+        let _ = fs::remove_file(&staged);
+        return Err(InstallFileError::new("write", &staged, error));
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&staged, path) {
+        let _ = fs::remove_file(&staged);
+        return Err(InstallFileError::new("install", path, error));
+    }
+    Ok(())
 }
 
 /// Remove the installed files. Missing files are not an error; failures are
@@ -155,6 +238,7 @@ pub fn remove_folder_if_empty(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -192,6 +276,52 @@ mod tests {
         fs::remove_file(&unrelated).unwrap();
         remove_folder_if_empty(&dir);
         assert!(!dir.exists(), "empty folder should be removed");
+    }
+
+    #[test]
+    fn preserves_old_file_and_replaces_only_when_needed() {
+        let dir = scratch();
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("zfm.exe");
+        fs::write(&dest, b"old executable").unwrap();
+        let unrelated = dir.join(".zfm.exe.zfm-install");
+        fs::write(&unrelated, b"do not touch").unwrap();
+        write_file(&dest, b"new executable").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new executable");
+        assert_eq!(fs::read(&unrelated).unwrap(), b"do not touch");
+        write_file(&dest, b"new executable").unwrap();
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_file_can_retry_without_damaging_original() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch();
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("zfm.exe");
+        fs::write(&dest, b"old executable").unwrap();
+        // Same-version reinstall can read the image even though deletion is blocked.
+        let read_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&dest)
+            .unwrap();
+        write_file(&dest, b"old executable").unwrap();
+        let error = write_file(&dest, b"new executable").unwrap_err();
+        assert!(error.retryable, "{error:?}");
+        assert!(error.message.contains("Close ZFM"), "{error:?}");
+        drop(read_lock);
+        assert_eq!(fs::read(&dest).unwrap(), b"old executable");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "staging file must be removed"
+        );
+        write_file(&dest, b"new executable").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new executable");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
