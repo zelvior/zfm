@@ -444,25 +444,32 @@ try {
     }
     if ([IO.File]::ReadAllText((Join-Path $destination 'folder-fixture\nested\file.txt')) -ne 'nested content' -or
         [IO.File]::ReadAllText((Join-Path $destination 'folder-companion.txt')) -ne 'companion content') { throw 'Direct multi-item copy failed.' }
-    # Wait for completion and the refreshed list before selecting the move source.
-    $companionIndex = -1
+    # Wait for completion and the refreshed list before selecting both move sources.
+    $companionIndex = -1; $folderIndex = -1
     for ($i = 0; $i -lt 100; $i++) {
         $status = New-Object System.Text.StringBuilder 512
         [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
         if ($status.ToString() -match 'Copied 2 items') {
             $companionIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-companion.txt').ToInt64()
-            if ($companionIndex -ge 0) { break }
+            $folderIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-fixture').ToInt64()
+            if ($companionIndex -ge 0 -and $folderIndex -ge 0) { break }
         }
         Start-Sleep -Milliseconds 100
     }
-    if ($companionIndex -lt 0) { throw 'Direct copy did not finish.' }
+    if ($companionIndex -lt 0 -or $folderIndex -lt 0) { throw 'Direct copy did not finish.' }
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$companionIndex, 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$folderIndex, 2, 3000, [ref]$result)
     $moveDestination = Join-Path $configRoot 'move-destination'
     New-Item -ItemType Directory -Path $moveDestination | Out-Null
     Submit-Destination 165 'Move to existing folder' $moveDestination
-    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $moveDestination 'folder-companion.txt')); $i++) { Start-Sleep -Milliseconds 100 }
-    if (-not (Test-Path -LiteralPath (Join-Path $moveDestination 'folder-companion.txt')) -or (Test-Path -LiteralPath (Join-Path $work 'folder-companion.txt'))) { throw 'Direct move failed.' }
+    for ($i = 0; $i -lt 100; $i++) {
+        if ((Test-Path -LiteralPath (Join-Path $moveDestination 'folder-companion.txt')) -and (Test-Path -LiteralPath (Join-Path $moveDestination 'folder-fixture\nested\file.txt'))) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ([IO.File]::ReadAllText((Join-Path $moveDestination 'folder-companion.txt')) -ne 'companion content' -or
+        [IO.File]::ReadAllText((Join-Path $moveDestination 'folder-fixture\nested\file.txt')) -ne 'nested content' -or
+        (Test-Path -LiteralPath (Join-Path $work 'folder-companion.txt')) -or (Test-Path -LiteralPath (Join-Path $work 'folder-fixture'))) { throw 'Direct multi-item move failed.' }
 
     # Test actual archive commands with the engine placed beside the binary by CI.
     $engine = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Executable).Path) 'zfm-archive-engine.exe'
@@ -471,7 +478,7 @@ try {
         for ($i = 0; $i -lt 100; $i++) {
             $status = New-Object System.Text.StringBuilder 512
             [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
-            if ($status.ToString() -match 'Moved to') {
+            if ($status.ToString() -match 'Moved 2 items') {
                 $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'example.txt').ToInt64()
                 if ($index -ge 0) { break }
             }
