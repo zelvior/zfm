@@ -176,11 +176,17 @@ function Invoke-InteractiveSetup {
         $licenseEdit = [ZfmSetupSmoke]::GetDlgItem($window, 106)
         $launch = [ZfmSetupSmoke]::GetDlgItem($window, 107)
         $status = [ZfmSetupSmoke]::GetDlgItem($window, 108)
+        $heading = [ZfmSetupSmoke]::GetDlgItem($window, 109)
         $body = [ZfmSetupSmoke]::GetDlgItem($window, 110)
-        foreach ($handle in @($back, $next, $browse, $pathEdit, $licenseEdit, $launch, $status, $body)) {
+        foreach ($handle in @($back, $next, $browse, $pathEdit, $licenseEdit, $launch, $status, $heading, $body)) {
             if ($handle -eq [IntPtr]::Zero) {
                 throw 'Setup window is missing an expected wizard control.'
             }
+        }
+
+        $winRect = New-Object 'ZfmSetupSmoke+Rect'
+        if (-not [ZfmSetupSmoke]::GetWindowRect($window, [ref]$winRect) -or ($winRect.right - $winRect.left) -lt 740 -or ($winRect.bottom - $winRect.top) -lt 540) {
+            throw 'Setup window is smaller than the redesigned wizard layout.'
         }
 
         $bodyRect = New-Object 'ZfmSetupSmoke+Rect'
@@ -189,11 +195,11 @@ function Invoke-InteractiveSetup {
         }
 
         # Welcome -> Folder
-        if ((Get-WizardText $next) -ne 'Next' -or [ZfmSetupSmoke]::IsWindowVisible($pathEdit)) {
+        if ((Get-WizardText $heading) -ne 'Welcome to ZFM' -or (Get-WizardText $next) -ne 'Next' -or [ZfmSetupSmoke]::IsWindowVisible($pathEdit)) {
             throw 'Unexpected initial wizard page state.'
         }
         Send-WizardCommand $window 102
-        if (-not [ZfmSetupSmoke]::IsWindowVisible($pathEdit) -or -not [ZfmSetupSmoke]::IsWindowVisible($browse)) {
+        if ((Get-WizardText $heading) -ne 'Choose a folder' -or -not [ZfmSetupSmoke]::IsWindowVisible($pathEdit) -or -not [ZfmSetupSmoke]::IsWindowVisible($browse)) {
             throw 'Wizard did not advance to the folder page.'
         }
         $statusRect = New-Object 'ZfmSetupSmoke+Rect'

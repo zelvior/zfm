@@ -7,6 +7,7 @@
 //! executable is embedded at build time, so setup needs no downloads and no
 //! third-party installer framework.
 
+mod canvas;
 mod payload;
 mod plan;
 

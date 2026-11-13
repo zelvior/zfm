@@ -1,4 +1,4 @@
-//! ZFM setup: a black-and-white wizard, a silent installer for automation, and
+//! ZFM setup: a native graphical wizard, a silent installer for automation, and
 //! the uninstaller that the installer writes next to the application.
 
 use std::fs;
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::thread;
 
+use crate::canvas::{self, Backdrop, BoxRect, ButtonStyle, Metrics, ScenePage};
 use crate::payload;
 use crate::plan::{self, Options};
 use crate::win32::{
@@ -18,6 +19,8 @@ const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SETCURSOR: u32 = 0x0020;
 const WM_COMMAND: u32 = 0x0111;
 const WM_DRAWITEM: u32 = 0x002b;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
@@ -29,19 +32,21 @@ const WM_DONE: u32 = 0x8002;
 const WS_CAPTION: u32 = 0x00c0_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
 const WS_MINIMIZEBOX: u32 = 0x0002_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
-const WS_BORDER: u32 = 0x0080_0000;
 const WS_VSCROLL: u32 = 0x0020_0000;
 const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const ES_READONLY: u32 = 0x0800;
-const SS_EDITCONTROL: u32 = 0x0000_2000;
+const SS_OWNERDRAW: u32 = 0x0000_000d;
 const BS_OWNERDRAW: u32 = 0x0000_000b;
-const BS_AUTOCHECKBOX: u32 = 0x0000_0003;
-const BM_GETCHECK: u32 = 0x00f0;
+const ODT_BUTTON: u32 = 4;
+const ODT_STATIC: u32 = 5;
+const EN_SETFOCUS: usize = 0x0100;
+const EN_KILLFOCUS: usize = 0x0200;
 const SW_SHOWNORMAL: i32 = 1;
 
 const IDOK: usize = 1;
@@ -60,29 +65,6 @@ const BODY: usize = 110;
 const APP_KEY: &str = "Software\\ZFM";
 const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZFM";
 
-// COLORREF is 0x00BBGGRR; the setup wizard uses the same palette as the
-// application: paper-white surfaces, near-black ink and solid black actions.
-const BACKGROUND: u32 = 0x00ff_ffff;
-const INK: u32 = 0x000a_0a0a;
-const MUTED: u32 = 0x005a_5a5a;
-const BUTTON_BG: u32 = 0x00f5_f5f5;
-const BUTTON_DOWN: u32 = 0x00de_dede;
-const ACCENT_DOWN: u32 = 0x002e_2e2e;
-
-// The "Z" monogram from packaging/zfm.svg, in the artwork's 128-unit grid.
-const Z_POINTS: [(i32, i32); 10] = [
-    (30, 33),
-    (98, 33),
-    (98, 51),
-    (62, 77),
-    (98, 77),
-    (98, 95),
-    (30, 95),
-    (30, 77),
-    (66, 51),
-    (30, 51),
-];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Welcome,
@@ -93,16 +75,13 @@ enum Page {
 }
 
 struct Palette {
-    background: Hbrush,
-    surface: Hbrush,
-    button: Hbrush,
-    pressed: Hbrush,
-    accent: Hbrush,
-    accent_pressed: Hbrush,
-    border: Hbrush,
-    ink: Hbrush,
+    window_brush: Hbrush,
+    edit_brush: Hbrush,
     title_font: Hfont,
     body_font: Hfont,
+    button_font: Hfont,
+    license_font: Hfont,
+    hand_cursor: win32::Handle,
     logo: Hicon,
 }
 
@@ -127,29 +106,22 @@ impl Palette {
             )
         };
         let palette = Self {
-            background: win32::CreateSolidBrush(BACKGROUND),
-            surface: win32::CreateSolidBrush(BACKGROUND),
-            button: win32::CreateSolidBrush(BUTTON_BG),
-            pressed: win32::CreateSolidBrush(BUTTON_DOWN),
-            accent: win32::CreateSolidBrush(INK),
-            accent_pressed: win32::CreateSolidBrush(ACCENT_DOWN),
-            border: win32::CreateSolidBrush(INK),
-            ink: win32::CreateSolidBrush(INK),
-            title_font: font(-26, 700),
+            window_brush: win32::CreateSolidBrush(canvas::CAPTION_TINT.colorref()),
+            edit_brush: win32::CreateSolidBrush(canvas::EDIT_SURFACE.colorref()),
+            title_font: font(-28, 700),
             body_font: font(-16, 400),
+            button_font: font(-16, 600),
+            license_font: font(-15, 400),
+            hand_cursor: win32::LoadCursorW(ptr::null_mut(), 32649usize as *const u16),
             logo: win32::icon_from_png(payload::LOGO),
         };
         if [
-            palette.background,
-            palette.surface,
-            palette.button,
-            palette.pressed,
-            palette.accent,
-            palette.accent_pressed,
-            palette.border,
-            palette.ink,
+            palette.window_brush,
+            palette.edit_brush,
             palette.title_font,
             palette.body_font,
+            palette.button_font,
+            palette.license_font,
         ]
         .iter()
         .any(|handle| handle.is_null())
@@ -163,21 +135,17 @@ impl Palette {
 impl Drop for Palette {
     fn drop(&mut self) {
         unsafe {
-            for object in [
-                self.background,
-                self.surface,
-                self.button,
-                self.pressed,
-                self.accent,
-                self.accent_pressed,
-                self.border,
-                self.ink,
-            ] {
-                if !object.is_null() {
-                    win32::DeleteObject(object);
+            for brush in [self.window_brush, self.edit_brush] {
+                if !brush.is_null() {
+                    win32::DeleteObject(brush);
                 }
             }
-            for font in [self.title_font, self.body_font] {
+            for font in [
+                self.title_font,
+                self.body_font,
+                self.button_font,
+                self.license_font,
+            ] {
                 if !font.is_null() {
                     win32::DeleteObject(font);
                 }
@@ -196,6 +164,10 @@ struct Wizard {
     percent: i32,
     busy: bool,
     license_ready: bool,
+    launch_checked: bool,
+    path_focused: bool,
+    hovered: Hwnd,
+    backdrop: Backdrop,
     palette: Palette,
     heading: Hwnd,
     body: Hwnd,
@@ -531,20 +503,15 @@ unsafe fn child(parent: Hwnd, class: &str, value: &str, style: u32, id: usize) -
 unsafe fn create_controls(hwnd: Hwnd, wizard: &mut Wizard) -> bool {
     let body_font = wizard.palette.body_font;
     let title_font = wizard.palette.title_font;
-    let heading = child(hwnd, "STATIC", "", 0, HEADING);
-    let body = child(hwnd, "STATIC", "", SS_EDITCONTROL, BODY);
-    let status_control = child(hwnd, "STATIC", "", SS_EDITCONTROL, STATUS);
-    let path_edit = child(
-        hwnd,
-        "EDIT",
-        "",
-        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-        PATH_EDIT,
-    );
+    let license_font = wizard.palette.license_font;
+    let heading = child(hwnd, "STATIC", "", SS_OWNERDRAW, HEADING);
+    let body = child(hwnd, "STATIC", "", SS_OWNERDRAW, BODY);
+    let status_control = child(hwnd, "STATIC", "", SS_OWNERDRAW, STATUS);
+    let path_edit = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, PATH_EDIT);
     let browse = child(
         hwnd,
         "BUTTON",
-        "Browse…",
+        "Browse...",
         WS_TABSTOP | BS_OWNERDRAW,
         BROWSE,
     );
@@ -552,14 +519,14 @@ unsafe fn create_controls(hwnd: Hwnd, wizard: &mut Wizard) -> bool {
         hwnd,
         "EDIT",
         "",
-        WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         LICENSE_EDIT,
     );
     let launch = child(
         hwnd,
         "BUTTON",
         "Launch ZFM now",
-        WS_TABSTOP | BS_AUTOCHECKBOX,
+        WS_TABSTOP | BS_OWNERDRAW,
         LAUNCH,
     );
     let back = child(hwnd, "BUTTON", "Back", WS_TABSTOP | BS_OWNERDRAW, BACK);
@@ -590,6 +557,8 @@ unsafe fn create_controls(hwnd: Hwnd, wizard: &mut Wizard) -> bool {
         win32::SendMessageW(control, WM_SETFONT, body_font as usize, 1);
     }
     win32::SendMessageW(heading, WM_SETFONT, title_font as usize, 1);
+    win32::SendMessageW(license, WM_SETFONT, license_font as usize, 1);
+    win32::apply_explorer_scrollbar(license);
     wizard.heading = heading;
     wizard.body = body;
     wizard.status_control = status_control;
@@ -603,16 +572,37 @@ unsafe fn create_controls(hwnd: Hwnd, wizard: &mut Wizard) -> bool {
     true
 }
 
-fn place(control: Hwnd, x: i32, y: i32, width: i32, height: i32) {
+fn place_rect(control: Hwnd, rect: BoxRect) {
     if control.is_null() {
         return;
     }
     unsafe {
-        win32::MoveWindow(control, x, y, width.max(1), height.max(1), 1);
+        win32::MoveWindow(
+            control,
+            rect.x,
+            rect.y,
+            rect.width.max(1),
+            rect.height.max(1),
+            1,
+        );
     }
 }
 
-unsafe fn layout(hwnd: Hwnd, wizard: &Wizard) {
+fn scene_page(wizard: &Wizard) -> ScenePage {
+    match wizard.page {
+        Page::Welcome => ScenePage::Welcome,
+        Page::Folder => ScenePage::Folder {
+            focused: wizard.path_focused,
+        },
+        Page::License => ScenePage::License,
+        Page::Installing => ScenePage::Installing {
+            percent: wizard.percent,
+        },
+        Page::Finish => ScenePage::Finish,
+    }
+}
+
+unsafe fn rebuild_backdrop(hwnd: Hwnd, wizard: &mut Wizard) {
     let mut client = Rect {
         left: 0,
         top: 0,
@@ -620,170 +610,209 @@ unsafe fn layout(hwnd: Hwnd, wizard: &Wizard) {
         bottom: 0,
     };
     win32::GetClientRect(hwnd, &mut client);
-    let width = client.right.max(480);
-    let height = client.bottom.max(360);
-    let footer = height - 68;
-    place(wizard.heading, 92, 25, width - 116, 38);
-    place(wizard.body, 24, 100, width - 48, 68);
-    let content = 176;
-    place(wizard.path_edit, 24, content + 6, width - 168, 30);
-    place(wizard.browse, width - 132, content + 6, 108, 30);
-    place(wizard.license, 24, content, width - 48, footer - content - 16);
-    let (status_top, status_height) = match wizard.page {
-        Page::Folder => {
-            let top = content + 48;
-            (top, (footer - 12 - top).max(48))
-        }
-        Page::Finish => (content + 8, 48),
-        _ => (content + 8, 28),
-    };
-    place(wizard.status_control, 24, status_top, width - 48, status_height);
-    place(wizard.launch, 24, content + 68, width - 48, 26);
-    place(wizard.cancel, width - 116, footer + 12, 92, 32);
-    place(wizard.next, width - 236, footer + 12, 108, 32);
-    place(wizard.back, width - 340, footer + 12, 92, 32);
+    wizard.backdrop = Backdrop::render(client.right, client.bottom, scene_page(wizard));
 }
 
-unsafe fn draw_logo(dc: Hdc, wizard: &Wizard, x: i32, y: i32, size: i32) {
-    let old_brush = win32::SelectObject(dc, wizard.palette.ink);
-    let old_pen = win32::SelectObject(dc, win32::GetStockObject(win32::NULL_PEN));
-    let corner = size * 61 / 128;
-    win32::RoundRect(dc, x, y, x + size, y + size, corner, corner);
-    let border = (size * 9 / 128).max(2);
-    win32::SelectObject(dc, wizard.palette.background);
-    let inner_corner = size * 43 / 128;
-    win32::RoundRect(
-        dc,
-        x + border,
-        y + border,
-        x + size - border,
-        y + size - border,
-        inner_corner,
-        inner_corner,
-    );
-    win32::SelectObject(dc, wizard.palette.ink);
-    let mut points: Vec<win32::Point> = Z_POINTS
-        .iter()
-        .map(|(left, top)| win32::Point {
-            x: x + left * size / 128,
-            y: y + top * size / 128,
-        })
-        .collect();
-    win32::Polygon(dc, points.as_mut_ptr(), points.len() as i32);
-    win32::SelectObject(dc, old_brush);
-    win32::SelectObject(dc, old_pen);
-}
-
-unsafe fn draw_progress(dc: Hdc, wizard: &Wizard, x: i32, y: i32, width: i32, height: i32) {
-    let outer = Rect {
-        left: x,
-        top: y,
-        right: x + width,
-        bottom: y + height,
+unsafe fn layout(hwnd: Hwnd, wizard: &mut Wizard) {
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
     };
-    win32::FrameRect(dc, &outer, wizard.palette.border);
-    let background = Rect {
-        left: x + 1,
-        top: y + 1,
-        right: x + width - 1,
-        bottom: y + height - 1,
+    win32::GetClientRect(hwnd, &mut client);
+    let metrics = Metrics::new(client.right, client.bottom);
+    place_rect(wizard.heading, metrics.heading);
+    place_rect(wizard.body, metrics.body);
+    place_rect(wizard.path_edit, metrics.path_edit);
+    place_rect(wizard.browse, metrics.browse_pill.with_pill_padding());
+    place_rect(wizard.license, metrics.license_edit);
+    let status_rect = match wizard.page {
+        Page::Folder => metrics.folder_status,
+        Page::Finish => metrics.finish_status,
+        _ => metrics.progress_status,
     };
-    win32::FillRect(dc, &background, wizard.palette.background);
-    let percent = wizard.percent.clamp(0, 100);
-    let filled = (width - 4) * percent / 100;
-    if filled > 0 {
-        let inner = Rect {
-            left: x + 2,
-            top: y + 2,
-            right: x + 2 + filled,
-            bottom: y + height - 2,
-        };
-        win32::FillRect(dc, &inner, wizard.palette.ink);
-    }
+    place_rect(wizard.status_control, status_rect);
+    place_rect(wizard.launch, metrics.launch);
+    place_rect(wizard.cancel, metrics.cancel_pill.with_pill_padding());
+    place_rect(wizard.next, metrics.next_pill.with_pill_padding());
+    place_rect(wizard.back, metrics.back_pill.with_pill_padding());
+    rebuild_backdrop(hwnd, wizard);
 }
 
 unsafe fn paint(hwnd: Hwnd, wizard: &Wizard) {
     let mut paint: PaintStruct = std::mem::zeroed();
     let dc = win32::BeginPaint(hwnd, &mut paint);
-    let mut client = Rect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    win32::GetClientRect(hwnd, &mut client);
-    let width = client.right;
-    let height = client.bottom;
-    draw_logo(dc, wizard, 24, 18, 52);
-    let rule = Rect {
-        left: 24,
-        top: 88,
-        right: width - 24,
-        bottom: 90,
-    };
-    win32::FillRect(dc, &rule, wizard.palette.border);
-    let footer = Rect {
-        left: 24,
-        top: height - 68,
-        right: width - 24,
-        bottom: height - 66,
-    };
-    win32::FillRect(dc, &footer, wizard.palette.border);
-    if wizard.page == Page::Installing {
-        draw_progress(dc, wizard, 24, 224, width - 48, 18);
-    }
+    win32::blit_pixels(
+        dc,
+        0,
+        0,
+        wizard.backdrop.width,
+        wizard.backdrop.height,
+        &wizard.backdrop.pixels,
+        |_| {},
+    );
     win32::EndPaint(hwnd, &paint);
 }
 
-unsafe fn draw_button(item: &mut DrawItem, wizard: &Wizard) -> LResult {
-    let primary = item.control_id as usize == NEXT;
-    let disabled = item.item_state & 4 != 0;
-    let pressed = item.item_state & 1 != 0;
-    let background = if disabled {
-        wizard.palette.button
-    } else if primary {
-        if pressed {
-            wizard.palette.accent_pressed
-        } else {
-            wizard.palette.accent
-        }
-    } else if pressed {
-        wizard.palette.pressed
-    } else {
-        wizard.palette.button
-    };
-    win32::FillRect(item.dc, &item.rect, background);
-    if !primary || disabled {
-        win32::FrameRect(item.dc, &item.rect, wizard.palette.border);
+unsafe fn draw_item(parent: Hwnd, item: &mut DrawItem, wizard: &Wizard) -> LResult {
+    let width = (item.rect.right - item.rect.left).max(1);
+    let height = (item.rect.bottom - item.rect.top).max(1);
+    let (origin_x, origin_y) = win32::child_origin(parent, item.hwnd);
+    let mut pixels = wizard.backdrop.slice(origin_x, origin_y, width, height);
+    let id = item.control_id as usize;
+
+    if item.control_type == ODT_STATIC {
+        let label = win32::text(&win32::window_text(item.hwnd));
+        let (font, color, format) = match id {
+            HEADING => (
+                wizard.palette.title_font,
+                canvas::HEADING_INK.colorref(),
+                win32::DT_VCENTER | win32::DT_SINGLELINE | win32::DT_NOPREFIX,
+            ),
+            STATUS if wizard.page == Page::Folder => (
+                wizard.palette.body_font,
+                canvas::ERROR_INK.colorref(),
+                win32::DT_WORDBREAK | win32::DT_EDITCONTROL | win32::DT_NOPREFIX,
+            ),
+            STATUS => (
+                wizard.palette.body_font,
+                canvas::STATUS_INK.colorref(),
+                win32::DT_WORDBREAK | win32::DT_EDITCONTROL | win32::DT_NOPREFIX,
+            ),
+            _ => (
+                wizard.palette.body_font,
+                canvas::BODY_INK.colorref(),
+                win32::DT_WORDBREAK | win32::DT_EDITCONTROL | win32::DT_NOPREFIX,
+            ),
+        };
+        win32::blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            width,
+            height,
+            &pixels,
+            |mem_dc| {
+                win32::SetBkMode(mem_dc, 1);
+                win32::SetTextColor(mem_dc, color);
+                let old_font = win32::SelectObject(mem_dc, font);
+                let mut bounds = Rect {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                };
+                win32::DrawTextW(mem_dc, label.as_ptr(), -1, &mut bounds, format);
+                win32::SelectObject(mem_dc, old_font);
+            },
+        );
+        return 1;
     }
-    win32::SetBkMode(item.dc, 1);
-    win32::SetTextColor(
-        item.dc,
-        if disabled {
-            MUTED
+
+    if item.control_type == ODT_BUTTON {
+        let disabled = item.item_state & 4 != 0;
+        let pressed = item.item_state & 1 != 0;
+        let focused = item.item_state & 16 != 0;
+        let hovered = !disabled && wizard.hovered == item.hwnd;
+        let label = win32::text(&win32::window_text(item.hwnd));
+
+        if id == LAUNCH {
+            canvas::paint_checkbox(
+                &mut pixels,
+                width,
+                height,
+                wizard.launch_checked,
+                hovered,
+                focused,
+            );
+            win32::blit_pixels(
+                item.dc,
+                item.rect.left,
+                item.rect.top,
+                width,
+                height,
+                &pixels,
+                |mem_dc| {
+                    win32::SetBkMode(mem_dc, 1);
+                    win32::SetTextColor(mem_dc, canvas::BODY_INK.colorref());
+                    let old_font = win32::SelectObject(mem_dc, wizard.palette.body_font);
+                    let mut bounds = Rect {
+                        left: 32,
+                        top: 0,
+                        right: width,
+                        bottom: height,
+                    };
+                    win32::DrawTextW(
+                        mem_dc,
+                        label.as_ptr(),
+                        -1,
+                        &mut bounds,
+                        win32::DT_VCENTER | win32::DT_SINGLELINE | win32::DT_NOPREFIX,
+                    );
+                    win32::SelectObject(mem_dc, old_font);
+                },
+            );
+            return 1;
+        }
+
+        let primary = id == NEXT;
+        canvas::paint_pill_button(
+            &mut pixels,
+            width,
+            height,
+            ButtonStyle {
+                primary,
+                hovered,
+                pressed,
+                disabled,
+                focused,
+            },
+        );
+        let text_color = if disabled {
+            canvas::DISABLED_TEXT.colorref()
         } else if primary {
-            BACKGROUND
+            canvas::PRIMARY_TEXT.colorref()
         } else {
-            INK
-        },
-    );
-    let label = win32::text(&win32::window_text(item.hwnd));
-    let mut bounds = Rect {
-        left: item.rect.left + 4,
-        top: item.rect.top,
-        right: item.rect.right - 4,
-        bottom: item.rect.bottom,
-    };
-    let old_font = win32::SelectObject(item.dc, wizard.palette.body_font);
-    win32::DrawTextW(
-        item.dc,
-        label.as_ptr(),
-        -1,
-        &mut bounds,
-        win32::DT_CENTER | win32::DT_VCENTER | win32::DT_SINGLELINE | win32::DT_NOPREFIX,
-    );
-    win32::SelectObject(item.dc, old_font);
-    1
+            canvas::SECONDARY_TEXT.colorref()
+        };
+        let font = if primary {
+            wizard.palette.button_font
+        } else {
+            wizard.palette.body_font
+        };
+        let shift = if pressed && !disabled { 1 } else { 0 };
+        win32::blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            width,
+            height,
+            &pixels,
+            |mem_dc| {
+                win32::SetBkMode(mem_dc, 1);
+                win32::SetTextColor(mem_dc, text_color);
+                let old_font = win32::SelectObject(mem_dc, font);
+                let mut bounds = Rect {
+                    left: canvas::PILL_PAD_X,
+                    top: canvas::PILL_PAD_TOP + shift - 1,
+                    right: width - canvas::PILL_PAD_X,
+                    bottom: height - canvas::PILL_PAD_BOTTOM + shift,
+                };
+                win32::DrawTextW(
+                    mem_dc,
+                    label.as_ptr(),
+                    -1,
+                    &mut bounds,
+                    win32::DT_CENTER | win32::DT_VCENTER | win32::DT_SINGLELINE | win32::DT_NOPREFIX,
+                );
+                win32::SelectObject(mem_dc, old_font);
+            },
+        );
+        return 1;
+    }
+
+    0
 }
 
 unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
@@ -795,7 +824,7 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
         ),
         Page::Folder => (
             "Choose a folder",
-            "ZFM is installed in the folder below. Setup adds a Start Menu shortcut, an entry in Programs and Features and an uninstaller. Other files already in the folder are left untouched.",
+            "ZFM is installed in the folder below. Setup adds a Start Menu shortcut, an entry in Programs and Features, and an uninstaller. Other files already in the folder are left untouched.",
         ),
         Page::License => (
             "License agreement",
@@ -815,6 +844,8 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
     win32::set_text(wizard.status_control, &wizard.status);
     if page == Page::Folder {
         win32::set_text(wizard.path_edit, &wizard.dir);
+    } else {
+        wizard.path_focused = false;
     }
     if !wizard.license_ready {
         win32::set_text(wizard.license, &crlf(payload::LICENSE));
@@ -849,7 +880,21 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
     win32::EnableWindow(wizard.back, if wizard.busy { 0 } else { 1 });
     win32::EnableWindow(wizard.cancel, if wizard.busy { 0 } else { 1 });
     layout(hwnd, wizard);
-    win32::InvalidateRect(hwnd, ptr::null(), 1);
+    win32::InvalidateRect(hwnd, ptr::null(), 0);
+    for control in [
+        wizard.heading,
+        wizard.body,
+        wizard.status_control,
+        wizard.browse,
+        wizard.launch,
+        wizard.back,
+        wizard.next,
+        wizard.cancel,
+    ] {
+        if !control.is_null() {
+            win32::InvalidateRect(control, ptr::null(), 0);
+        }
+    }
 }
 
 unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
@@ -895,7 +940,7 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
 }
 
 unsafe fn finish(hwnd: Hwnd, wizard: &mut Wizard) {
-    if win32::SendMessageW(wizard.launch, BM_GETCHECK, 0, 0) == 1 {
+    if wizard.launch_checked {
         let dir = PathBuf::from(&wizard.dir);
         let exe = dir.join("zfm.exe");
         // Start the application detached from setup; the standard library does
@@ -958,12 +1003,24 @@ unsafe fn browse_directory(hwnd: Hwnd, wizard: &mut Wizard) {
         wizard.status.clear();
         win32::set_text(wizard.path_edit, &wizard.dir);
         win32::set_text(wizard.status_control, "");
+        win32::InvalidateRect(wizard.status_control, ptr::null(), 0);
     }
 }
 
 unsafe fn command(hwnd: Hwnd, wizard: &mut Wizard, wparam: WParam) -> Option<String> {
     let id = wparam & 0xffff;
     let code = (wparam >> 16) & 0xffff;
+    if id == PATH_EDIT && (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+        let focused = code == EN_SETFOCUS;
+        if wizard.path_focused != focused {
+            wizard.path_focused = focused;
+            if wizard.page == Page::Folder {
+                rebuild_backdrop(hwnd, wizard);
+                win32::InvalidateRect(hwnd, ptr::null(), 0);
+            }
+        }
+        return None;
+    }
     if code != 0 {
         return None;
     }
@@ -995,6 +1052,10 @@ unsafe fn command(hwnd: Hwnd, wizard: &mut Wizard, wparam: WParam) -> Option<Str
             }
         }
         BROWSE => browse_directory(hwnd, wizard),
+        LAUNCH => {
+            wizard.launch_checked = !wizard.launch_checked;
+            win32::InvalidateRect(wizard.launch, ptr::null(), 0);
+        }
         _ => {}
     }
     None
@@ -1042,23 +1103,48 @@ unsafe extern "system" fn window_proc(
             win32::PostQuitMessage(0);
             0
         }
+        WM_ERASEBKGND => 1,
+        WM_SETCURSOR => {
+            let target = wparam as Hwnd;
+            let interactive = [
+                wizard.next,
+                wizard.back,
+                wizard.cancel,
+                wizard.browse,
+                wizard.launch,
+            ]
+            .contains(&target);
+            let next_hover = if interactive { target } else { ptr::null_mut() };
+            if wizard.hovered != next_hover {
+                let previous = wizard.hovered;
+                wizard.hovered = next_hover;
+                if !previous.is_null() {
+                    win32::InvalidateRect(previous, ptr::null(), 0);
+                }
+                if !next_hover.is_null() {
+                    win32::InvalidateRect(next_hover, ptr::null(), 0);
+                }
+            }
+            if interactive && !wizard.busy && !wizard.palette.hand_cursor.is_null() {
+                if (lparam & 0xffff) == 1 {
+                    win32::SetCursor(wizard.palette.hand_cursor);
+                    return 1;
+                }
+            }
+            win32::DefWindowProcW(hwnd, message, wparam, lparam)
+        }
         WM_COMMAND => {
             failure = command(hwnd, wizard, wparam);
             0
         }
         WM_DRAWITEM if lparam != 0 => {
             let item = &mut *(lparam as *mut DrawItem);
-            draw_button(item, wizard)
+            draw_item(hwnd, item, wizard)
         }
-        WM_CTLCOLORSTATIC => {
-            win32::SetTextColor(wparam as Hdc, INK);
-            win32::SetBkColor(wparam as Hdc, BACKGROUND);
-            wizard.palette.background as LResult
-        }
-        WM_CTLCOLOREDIT => {
-            win32::SetTextColor(wparam as Hdc, INK);
-            win32::SetBkColor(wparam as Hdc, BACKGROUND);
-            wizard.palette.surface as LResult
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
+            win32::SetTextColor(wparam as Hdc, canvas::BODY_INK.colorref());
+            win32::SetBkColor(wparam as Hdc, canvas::EDIT_SURFACE.colorref());
+            wizard.palette.edit_brush as LResult
         }
         WM_PAINT => {
             paint(hwnd, wizard);
@@ -1074,7 +1160,9 @@ unsafe extern "system" fn window_proc(
                 wizard.percent = message.percent;
                 wizard.status = message.text;
                 win32::set_text(wizard.status_control, &wizard.status);
+                rebuild_backdrop(hwnd, wizard);
                 win32::InvalidateRect(hwnd, ptr::null(), 0);
+                win32::InvalidateRect(wizard.status_control, ptr::null(), 0);
             }
             0
         }
@@ -1178,6 +1266,10 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
             percent: 0,
             busy: false,
             license_ready: false,
+            launch_checked: false,
+            path_focused: false,
+            hovered: ptr::null_mut(),
+            backdrop: Backdrop::render(764, 536, ScenePage::Welcome),
             palette,
             heading: ptr::null_mut(),
             body: ptr::null_mut(),
@@ -1192,7 +1284,7 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
         }));
         WIZARD = wizard;
         let class = win32::text("ZFMSetupWindow");
-        if !register_class(instance, (*wizard).palette.background, &class) {
+        if !register_class(instance, (*wizard).palette.window_brush, &class) {
             win32::message(
                 ptr::null_mut(),
                 "Could not register the setup window.",
@@ -1205,11 +1297,11 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
             0,
             class.as_ptr(),
             win32::text("ZFM File Manager — Setup").as_ptr(),
-            WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             0x8000_0000u32 as i32,
             0x8000_0000u32 as i32,
-            676,
-            500,
+            780,
+            576,
             ptr::null_mut(),
             ptr::null_mut(),
             instance,
@@ -1225,6 +1317,12 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
             return 1;
         }
         win32::set_icon(window, (*wizard).palette.logo);
+        win32::apply_window_chrome(
+            window,
+            canvas::CAPTION_TINT.colorref(),
+            canvas::BORDER_TINT.colorref(),
+            canvas::HEADING_INK.colorref(),
+        );
         if !create_controls(window, &mut *wizard) {
             win32::message(
                 window,
