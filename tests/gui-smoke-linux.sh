@@ -13,7 +13,8 @@ cleanup() {
 }
 trap cleanup EXIT
 printf 'GUI smoke fixture\n' > "$work/example.txt"
-XDG_CONFIG_HOME="$config" GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
+mkdir -p "$config/data"
+XDG_DATA_HOME="$config/data" XDG_CONFIG_HOME="$config" GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
 pid=$!
 window=''
 for _ in $(seq 1 100); do
@@ -149,4 +150,23 @@ if [ ! -f "$work/folder-test/source copy/nested/file.txt" ]; then cat "$work/std
 cmp "$work/folder-test/source/nested/file.txt" "$work/folder-test/source copy/nested/file.txt"
 cmp "$work/folder-test/companion.txt" "$work/folder-test/companion copy.txt"
 [ -d "$work/folder-test/source copy/nested/empty" ]
-echo "GTK navigation, clipboard and name dialog smoke tests passed (window $window)."
+# Trash multiple items through Delete, isolated from the user's real trash.
+mkdir -p "$work/trash-test/batch-folder"
+printf 'trash file\n' > "$work/trash-test/batch-file.txt"
+printf 'trash nested\n' > "$work/trash-test/batch-folder/nested.txt"
+xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+l ctrl+a
+xdotool type --clearmodifiers "$work/trash-test"
+xdotool key --window "$window" Return
+sleep 1
+xdotool key --window "$window" Escape ctrl+a Delete
+for _ in $(seq 1 100); do
+    if [ -f "$config/data/Trash/files/batch-file.txt" ] && [ -f "$config/data/Trash/files/batch-folder/nested.txt" ]; then break; fi
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while trashing selection:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+[ ! -e "$work/trash-test/batch-file.txt" ] && [ ! -e "$work/trash-test/batch-folder" ]
+grep -q 'trash file' "$config/data/Trash/files/batch-file.txt"
+grep -q 'trash nested' "$config/data/Trash/files/batch-folder/nested.txt"
+[ -f "$config/data/Trash/info/batch-file.txt.trashinfo" ] && [ -f "$config/data/Trash/info/batch-folder.trashinfo" ]
+echo "GTK navigation, clipboard, trash and name dialog smoke tests passed (window $window)."

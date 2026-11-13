@@ -1918,7 +1918,7 @@ enum Operation {
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
     MoveTo(PathBuf, PathBuf),
-    Trash(PathBuf),
+    Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
 }
@@ -2002,8 +2002,8 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
                 .map(|p| format!("Moved to {}", p.display())),
-            Operation::Trash(path) => {
-                zfm::trash::trash(&path).map(|_| format!("Moved {} to trash", path.display()))
+            Operation::Trash(paths) => {
+                zfm::trash::trash_items(&paths, 0, &cancel).map(|result| result.message(paths.len()))
             }
             Operation::Delete(path) => {
                 operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
@@ -2199,15 +2199,21 @@ unsafe extern "C" fn move_to(_: P, data: P) {
     }
 }
 unsafe extern "C" fn move_to_trash(_: P, data: P) {
-    let path = match selected_path(data) {
-        Some(p) => p,
-        None => return,
-    };
-    let dir = path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("/"))
-        .to_path_buf();
-    start_operation(data, dir, Operation::Trash(path));
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS {
+        set_status(app, "Select between 1 and 1024 items to move to trash."); return;
+    }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) => paths.push(entry.path.clone()),
+            None => { set_status(app, "The selection changed; select the items again."); return; }
+        }
+    }
+    let dir = app.tabs.current().current().to_path_buf();
+    start_operation(data, dir, Operation::Trash(paths));
 }
 unsafe extern "C" fn delete_permanently(_: P, data: P) {
     let path = match selected_path(data) {

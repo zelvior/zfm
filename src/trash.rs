@@ -1,4 +1,58 @@
-//! Linux trash integration using GIO. There is no permanent-delete fallback.
+//! Desktop trash integration with bounded, cancellable batch dispatch.
+//! Linux uses GIO without a permanent-delete fallback. Windows delegates to the
+//! shell, which may ask the user before permanently deleting an unrecyclable item.
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Debug)]
+pub struct BatchTrashResult {
+    pub completed: usize,
+    pub failure: Option<(PathBuf, String)>,
+}
+impl BatchTrashResult {
+    pub fn message(&self, total: usize) -> String {
+        match &self.failure {
+            Some((path, error)) => format!(
+                "Trash request processed {} of {total} items; stopped at {}: {error}. Later items were not attempted; the failed item may be partially processed.",
+                self.completed, path.display()
+            ),
+            None => format!("Trash request processed {} items.", self.completed),
+        }
+    }
+}
+
+/// Send up to 1024 non-overlapping items to the desktop trash one at a time.
+/// Stops at the first failure or cancellation; earlier items are not restored.
+/// A call already in progress cannot be interrupted by ZFM. On Windows, `owner`
+/// must be a valid window for shell warnings. Path checks are lexical and do not
+/// protect against aliases or concurrent changes; use trusted directories.
+pub fn trash_items(paths: &[PathBuf], owner: usize, cancel: &AtomicBool) -> io::Result<BatchTrashResult> {
+    trash_items_with(paths, cancel, |path| {
+        #[cfg(target_os = "windows")]
+        { trash_with_owner(path, owner) }
+        #[cfg(not(target_os = "windows"))]
+        { let _ = owner; trash(path) }
+    })
+}
+
+fn trash_items_with<F: FnMut(&Path) -> io::Result<()>>(
+    paths: &[PathBuf], cancel: &AtomicBool, mut trash_one: F,
+) -> io::Result<BatchTrashResult> {
+    crate::operations::validate_batch_selection(paths)?;
+    let mut completed = 0;
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BatchTrashResult { completed, failure: Some((path.clone(), "Trash cancelled".into())) });
+        }
+        if let Err(error) = trash_one(path) {
+            return Ok(BatchTrashResult { completed, failure: Some((path.clone(), error.to_string())) });
+        }
+        completed += 1;
+    }
+    Ok(BatchTrashResult { completed, failure: None })
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::ffi::{CStr, CString};
@@ -265,6 +319,62 @@ mod windows {
 #[cfg(target_os = "windows")]
 pub use windows::{trash, trash_with_owner};
 
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    #[test]
+    fn stops_on_failure_and_reports_partial_result() {
+        let root = crate::test_support::scratch_dir("trash-batch");
+        let paths = vec![root.join("first"), root.join("second"), root.join("third")];
+        let mut called = Vec::new();
+        let result = trash_items_with(&paths, &AtomicBool::new(false), |path| {
+            called.push(path.to_path_buf());
+            if path == paths[1] { Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")) } else { Ok(()) }
+        }).unwrap();
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.failure.as_ref().unwrap().0, paths[1]);
+        assert_eq!(called, paths[..2]);
+        assert!(result.message(3).contains("processed 1 of 3"));
+        assert!(result.message(3).contains("partially processed"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cancellation_is_checked_between_items() {
+        let root = crate::test_support::scratch_dir("trash-batch-cancel");
+        let paths = vec![root.join("first"), root.join("second")];
+        let cancel = AtomicBool::new(false);
+        let result = trash_items_with(&paths, &cancel, |_| { cancel.store(true, Ordering::Relaxed); Ok(()) }).unwrap();
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.failure.unwrap().0, paths[1]);
+        let result = trash_items_with(&paths, &cancel, |_| panic!("cancelled before dispatch")).unwrap();
+        assert_eq!(result.completed, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preflight_rejects_duplicates_nested_and_invalid_paths() {
+        let root = crate::test_support::scratch_dir("trash-batch-invalid");
+        let parent = root.join("folder"); let child = parent.join("child");
+        let cancel = AtomicBool::new(false);
+        let reject = |paths: &[PathBuf]| trash_items_with(paths, &cancel, |_| panic!("invalid input was dispatched")).is_err();
+        assert!(reject(&[]));
+        assert!(reject(&[PathBuf::from("relative")]));
+        assert!(reject(&[parent.clone(), parent.clone()]));
+        assert!(reject(&[parent.clone(), child.clone()]));
+        assert!(reject(&[child, parent.clone()]));
+        assert!(reject(&[root.join("a/../b")]));
+        assert!(reject(&vec![parent; crate::operations::MAX_COPY_ITEMS + 1]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn rejects_case_insensitive_overlap() {
+        let root = crate::test_support::scratch_dir("trash-batch-case");
+        let paths = [root.join("Folder"), root.join("folder").join("child")];
+        assert!(trash_items_with(&paths, &AtomicBool::new(false), |_| panic!("overlap dispatched")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -285,6 +395,14 @@ mod tests {
             assert!(fs::symlink_metadata(&link).is_err());
             assert_eq!(fs::read(&target).unwrap(), b"safe");
             assert!(trash(&root.join("not-found")).is_err());
+            let first = root.join("batch-first"); let second = root.join("batch-folder"); let last = root.join("batch-last");
+            fs::write(&first, b"one").unwrap(); fs::create_dir(&second).unwrap(); fs::write(second.join("inside"), b"two").unwrap(); fs::write(&last, b"three").unwrap();
+            let paths = vec![first.clone(), second.clone(), root.join("missing"), last.clone()];
+            let result = trash_items(&paths, 0, &AtomicBool::new(false)).unwrap();
+            assert_eq!(result.completed, 2); assert_eq!(result.failure.unwrap().0, paths[2]);
+            assert!(!first.exists() && !second.exists() && last.exists());
+            assert_eq!(fs::read(root.join("data/Trash/files/batch-first")).unwrap(), b"one");
+            assert_eq!(fs::read(root.join("data/Trash/files/batch-folder/inside")).unwrap(), b"two");
             return;
         }
         let root = crate::test_support::scratch_dir("zfm-trash");

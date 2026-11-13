@@ -515,6 +515,37 @@ try {
         if (-not (Test-Path -LiteralPath $extracted) -or [IO.File]::ReadAllText($extracted) -ne [IO.File]::ReadAllText((Join-Path $work 'example.txt'))) { throw 'Archive extraction failed.' }
     } else { Write-Host 'Archive GUI smoke skipped: engine not present beside executable.' }
 
+    # A multi-item Trash request with overlapping recursive hits must be
+    # rejected before touching the Windows shell or the user's Recycle Bin.
+    $overlap = Join-Path $work 'trash-overlap'
+    New-Item -ItemType Directory -Path $overlap | Out-Null
+    $overlapChild = Join-Path $overlap 'trash-overlap-child.txt'
+    [IO.File]::WriteAllText($overlapChild, 'must remain')
+    $filter = [ZfmSmoke]::GetDlgItem($window, 112)
+    [void][ZfmSmoke]::SendMessageW($filter, 0x000c, [UIntPtr]::Zero, 'trash-overlap')
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]168, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    $parentIndex = -1; $childIndex = -1
+    for ($i = 0; $i -lt 100; $i++) {
+        $parentIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'trash-overlap').ToInt64()
+        $childIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'trash-overlap\trash-overlap-child.txt').ToInt64()
+        if ($parentIndex -ge 0 -and $childIndex -ge 0) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($parentIndex -lt 0 -or $childIndex -lt 0) { throw 'Trash overlap search did not find both items.' }
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$parentIndex, 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$childIndex, 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]135, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    $rejected = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $status = New-Object System.Text.StringBuilder 1024
+        [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+        if ($status.ToString() -match 'must not contain one another') { $rejected = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $rejected -or [IO.File]::ReadAllText($overlapChild) -ne 'must remain') { throw 'Overlapping trash selection was not safely rejected.' }
+
     # Search nested names and navigate to the result's containing directory.
     $searchFolder = Join-Path $work 'search-fixture'
     New-Item -ItemType Directory -Path $searchFolder -Force | Out-Null
