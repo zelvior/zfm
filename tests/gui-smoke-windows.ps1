@@ -142,6 +142,16 @@ try {
     if (-not (Test-Path -LiteralPath $copy)) { throw 'Same-folder paste did not create a copy.' }
     if ((Get-Content -LiteralPath $copy -Raw) -ne (Get-Content -LiteralPath (Join-Path $work 'example.txt') -Raw)) { throw 'Pasted data differs.' }
 
+    # Wait for the worker completion and the refreshed directory listing, not
+    # just publication of the copy, before starting another operation.
+    $refreshed = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $count = [UIntPtr]::Zero
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x18b, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$count)
+        if ($count.ToUInt64() -eq 3) { $refreshed = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $refreshed) { throw 'Copy did not finish refreshing the list.' }
     # A posted command opens the real name dialog without blocking this process.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]139, [IntPtr]::Zero)) { throw 'Could not request new file dialog.' }
     $dialog = [IntPtr]::Zero
@@ -156,7 +166,11 @@ try {
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'New file dialog did not submit.' }
     for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $work 'created.txt')); $i++) { Start-Sleep -Milliseconds 100 }
-    if (-not (Test-Path -LiteralPath (Join-Path $work 'created.txt'))) { throw 'New file dialog did not create the file.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $work 'created.txt'))) {
+        $notice = New-Object System.Text.StringBuilder 512
+        [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $notice, $notice.Capacity)
+        throw "New file dialog did not create the file. Status: $notice"
+    }
     # Refresh, new tab, close tab: synchronous calls exercise the message loop.
     foreach ($id in @(104, 110, 111)) {
         $result = [UIntPtr]::Zero
