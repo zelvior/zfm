@@ -1,12 +1,13 @@
+<!-- Modified: describe the compact file-manager interface. -->
 # ZFM — Zelvior File Manager
 
 <img src="packaging/zfm-wordmark.svg" alt="ZFM — Zelvior File Manager" width="320">
 
-A small native file manager written in Rust with a dark-slate desktop interface. **This repository currently contains an early foundation and a limited set of file operations, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
+A small native file manager written in Rust with a compact, dark details-view desktop interface. **This repository currently contains an early foundation and a limited set of file operations, not the complete file manager described in the project brief.** It is not yet recommended as a replacement for an established file manager.
 
 ## What works in this foundation
 
-- Linux GTK 3 window with a dark-slate theme, 4-column sortable directory table (`Name`, `Date Modified`, `Type`, `Size`), sidebar (`Desktop`, `Documents`, `Downloads`, `Music`, `Videos`, `Drives`), and segmented status bar.
+- Linux GTK 3 window with a compact dark theme, 4-column sortable directory table (`Name`, `Date`, `Type`, `Size`), grouped sidebar shortcuts, and selection details. The toolbar’s Organize menu retains file operations including trash, copy, move, duplicate and cancellation. Search and path entry remain available in the navigation bar.
 - Enter a path and press Enter; double-click a folder to enter it or a file to open it with `xdg-open`. Back, forward, parent and refresh buttons; F5, Alt+Left/Right/Up and Ctrl+L shortcuts.
 - Hidden-file toggle, folder-first case-insensitive name ordering, file sizes and modification dates. Broken links remain visible. Errors opening a directory are shown in the status bar.
 - Directory enumeration and metadata run on a worker. New navigation cancels the *results* of earlier work; UI rows are added in batches on the GTK main loop. There is no persistent background service.

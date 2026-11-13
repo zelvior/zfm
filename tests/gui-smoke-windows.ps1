@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+# Modified: cover the compact layout and tab behavior.
 param([Parameter(Mandatory=$true)][string]$Executable)
 $ErrorActionPreference = 'Stop'
 if (-not ('ZfmSmoke' -as [type])) {
@@ -101,6 +102,18 @@ try {
     if ($listRect.top -le $nameRect.bottom -or ($listRect.bottom - $listRect.top) -lt 100) {
         throw 'File list overlaps the toolbar or has insufficient height.'
     }
+    # The compact details view keeps navigation, filter and commands above the
+    # list, rather than using a large branding header. Check at the default size.
+    $backRect = New-Object 'ZfmSmoke+Rect'
+    $filterRect = New-Object 'ZfmSmoke+Rect'
+    if (-not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($window, 101), [ref]$backRect) -or
+        -not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($window, 112), [ref]$filterRect)) {
+        throw 'Could not inspect compact navigation and filter controls.'
+    }
+    if ($filterRect.top -lt $backRect.top -or $filterRect.bottom -gt $backRect.bottom) {
+        throw 'Filter is not aligned with the navigation row.'
+    }
+    if (($listRect.top - $backRect.top) -gt 140) { throw 'File list is displaced by oversized chrome.' }
     # Verify that asynchronous directory enumeration actually populates the list.
     $populated = $false
     for ($i = 0; $i -lt 100; $i++) {

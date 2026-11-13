@@ -1,3 +1,4 @@
+// Modified: compact reference-inspired file-manager layout and visuals.
 //! Native Win32 dark-slate file manager interface.
 //!
 //! Directory enumeration and file mutations run on background workers; surfaces,
@@ -634,9 +635,9 @@ impl Theme {
             filter_brush: CreateSolidBrush(ui_theme::FILTER_EDIT_BG.colorref()),
             name_brush: CreateSolidBrush(ui_theme::NAME_EDIT_BG.colorref()),
             list_brush: CreateSolidBrush(ui_theme::ROW_EVEN.colorref()),
-            font: font(-15, 400),
-            semibold_font: font(-15, 600),
-            small_font: font(-13, 400),
+            font: font(-13, 400),
+            semibold_font: font(-13, 600),
+            small_font: font(-12, 400),
             brand_font: font(-25, 700),
             subtitle_font: font(-13, 600),
             hand_cursor: LoadCursorW(ptr::null_mut(), 32649usize as *const u16),
@@ -751,24 +752,33 @@ fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
     if let Some(base) = profile {
-        for (label, folder, icon) in [
-            ("Desktop", "Desktop", ItemIcon::Desktop),
-            ("Documents", "Documents", ItemIcon::Documents),
-            ("Downloads", "Downloads", ItemIcon::Downloads),
-            ("Music", "Music", ItemIcon::Music),
-            ("Videos", "Videos", ItemIcon::Videos),
+        for (heading, icon, folders) in [
+            ("Favorites", ItemIcon::Favorites, vec![
+                ("Desktop", "Desktop", ItemIcon::Desktop),
+                ("Downloads", "Downloads", ItemIcon::Downloads),
+            ]),
+            ("Libraries", ItemIcon::Documents, vec![
+                ("Documents", "Documents", ItemIcon::Documents),
+                ("Music", "Music", ItemIcon::Music),
+                ("Pictures", "Pictures", ItemIcon::Folder),
+                ("Videos", "Videos", ItemIcon::Videos),
+                ("Home", "", ItemIcon::Folder),
+            ]),
         ] {
             items.push(SidebarEntry {
-                label: label.to_string(),
-                icon,
-                indent: 0,
-                target: Some(base.join(folder)),
+                label: heading.to_string(), icon, indent: 0, target: None,
                 is_drives_header: false,
             });
+            for (label, folder, icon) in folders {
+                items.push(SidebarEntry {
+                    label: label.to_string(), icon, indent: 1,
+                    target: Some(base.join(folder)), is_drives_header: false,
+                });
+            }
         }
     }
     items.push(SidebarEntry {
-        label: "Drives".to_string(),
+        label: "Computer".to_string(),
         icon: ItemIcon::Drives,
         indent: 0,
         target: None,
@@ -847,8 +857,8 @@ fn dynamic_tab_rects(metrics: &WindowMetrics, tab_count: usize) -> Vec<BoxRect> 
 }
 
 fn sidebar_row_rect(metrics: &WindowMetrics, index: usize) -> Option<BoxRect> {
-    let row_h = 32;
-    let y = metrics.sidebar.y + 8 + (index as i32) * row_h;
+    let row_h = 22;
+    let y = metrics.sidebar.y + 5 + (index as i32) * row_h;
     if y + row_h > metrics.sidebar.bottom() {
         return None;
     }
@@ -893,7 +903,8 @@ fn hit_test_custom(app: &App, metrics: &WindowMetrics, x: i32, y: i32) -> HotZon
     if metrics.sidebar.contains(x, y) {
         for idx in 0..app.sidebar_items.len() {
             if let Some(rect) = sidebar_row_rect(metrics, idx) {
-                if rect.contains(x, y) {
+                let item = &app.sidebar_items[idx];
+                if rect.contains(x, y) && (item.target.is_some() || item.is_drives_header) {
                     return HotZone::Sidebar(idx);
                 }
             }
@@ -966,7 +977,7 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
         w,
         h,
         m.address_chip.x + 10,
-        m.address_chip.y + 7,
+        m.address_chip.y + (m.address_chip.height - 18) / 2,
         ItemIcon::Folder,
     );
     let chev_x = (m.address_chip.right() - 6) as f32;
@@ -1065,7 +1076,7 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
                     ui_theme::DECK_TOP,
                 );
             }
-            ui_theme::paint_item_icon(&mut buf, w, h, rect.x + 8, rect.y + 8, ItemIcon::Folder);
+            ui_theme::paint_item_icon(&mut buf, w, h, rect.x + 8, rect.y + (rect.height - 18) / 2, ItemIcon::Folder);
         }
     }
 
@@ -1152,16 +1163,13 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
         }
         let base_x = row_rect.x + 10 + item.indent * 16;
         let cy = (row_rect.y + row_rect.height / 2) as f32;
-        ui_theme::paint_chevron(
-            &mut buf,
-            w,
-            h,
-            base_x as f32,
-            cy,
-            item.is_drives_header && app.drives_expanded,
-            ui_theme::TEXT_MUTED,
-        );
-        ui_theme::paint_item_icon(&mut buf, w, h, base_x + 10, row_rect.y + 6, item.icon);
+        if item.is_drives_header {
+            ui_theme::paint_chevron(
+                &mut buf, w, h, base_x as f32, cy,
+                app.drives_expanded, ui_theme::TEXT_MUTED,
+            );
+        }
+        ui_theme::paint_item_icon(&mut buf, w, h, base_x + 10, row_rect.y + (row_rect.height - 18) / 2, item.icon);
     }
 
     // 5. Column Header Bar
@@ -1287,17 +1295,12 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
     let current_path = app.tabs.current().current().display().to_string();
     let selected = selected_indices(app);
     let selected_count = selected.len();
-    let active_path = if selected_count == 1 {
-        app.entries[selected[0]].path.display().to_string()
-    } else {
-        current_path.clone()
-    };
 
     // Sort indicator coordinates in the column header
     let mut pixels = app.backdrop.clone();
     let arrow_col_rect = match app.sort_column {
         SortColumn::Name => (m.col_name, 58),
-        SortColumn::Modified => (m.col_modified, 108),
+        SortColumn::Modified => (m.col_modified, 45),
         SortColumn::Kind => (m.col_type, 46),
         SortColumn::Size => (m.col_size, 42),
     };
@@ -1310,6 +1313,25 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
         app.sort_ascending,
         ui_theme::TEXT_MUTED,
     );
+
+    let status_icon = if selected_count == 1 {
+        app.entries.get(selected[0]).map(ui_theme::classify_entry_icon).unwrap_or(ItemIcon::Folder)
+    } else {
+        ItemIcon::Folder
+    };
+    // Enlarge the selected-item glyph for the details strip without allocating
+    // any native image handles or scaling the rest of the interface.
+    let mut status_glyph = vec![ui_theme::STATUS_BG.pixel(); 18 * 18];
+    ui_theme::paint_item_icon(&mut status_glyph, 18, 18, 0, 0, status_icon);
+    for y in 0..36 {
+        for x in 0..36 {
+            let px = 10 + x;
+            let py = m.status_bar.y + 6 + y;
+            if px < w && py < h {
+                pixels[(py * w + px) as usize] = status_glyph[((y / 2) * 18 + x / 2) as usize];
+            }
+        }
+    }
 
     blit_pixels(dc, 0, 0, w, h, &pixels, |mem_dc| {
         // Brand lockup
@@ -1330,20 +1352,8 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
 
-        // Address breadcrumb chip text
-        draw_text_in(
-            mem_dc,
-            theme.small_font,
-            ui_theme::TEXT_PRIMARY,
-            BoxRect::new(
-                m.address_chip.x + 32,
-                m.address_chip.y,
-                (m.address_chip.width - 46).max(16),
-                m.address_chip.height,
-            ),
-            &current_path,
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-        );
+        // The editable path occupies the rest of the address bar; the folder
+        // chip itself can be clicked to focus that field.
 
         // Open tab labels
         if app.tabs.len() > 1 {
@@ -1400,7 +1410,7 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
             let base_x = row_rect.x + 10 + item.indent * 16 + 34;
             draw_text_in(
                 mem_dc,
-                theme.font,
+                if item.target.is_none() { theme.semibold_font } else { theme.font },
                 ui_theme::TEXT_BRIGHT,
                 BoxRect::new(
                     base_x,
@@ -1416,7 +1426,7 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
         // Column header titles
         for (rect, pad_left, title, right_align) in [
             (m.col_name, 16, "Name", false),
-            (m.col_modified, 10, "Date Modified", false),
+            (m.col_modified, 10, "Date", false),
             (m.col_type, 10, "Type", false),
             (m.col_size, 10, "Size", true),
         ] {
@@ -1437,44 +1447,30 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
             );
         }
 
-        // Bottom Status Bar segments
+        // Explorer-style details strip: the current selection is prominent,
+        // while operational notices and the item count remain visible.
         let sy = m.status_bar.y;
-        let sh = m.status_bar.height;
-        let items_str = format!("{} items", app.entries.len());
+        let selected_entry = if selected_count == 1 {
+            app.entries.get(selected[0])
+        } else {
+            None
+        };
+        let title = selected_entry
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| tab_title(app.tabs.current().current()));
+        let detail = selected_entry
+            .map(|entry| format!("{}   ·   {}   ·   {}", ui_theme::entry_type_label(entry),
+                format_local_modified(entry.modified), entry.path.display()))
+            .unwrap_or_else(|| format!("{} items   ·   {} selected   ·   {}", app.entries.len(), selected_count, current_path));
         draw_text_in(
-            mem_dc,
-            theme.font,
-            ui_theme::TEXT_PRIMARY,
-            BoxRect::new(14, sy, 84, sh),
-            &items_str,
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        let left_detail = app.notice.as_deref().unwrap_or(&current_path);
-        let right_zone_w = (w * 42 / 100).clamp(240, 380);
-        let right_start = (m.view_details_btn.x - 12 - right_zone_w).max(200);
-        draw_text_in(
-            mem_dc,
-            theme.font,
-            ui_theme::TEXT_MUTED,
-            BoxRect::new(98, sy, 12, sh),
-            "|",
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        draw_text_in(
-            mem_dc,
-            theme.font,
-            ui_theme::TEXT_PRIMARY,
-            BoxRect::new(112, sy, (right_start - 120).max(40), sh),
-            left_detail,
+            mem_dc, theme.semibold_font, ui_theme::TEXT_BRIGHT,
+            BoxRect::new(56, sy + 5, (w - 132).max(20), 19), &title,
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
-        let right_summary = format!("Selected: {selected_count}   |   Path: {active_path}");
+        let status_detail = app.notice.as_deref().unwrap_or(&detail);
         draw_text_in(
-            mem_dc,
-            theme.font,
-            ui_theme::TEXT_PRIMARY,
-            BoxRect::new(right_start, sy, m.view_details_btn.x - 10 - right_start, sh),
-            &right_summary,
+            mem_dc, theme.small_font, ui_theme::TEXT_PRIMARY,
+            BoxRect::new(56, sy + 24, (w - 132).max(20), 18), status_detail,
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
     });
@@ -1671,7 +1667,7 @@ unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
 
     let leading_icon = match id {
         GO => Some((ActionIcon::Go, "Go")),
-        APPLY_FILTER => Some((ActionIcon::Search, "Search")),
+        APPLY_FILTER => None,
         NEW_FILE => Some((ActionIcon::NewFile, "New file")),
         NEW_FOLDER => Some((ActionIcon::NewFolder, "New folder")),
         RENAME => Some((ActionIcon::Rename, "Rename")),
@@ -1781,8 +1777,8 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
         return 1;
     };
 
-    let icon = ui_theme::classify_entry_icon(entry);
-    ui_theme::paint_item_icon(&mut pixels, w, h, 18, (h - 18) / 2, icon);
+    let icon = if entry.is_dir { ItemIcon::Folder } else { ui_theme::classify_entry_icon(entry) };
+    ui_theme::paint_item_icon(&mut pixels, w, h, 12, (h - 18) / 2, icon);
 
     let mut client = Rect {
         left: 0,
@@ -2239,7 +2235,7 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
             if app.view_mode != mode {
                 app.view_mode = mode;
                 let row_h = match mode {
-                    ViewMode::Details => 30,
+                    ViewMode::Details => 22,
                     ViewMode::Compact => 38,
                 };
                 SendMessageW(app.list, LB_SETITEMHEIGHT, 0, row_h);
@@ -2704,7 +2700,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         app.extra_buttons = extra_buttons;
         SetWindowSubclass(list, Some(list_proc), 1, hwnd as usize);
 
-        SendMessageW(list, LB_SETITEMHEIGHT, 0, 30);
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, 22);
         SendMessageW(
             filter_control,
             EM_SETCUEBANNER,

@@ -1,3 +1,4 @@
+// Modified: compact reference-inspired file-manager layout and visuals.
 //! Dark-slate visual theme, anti-aliased SDF rendering primitives, vector
 //! icons, layout geometry, and table column formatters for the file manager.
 
@@ -36,19 +37,19 @@ pub const TAB_ACTIVE_BG: Rgb = Rgb(46, 51, 58);
 pub const TAB_INACTIVE_BG: Rgb = Rgb(29, 34, 40);
 pub const DECK_TOP: Rgb = Rgb(46, 53, 62);
 pub const DECK_BOTTOM: Rgb = Rgb(36, 40, 47);
-pub const SIDEBAR_BG: Rgb = Rgb(33, 36, 38);
+pub const SIDEBAR_BG: Rgb = Rgb(28, 35, 39);
 pub const SIDEBAR_HOVER: Rgb = Rgb(44, 49, 55);
 pub const SIDEBAR_ACTIVE: Rgb = Rgb(53, 60, 69);
 pub const SPLITTER_DARK: Rgb = Rgb(20, 22, 26);
 pub const SPLITTER_LIGHT: Rgb = Rgb(86, 90, 96);
-pub const COL_HEADER_BG: Rgb = Rgb(37, 38, 41);
+pub const COL_HEADER_BG: Rgb = Rgb(29, 30, 32);
 pub const COL_HEADER_HOVER: Rgb = Rgb(46, 49, 54);
-pub const ROW_EVEN: Rgb = Rgb(31, 32, 34);
-pub const ROW_ODD: Rgb = Rgb(36, 38, 40);
-pub const ROW_LINE: Rgb = Rgb(44, 46, 50);
-pub const ROW_SELECTED_BG: Rgb = Rgb(52, 56, 62);
+pub const ROW_EVEN: Rgb = Rgb(28, 28, 28);
+pub const ROW_ODD: Rgb = Rgb(33, 33, 33);
+pub const ROW_LINE: Rgb = Rgb(33, 33, 33);
+pub const ROW_SELECTED_BG: Rgb = Rgb(59, 59, 61);
 pub const ROW_SELECTED_BORDER: Rgb = Rgb(78, 84, 93);
-pub const STATUS_BG: Rgb = Rgb(33, 35, 39);
+pub const STATUS_BG: Rgb = Rgb(48, 49, 50);
 
 pub const BORDER_SUBTLE: Rgb = Rgb(61, 67, 75);
 pub const BORDER_STRONG: Rgb = Rgb(79, 87, 97);
@@ -207,78 +208,76 @@ impl WindowMetrics {
     pub fn new(client_width: i32, client_height: i32) -> Self {
         let width = client_width.max(720);
         let height = client_height.max(440);
-        let margin = 16;
+        // Keep the navigation and command rows compact, like a classic
+        // details-view file manager, while retaining all existing controls.
+        let margin = 6;
         let right = width - margin;
+        let brand_title = BoxRect::new(0, 0, 0, 0);
+        let brand_subtitle = BoxRect::new(0, 0, 0, 0);
 
-        let brand_title = BoxRect::new(margin, 8, 66, 28);
-        let brand_subtitle = BoxRect::new(margin + 68, 14, 160, 20);
-
-        let nav_y = 42;
-        let nav_h = 32;
-        let nav_w = 38;
-        let nav_gap = 6;
+        let nav_y = 4;
+        let nav_h = 26;
+        let nav_w = 27;
+        let nav_gap = 3;
         let nav_back = BoxRect::new(margin, nav_y, nav_w, nav_h);
         let nav_forward = BoxRect::new(margin + (nav_w + nav_gap), nav_y, nav_w, nav_h);
         let nav_up = BoxRect::new(margin + 2 * (nav_w + nav_gap), nav_y, nav_w, nav_h);
         let nav_root = BoxRect::new(margin + 3 * (nav_w + nav_gap), nav_y, nav_w, nav_h);
         let nav_refresh = BoxRect::new(margin + 4 * (nav_w + nav_gap), nav_y, nav_w, nav_h);
 
-        let go_w = 64;
-        let nav_go = BoxRect::new(right - go_w, nav_y, go_w, nav_h);
-        let addr_x = nav_refresh.right() + 8;
-        let addr_w = (nav_go.x - 8 - addr_x).max(160);
+        let hidden_btn = BoxRect::new(right - 112, nav_y, 112, nav_h);
+        let clear_btn = BoxRect::new(hidden_btn.x - 4 - 44, nav_y, 44, nav_h);
+        let search_btn = BoxRect::new(clear_btn.x - 4 - 70, nav_y, 70, nav_h);
+        let filter_w = (width * 16 / 100).clamp(110, 175);
+        let filter_x = search_btn.x - 4 - filter_w;
+        let filter_label = BoxRect::new(0, 0, 0, 0);
+        let filter_frame = BoxRect::new(filter_x, nav_y, filter_w, nav_h);
+        let filter_edit = BoxRect::new(filter_x + 8, nav_y + 4, filter_w - 32, 18);
+        let nav_go = BoxRect::new(filter_x - 4 - 50, nav_y, 50, nav_h);
+        let addr_x = nav_refresh.right() + 5;
+        let addr_w = (nav_go.x - 5 - addr_x).max(140);
         let address_frame = BoxRect::new(addr_x, nav_y, addr_w, nav_h);
-        let chip_w = (addr_w * 34 / 100).clamp(108, 168);
+        let chip_w = 34;
         let address_chip = BoxRect::new(addr_x, nav_y, chip_w, nav_h);
         let address_edit = BoxRect::new(
-            address_chip.right() + 10,
-            nav_y + 6,
-            (address_frame.right() - address_chip.right() - 18).max(40),
-            nav_h - 12,
+            address_chip.right() + 8,
+            nav_y + 4,
+            (address_frame.right() - address_chip.right() - 14).max(40),
+            nav_h - 8,
         );
 
-        let tab_strip_top = 82;
-        let deck_top = 118;
-        let tab_y = 85;
+        let tab_strip_top = 33;
+        let deck_top = 61;
+        let tab_y = 35;
         let tab_h = deck_top - tab_y;
-        let new_tab = BoxRect::new(margin, tab_y, 112, tab_h);
-        let close_tab = BoxRect::new(new_tab.right() + 4, tab_y, 114, tab_h);
+        let new_tab = BoxRect::new(margin, tab_y, 90, tab_h);
+        let close_tab = BoxRect::new(new_tab.right() + 4, tab_y, 92, tab_h);
         let dynamic_tabs_left = close_tab.right() + 8;
         let dynamic_tabs_right = right;
 
-        let filter_y = deck_top + 10;
-        let row_h = 32;
-        let hidden_btn = BoxRect::new(right - 130, filter_y, 130, row_h);
-        let clear_btn = BoxRect::new(hidden_btn.x - 6 - 60, filter_y, 60, row_h);
-        let search_btn = BoxRect::new(clear_btn.x - 6 - 92, filter_y, 92, row_h);
-        let filter_label = BoxRect::new(margin, filter_y, 48, row_h);
-        let filter_x = filter_label.right() + 4;
-        let filter_w = (search_btn.x - 8 - filter_x).max(80);
-        let filter_frame = BoxRect::new(filter_x, filter_y, filter_w, row_h);
-        let filter_edit = BoxRect::new(filter_x + 10, filter_y + 6, (filter_w - 38).max(32), 20);
-
-        let name_y = filter_y + row_h + 8;
-        let delete_btn = BoxRect::new(right - 98, name_y, 98, row_h);
-        let rename_btn = BoxRect::new(delete_btn.x - 6 - 92, name_y, 92, row_h);
-        let new_folder_btn = BoxRect::new(rename_btn.x - 6 - 112, name_y, 112, row_h);
-        let new_file_btn = BoxRect::new(new_folder_btn.x - 6 - 98, name_y, 98, row_h);
-        let name_label = BoxRect::new(margin, name_y, 82, row_h);
+        let row_h = 26;
+        let name_y = deck_top + 4;
+        let delete_btn = BoxRect::new(right - 84, name_y, 84, row_h);
+        let rename_btn = BoxRect::new(delete_btn.x - 4 - 84, name_y, 84, row_h);
+        let new_folder_btn = BoxRect::new(rename_btn.x - 4 - 102, name_y, 102, row_h);
+        let new_file_btn = BoxRect::new(new_folder_btn.x - 4 - 88, name_y, 88, row_h);
+        let name_label = BoxRect::new(margin, name_y, 70, row_h);
         let name_x = name_label.right() + 4;
-        let name_w = (new_file_btn.x - 8 - name_x).max(60);
+        let name_w = (new_file_btn.x - 6 - name_x).max(60);
         let name_frame = BoxRect::new(name_x, name_y, name_w, row_h);
-        let name_edit = BoxRect::new(name_x + 10, name_y + 6, (name_w - 20).max(28), 20);
+        let name_edit = BoxRect::new(name_x + 8, name_y + 4, (name_w - 16).max(28), 18);
 
-        let split_top = name_y + row_h + 10;
-        let status_h = 32;
+        let split_top = name_y + row_h + 4;
+        let status_h = 48;
         let status_top = (height - status_h).max(split_top + 132);
         let body_h = (status_top - split_top).max(132);
 
-        let sidebar_w = (width * 23 / 100).clamp(185, 238);
+        let sidebar_w = (width * 16 / 100).clamp(150, 190);
         let sidebar = BoxRect::new(0, split_top, sidebar_w, body_h);
         let splitter_x = sidebar_w;
         let table_x = sidebar_w + 4;
         let table_w = (width - table_x).max(200);
-        let col_h = 32;
+        let col_h = 24;
         let col_header = BoxRect::new(table_x, split_top, table_w, col_h);
 
         let scrollbar_pad = 18;
@@ -301,8 +300,8 @@ impl WindowMetrics {
         );
 
         let status_bar = BoxRect::new(0, status_top, width, status_h);
-        let view_compact_btn = BoxRect::new(width - 34, status_top + 4, 24, 24);
-        let view_details_btn = BoxRect::new(width - 62, status_top + 4, 24, 24);
+        let view_compact_btn = BoxRect::new(width - 34, status_top + 12, 24, 24);
+        let view_details_btn = BoxRect::new(width - 62, status_top + 12, 24, 24);
 
         Self {
             width,
@@ -1108,7 +1107,7 @@ pub fn paint_item_icon(
             );
         }
         ItemIcon::Folder => {
-            paint_folder_glyph(buf, stride, height, x, y, Rgb(246, 192, 74), Rgb(216, 152, 40));
+            paint_folder_glyph(buf, stride, height, x, y, Rgb(151, 156, 158), Rgb(111, 116, 119));
         }
         ItemIcon::FileCode => {
             paint_file_glyph(buf, stride, height, x, y, Rgb(72, 178, 242));
@@ -1155,7 +1154,7 @@ fn paint_folder_glyph(
         2.2,
         front_top,
         back_tab,
-        Some(Rgb(252, 214, 118)),
+        Some(front_top.lerp(Rgb(230, 230, 230), 0.25)),
     );
 }
 
@@ -1401,6 +1400,14 @@ mod tests {
         for (w, h) in [(720, 480), (1024, 600), (1440, 900)] {
             let m = WindowMetrics::new(w, h);
             assert!(m.list.y > m.name_edit.bottom());
+            assert!(m.address_frame.right() <= m.nav_go.x);
+            assert!(m.nav_go.right() <= m.filter_frame.x);
+            assert!(m.filter_frame.right() <= m.search_btn.x);
+            assert!(m.search_btn.right() <= m.clear_btn.x);
+            assert!(m.clear_btn.right() <= m.hidden_btn.x);
+            assert!(m.name_frame.right() <= m.new_file_btn.x);
+            assert!(m.new_folder_btn.right() <= m.rename_btn.x);
+            assert!(m.split_top <= 100, "chrome should leave room for files");
             assert!(m.list.height >= 100);
             assert!(m.sidebar.right() <= m.col_header.x);
             assert!(m.col_name.right() <= m.col_modified.x);
