@@ -903,7 +903,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let can_convert = can_duplicate
-        && (extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("json"));
+        && (extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("txt"));
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
@@ -922,6 +922,8 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
             menu,
             if is_json {
                 "Convert JSON to CSV…"
+            } else if extension.eq_ignore_ascii_case("txt") {
+                "Convert text to HTML…"
             } else {
                 "Convert CSV to JSON…"
             },
@@ -1281,12 +1283,12 @@ unsafe extern "C" fn converter_update(data: P) -> c_int {
     if let Some(result) = update.result {
         converter.running = false;
         match result {
-            Ok(rows) => {
+            Ok(units) => {
                 converter.last_output = Some(update.output);
                 (api().gtk_progress_bar_set_fraction)(converter.progress, 1.0);
                 (api().gtk_label_set_text)(
                     converter.status,
-                    c(&format!("Done: {rows} rows converted.")).as_ptr(),
+                    c(&format!("Done: {units} rows or bytes converted.")).as_ptr(),
                 );
             }
             Err(error) => (api().gtk_label_set_text)(
@@ -1332,7 +1334,7 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
     }
     let input = PathBuf::from(input);
     let output = PathBuf::from(output);
-    let json_to_csv = (api().gtk_combo_box_get_active)(converter.mode) == 1;
+    let mode = (api().gtk_combo_box_get_active)(converter.mode);
     converter.running = true;
     converter.job += 1;
     converter.last_output = None;
@@ -1362,10 +1364,10 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
                 (api().g_idle_add)(converter_update, Box::into_raw(msg) as P);
             }
         };
-        let result = if json_to_csv {
-            zfm::json_csv::json_to_csv(&input, &output, &cancel, &mut report)
-        } else {
-            zfm::converter::csv_to_json(&input, &output, &cancel, &mut report)
+        let result = match mode {
+            1 => zfm::json_csv::json_to_csv(&input, &output, &cancel, &mut report),
+            2 => zfm::converter::text_to_html(&input, &output, &cancel, &mut report),
+            _ => zfm::converter::csv_to_json(&input, &output, &cancel, &mut report),
         }
         .map_err(|e| e.to_string());
         let msg = Box::new(ConvertUpdate {
@@ -1474,9 +1476,11 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                         .unwrap_or("");
                     if extension.eq_ignore_ascii_case("csv")
                         || extension.eq_ignore_ascii_case("json")
+                        || extension.eq_ignore_ascii_case("txt")
                     {
                         let json = extension.eq_ignore_ascii_case("json");
-                        (api().gtk_combo_box_set_active)(converter.mode, if json { 1 } else { 0 });
+                        let plain_text = extension.eq_ignore_ascii_case("txt");
+                        (api().gtk_combo_box_set_active)(converter.mode, if json { 1 } else if plain_text { 2 } else { 0 });
                         (api().gtk_entry_set_text)(
                             converter.input,
                             c(&entry.path.to_string_lossy()).as_ptr(),
@@ -1485,7 +1489,7 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                             converter.output,
                             c(&entry
                                 .path
-                                .with_extension(if json { "csv" } else { "json" })
+                                .with_extension(if json { "csv" } else if plain_text { "html" } else { "json" })
                                 .to_string_lossy())
                             .as_ptr(),
                         );
@@ -1507,12 +1511,13 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let caption = label("Offline CSV / JSON converter · UTF-8 · string values only");
+    let caption = label("Built-in offline converter · UTF-8 · CSV/JSON values are strings");
     (api().gtk_label_set_xalign)(caption, 0.0);
     (api().gtk_box_pack_start)(layout, caption, 0, 0, 0);
     let mode = (api().gtk_combo_box_text_new)();
     (api().gtk_combo_box_text_append_text)(mode, c("CSV → JSON").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("JSON → CSV (string-valued objects)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("Plain text → HTML (escaped)").as_ptr());
     (api().gtk_combo_box_set_active)(mode, 0);
     (api().gtk_box_pack_start)(layout, mode, 0, 0, 0);
     let input_row = (api().gtk_box_new)(0, 4);

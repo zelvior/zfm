@@ -122,6 +122,76 @@ pub fn csv_to_json<F: FnMut(u64)>(
     Ok(rows)
 }
 
+/// Convert UTF-8 plain text into a self-contained HTML document. Text is
+/// escaped rather than interpreted as markup; output never replaces a file.
+/// Memory use is bounded independently of input size.
+pub fn text_to_html<F: FnMut(u64)>(
+    input: &Path,
+    output: &Path,
+    cancel: &AtomicBool,
+    mut progress: F,
+) -> io::Result<u64> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    let mut source = BufReader::new(File::open(input)?);
+    if !source.get_ref().metadata()?.is_file() {
+        return Err(invalid("Input must be a regular file"));
+    }
+    let (temp, file) = staged_output(output)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(b"<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Converted text</title></head><body><pre>")?;
+    let mut buffer = [0u8; 16388];
+    let mut carried = 0usize;
+    let mut processed = 0u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        let n = source.read(&mut buffer[carried..16384])?;
+        let len = carried + n;
+        let valid = match std::str::from_utf8(&buffer[..len]) {
+            Ok(_) => len,
+            Err(e) if e.error_len().is_none() && n != 0 => e.valid_up_to(),
+            Err(_) => return Err(invalid("Text is not valid UTF-8")),
+        };
+        // Escape markup delimiters, and reject characters HTML cannot faithfully
+        // represent as plain text. Preserve line breaks and Unicode as written.
+        let mut start = 0;
+        for (i, byte) in buffer[..valid].iter().copied().enumerate() {
+            let escape: Option<&[u8]> = match byte {
+                b'&' => Some(b"&amp;"),
+                b'<' => Some(b"&lt;"),
+                b'>' => Some(b"&gt;"),
+                0..=8 | 11..=12 | 14..=31 | 127 => {
+                    return Err(invalid("Text contains unsupported control characters"))
+                }
+                _ => None,
+            };
+            if let Some(escape) = escape {
+                writer.write_all(&buffer[start..i])?;
+                writer.write_all(escape)?;
+                start = i + 1;
+            }
+        }
+        writer.write_all(&buffer[start..valid])?;
+        processed += valid as u64;
+        progress(processed);
+        carried = len - valid;
+        buffer.copy_within(valid..len, 0);
+        if n == 0 {
+            break;
+        }
+    }
+    writer.write_all(b"</pre></body></html>\n")?;
+    writer.flush()?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    fs::hard_link(&temp.0, output)?;
+    Ok(processed)
+}
+
 fn json_string<W: Write>(out: &mut W, value: &str) -> io::Result<()> {
     out.write_all(b"\"")?;
     for ch in value.chars() {
@@ -380,5 +450,50 @@ mod tests {
             go(b"value\n\"tab\t slash\\ \x01\"\n").unwrap(),
             "[\n  {\"value\":\"tab\\t slash\\\\ \\u0001\"}\n]\n"
         );
+    }
+    #[test]
+    fn text_html_escapes_markup_and_handles_utf8_split_across_chunks() {
+        let t = Temp::new();
+        let src = t.0.join("in.txt");
+        let out = t.0.join("out.html");
+        let content = format!("{}é <script>&\n", "x".repeat(16383));
+        fs::write(&src, &content).unwrap();
+        assert_eq!(
+            text_to_html(&src, &out, &AtomicBool::new(false), |_| {}).unwrap(),
+            content.len() as u64
+        );
+        let output = fs::read_to_string(out).unwrap();
+        assert!(output.contains("é &lt;script&gt;&amp;\n"));
+        assert!(!output.contains("<script>"));
+    }
+    #[test]
+    fn text_html_rejects_bad_input_and_cleans_up_on_cancel_or_conflict() {
+        let t = Temp::new();
+        let src = t.0.join("in.txt");
+        let out = t.0.join("out.html");
+        for bytes in [&b"bad\xff"[..], &b"bad\x00"[..], &b"bad\xc3"[..]] {
+            fs::write(&src, bytes).unwrap();
+            assert_eq!(
+                text_to_html(&src, &out, &AtomicBool::new(false), |_| {})
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(!out.exists());
+        }
+        fs::write(&src, vec![b'x'; 50000]).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            text_to_html(&src, &out, &cancel, |_| cancel
+                .store(true, Ordering::Relaxed))
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(!out.exists());
+        fs::write(&out, b"keep").unwrap();
+        assert!(text_to_html(&src, &out, &AtomicBool::new(false), |_| {}).is_err());
+        assert_eq!(fs::read(&out).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(&t.0).unwrap().count(), 2);
     }
 }

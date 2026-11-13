@@ -36,6 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-0 xvfb xdotool
           xvfb-run -a ./tests/gui-smoke-linux.sh "$PWD/target/release/zfm"
+          xvfb-run -a python3 ./tests/benchmark-linux.py "$PWD/target/release/zfm"
 
   windows:
     name: Windows ${{ matrix.target }}

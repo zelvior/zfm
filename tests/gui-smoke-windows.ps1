@@ -186,6 +186,49 @@ try {
     Start-Sleep -Seconds 1
     $process.Refresh()
     if ($process.HasExited) { throw "ZFM exited while handling navigation commands (exit code $($process.ExitCode))." }
+    # Exercise the built-in converter through the real Win32 selection and dialog.
+    # Keep fixtures in the GUI directory and wait for each async refresh.
+    [IO.File]::WriteAllText((Join-Path $work 'source.csv'), "name`nZelvior`n", [Text.UTF8Encoding]::new($false))
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]104, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    function Convert-Fixture([string]$inputName, [string]$dialogTitle, [string]$outputName) {
+        $index = -1
+        for ($i = 0; $i -lt 100; $i++) {
+            $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $inputName).ToInt64() # LB_FINDSTRINGEXACT
+            if ($index -ge 0) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($index -lt 0) { throw "Converter input $inputName is not in the list." }
+        $result = [UIntPtr]::Zero
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$index, 2, 3000, [ref]$result)
+        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]141, [IntPtr]::Zero)) { throw 'Could not invoke converter.' }
+        $dialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', $dialogTitle)
+            if ($dialog -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($dialog -eq [IntPtr]::Zero) { throw "Converter dialog $dialogTitle did not appear." }
+        $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+        [void][ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, $outputName)
+        [void][ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result)
+        $destination = Join-Path $work $outputName
+        for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $destination); $i++) { Start-Sleep -Milliseconds 100 }
+        if (-not (Test-Path -LiteralPath $destination)) { throw "Converter did not create $outputName." }
+        # Publication precedes the asynchronous listing refresh.
+        for ($i = 0; $i -lt 100; $i++) {
+            if ([ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $outputName).ToInt64() -ge 0) { return }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Converted file $outputName was not listed."
+    }
+    Convert-Fixture 'example.txt' 'Convert text to HTML' 'example.html'
+    if ((Get-Content -Raw -LiteralPath (Join-Path $work 'example.html')) -notmatch '<pre>GUI smoke fixture') { throw 'Incorrect HTML conversion.' }
+    Convert-Fixture 'source.csv' 'Convert CSV to JSON' 'source.json'
+    if (((Get-Content -Raw -LiteralPath (Join-Path $work 'source.json')) | ConvertFrom-Json)[0].name -ne 'Zelvior') { throw 'Incorrect CSV to JSON conversion.' }
+    Convert-Fixture 'source.json' 'Convert JSON to CSV' 'roundtrip.csv'
+    if ((Get-Content -Raw -LiteralPath (Join-Path $work 'roundtrip.csv')) -notmatch 'Zelvior') { throw 'Incorrect JSON to CSV conversion.' }
     Write-Host "Win32 window and basic controls detected: $title"
 } catch {
     Write-Host "::error title=GUI smoke test::$($_.Exception.Message)"

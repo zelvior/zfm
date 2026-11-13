@@ -127,6 +127,7 @@ const OPEN_TAB: usize = 137;
 const PROMPT_RENAME: usize = 138;
 const PROMPT_FILE: usize = 139;
 const PROMPT_FOLDER: usize = 140;
+const CONVERT: usize = 141;
 
 #[repr(C)]
 struct WndClass {
@@ -2097,6 +2098,7 @@ enum Operation {
     Copy(PathBuf, PathBuf, OsString),
     Move(PathBuf, PathBuf),
     Trash(PathBuf, usize),
+    Convert(PathBuf, PathBuf, u8),
 }
 
 unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
@@ -2130,6 +2132,15 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 }
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
                     .map(|p| format!("Moved to {}", p.display())),
+                Operation::Convert(input, output, mode) => {
+                    let cancel = AtomicBool::new(false);
+                    let result = match mode {
+                        0 => zfm::converter::csv_to_json(&input, &output, &cancel, |_| {}),
+                        1 => zfm::json_csv::json_to_csv(&input, &output, &cancel, |_| {}),
+                        _ => zfm::converter::text_to_html(&input, &output, &cancel, |_| {}),
+                    };
+                    result.map(|_| format!("Converted to {}", output.display()))
+                }
             }
             .map_err(|e| e.to_string());
         let msg = Box::into_raw(Box::new(OperationMessage { result }));
@@ -2382,6 +2393,13 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         AppendMenuW(menu, 0, 1, text("Open").as_ptr());
         if selected_indices(app).len() == 1 && app.entries[selected_indices(app)[0]].is_dir {
             AppendMenuW(menu, 0, OPEN_TAB, text("Open in new tab").as_ptr());
+        }
+        let selected_items = selected_indices(app);
+        if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
+            let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ["csv", "json", "txt"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+                AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
+            }
         }
         AppendMenuW(menu, 0x800, 0, ptr::null());
         for (id, title) in [
@@ -3089,6 +3107,31 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             rebuild_backdrop(hwnd, app);
                             InvalidateRect(hwnd, ptr::null(), 0);
                             load(hwnd, app, Destination::Refresh, false);
+                        }
+                    }
+                }
+                CONVERT if code == 0 => {
+                    if let Some(input) = selected_path(hwnd, app) {
+                        let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+                        let (mode, target_ext, title) = if ext.eq_ignore_ascii_case("csv") {
+                            (0, "json", "Convert CSV to JSON")
+                        } else if ext.eq_ignore_ascii_case("json") {
+                            (1, "csv", "Convert JSON to CSV")
+                        } else if ext.eq_ignore_ascii_case("txt") {
+                            (2, "html", "Convert text to HTML")
+                        } else {
+                            set_status(hwnd, app, Some("Built-in conversion supports CSV, JSON and TXT inputs only.".into()));
+                            return 0;
+                        };
+                        let proposed = input.with_extension(target_ext);
+                        if let Some(name) = windows_actions::prompt(hwnd, app.theme, title, proposed.file_name().unwrap_or_default(), false) {
+                            match zfm::operations::validate_name(&name) {
+                                Ok(()) => {
+                                    let output = input.parent().unwrap_or_else(|| Path::new(".")).join(name);
+                                    start_operation(hwnd, app, Operation::Convert(input, output, mode));
+                                }
+                                Err(e) => set_status(hwnd, app, Some(format!("Invalid output name: {e}"))),
+                            }
                         }
                     }
                 }
