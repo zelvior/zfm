@@ -224,7 +224,7 @@ mod tests {
         let found = search_recursive(&t.0, false, "needle", false, &generation, 1).unwrap().unwrap();
         assert_eq!(found.entries.len(), 2);
         assert!(!found.truncated);
-        assert!(found.entries.iter().any(|e| display_name(e, &t.0, true) == Path::new("nested/deep/Needle.txt").to_string_lossy()));
+        assert!(found.entries.iter().any(|e| display_name(e, &t.0, true) == Path::new("nested").join("deep").join("Needle.txt").to_string_lossy()));
         assert_eq!(search_recursive(&t.0, true, "needle", false, &generation, 1).unwrap().unwrap().entries.len(), 3);
         assert_eq!(search_recursive(&t.0, true, "needle", true, &generation, 1).unwrap().unwrap().entries.len(), 2);
         assert!(search_recursive(&t.0, true, "", false, &generation, 1).is_err());
