@@ -42,7 +42,9 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 if [ -z "$dialog" ]; then echo 'New file dialog did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
+# The X window can become visible before GTK has focused the entry widget.
 xdotool windowfocus --sync "$dialog"
+sleep 0.5
 xdotool type --clearmodifiers 'created.txt'
 xdotool key Return
 for _ in $(seq 1 100); do
