@@ -2204,14 +2204,17 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
                 app.sort_column = col;
                 app.sort_ascending = matches!(col, SortColumn::Name | SortColumn::Kind);
             }
-            let selected_path = {
-                selected_indices(app)
-                    .first()
-                    .and_then(|i| app.entries.get(*i))
-                    .map(|e| e.path.clone())
-            };
+            let selected: std::collections::HashSet<PathBuf> = selected_indices(app)
+                .into_iter()
+                .map(|i| app.entries[i].path.clone())
+                .collect();
             ui_theme::sort_entries(&mut app.entries, app.sort_column, app.sort_ascending);
-            populate_listbox(app, selected_path.as_deref());
+            populate_listbox(app, None);
+            for (i, entry) in app.entries.iter().enumerate() {
+                if selected.contains(&entry.path) {
+                    SendMessageW(app.list, LB_SETSEL, 1, i as isize);
+                }
+            }
             InvalidateRect(hwnd, ptr::null(), 0);
             InvalidateRect(app.list, ptr::null(), 0);
         }

@@ -136,6 +136,11 @@ mod windows {
     extern "system" {
         fn GetDriveTypeW(root: *const u16) -> u32;
     }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32;
+        fn CoUninitialize();
+    }
 
     /// Move to the Recycle Bin. Requires an owner because the shell must be able
     /// to warn the user if the item cannot be recycled; never suppress warnings.
@@ -212,7 +217,18 @@ mod windows {
             mappings: ptr::null_mut(),
             title: ptr::null(),
         };
+        // Shell file operations should run in a COM single-threaded apartment.
+        let hr = unsafe { CoInitializeEx(ptr::null_mut(), 0x2 | 0x4) };
+        if hr < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Could not initialize the Windows shell ({hr:#x})"),
+            ));
+        }
         let result = unsafe { SHFileOperationW(&mut op) };
+        unsafe {
+            CoUninitialize();
+        }
         if op.aborted != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -229,6 +245,21 @@ mod windows {
     }
     pub fn trash(path: &Path) -> io::Result<()> {
         trash_with_owner(path, 0)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn shell_structure_abi_and_owner_requirement() {
+            #[cfg(target_pointer_width = "32")]
+            assert_eq!(std::mem::size_of::<FileOperation>(), 30);
+            #[cfg(target_pointer_width = "64")]
+            assert_eq!(std::mem::size_of::<FileOperation>(), 56);
+            assert_eq!(
+                trash(Path::new("missing")).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
     }
 }
 #[cfg(target_os = "windows")]
