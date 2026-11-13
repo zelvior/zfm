@@ -1,0 +1,3 @@
+# Incident response
+
+**ACTION REQUIRED.** Establish named responders and a verified confidential reporting channel before accepting private vulnerability details. Triage exposure, preserve evidence securely, assess affected versions and users, limit access to sensitive reports, reproduce safely, prepare/test a fix and coordinate disclosure and advisory publication. Set response and retention expectations only after staffing them. If active exploitation is suspected, decide containment and user notification with counsel and the actual operator. No response SLA, encryption key or contact is currently verified.

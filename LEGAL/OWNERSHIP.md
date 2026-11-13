@@ -1,0 +1,7 @@
+# Ownership and contribution evidence
+
+**UNVERIFIED.** Manifests list `Zelvior Labs` as author; Debian control and Windows metadata use the same brand. None establishes a legal person, incorporation, ownership, authority or assignment. LICENSE's appendix uses the standard illustrative placeholders, not an actual copyright declaration. No individual owner, copyright year or contact is asserted here.
+
+The unshallowed local Git log records `zelvior`, `Zelvior`, `Arena` and `Arena Agent` identities. They can be aliases, accounts or automated authors, not proof of human authorship, origin or rights. The GitHub contributor endpoint is not a complete provenance record. In particular Git commit `4dda824` adds logo/installer work with an Arena Agent author field. Examine all source `src/**`, installer, tests, scripts, documentation and assets for externally supplied material and AI input.
+
+**ACTION REQUIRED:** maintain a private contribution ledger mapping each substantive change and asset to the real creator(s), capacity, creation date, source and applicable permission. Obtain necessary assignments/licences and employer or contractor consents, verify AI service/output terms and human contribution, and retain reliable records. Review Apache section 5 and any separate agreements; no CLA or assignment is invented. If the owner or contributor is a minor or lacks capacity, obtain appropriate advice and involvement of an authorized adult; do not assume a signature is valid. Counsel should resolve any disputed provenance before distribution or registration.

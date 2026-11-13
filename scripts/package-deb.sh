@@ -26,7 +26,16 @@ mkdir -p "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/share/applications" \
 install -m 755 "$binary" "$stage/usr/bin/zfm"
 install -m 644 "$root/packaging/zfm.desktop" "$stage/usr/share/applications/zfm.desktop"
 install -m 644 "$root/packaging/zfm.svg" "$stage/usr/share/icons/hicolor/scalable/apps/zfm.svg"
-install -m 644 "$root/README.md" "$stage/usr/share/doc/zfm/README"
+{
+    cat "$root/README.md"
+    printf '\n\n--- Upstream Rust 1.77.2 COPYRIGHT (reference for pinned release builds) ---\n'
+    cat "$root/LICENSES/rust-1.77.2/COPYRIGHT"
+    printf '\n\n--- Upstream Rust 1.77.2 LICENSE-MIT ---\n'
+    cat "$root/LICENSES/rust-1.77.2/LICENSE-MIT"
+    printf '\n\n--- Upstream Rust 1.77.2 LICENSE-APACHE ---\n'
+    cat "$root/LICENSES/rust-1.77.2/LICENSE-APACHE"
+} > "$stage/usr/share/doc/zfm/README"
+chmod 644 "$stage/usr/share/doc/zfm/README"
 install -m 644 "$root/LICENSE" "$stage/usr/share/doc/zfm/copyright"
 cat > "$stage/DEBIAN/control" <<CONTROL
 Package: zfm

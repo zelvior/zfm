@@ -142,6 +142,11 @@ function Assert-Installed {
             throw "Setup did not create $path"
         }
     }
+    $readme = Get-Content -Raw -LiteralPath (Join-Path $Folder 'README.txt')
+    $license = Get-Content -Raw -LiteralPath (Join-Path $Folder 'LICENSE.txt')
+    if ($license -notmatch 'Apache License' -or $readme -notmatch 'Upstream Rust 1.77.2 COPYRIGHT' -or $readme -notmatch 'The Rust Project is dual-licensed') {
+        throw 'Installed license or upstream Rust notice is missing.'
+    }
     foreach ($path in @($appShortcut, $uninstallShortcut, $appKey, $uninstallKey)) {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "Setup did not create $path"

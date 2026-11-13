@@ -1,0 +1,3 @@
+# Dependency and build policy
+
+**NEEDS REVIEW.** Evaluate provenance, version, security advisories, target support and license/notice obligations before adding a dependency. Keep `Cargo.lock` committed and build with `--locked`. Track compiler-supplied and system dependencies separately; a lockfile-only scan is insufficient. Release workflow pins Rust 1.77.2 and action commit SHAs but legacy Linux uses a mutable Ubuntu image/apt sources and downloads rustup over TLS without an independent repository-pinned checksum. Review and strengthen reproducibility and verification before publication; avoid introducing unnecessary services.

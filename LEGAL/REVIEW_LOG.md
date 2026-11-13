@@ -1,0 +1,3 @@
+# Review log
+
+**IMPLEMENTED:** source-level audit documented 2026-11-12 against working tree based on `93cfdc7`; repository contains Apache license and a dependency-free project Cargo.lock. Existing tag `v0.0.8` points to earlier source. GitHub private vulnerability reporting was observed disabled during the audit. These are time-bound observations, not durable approvals. Upstream Rust 1.77.2 references were added to source and installed README; exact target inclusion and CRT requirements remain open. See [RELEASE_READINESS.md](RELEASE_READINESS.md) for priorities and evidence. No owner or counsel approval has been recorded.

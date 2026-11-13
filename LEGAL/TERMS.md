@@ -1,0 +1,5 @@
+# Use and distribution terms
+
+**NEEDS REVIEW.** ZFM source is offered under the actual [Apache License 2.0](../LICENSE); these operational notes do not replace or restrict that license or grant trademark rights. Apache's warranty disclaimer and limitation of liability apply as written, subject to applicable law. Statutory consumer protections may not be excluded. No registration, payment, support commitment, service level or account is promised by this document.
+
+Use only files and systems you are authorized to access. Back up important data and check results: file operations, conversions and archive extraction can fail, leave partial output or interact with external software. Do not treat the program as a security boundary against a malicious local user or unsafe archive. No compatibility, availability or fitness certification is made. The actual distributor/operator and applicable consumer-facing terms must be reviewed by counsel before commercial or jurisdiction-specific distribution; this is not an EULA.

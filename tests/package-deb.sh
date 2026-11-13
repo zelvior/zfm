@@ -21,6 +21,16 @@ for spec in '32 i686-unknown-linux-gnu i386' '64 x86_64-unknown-linux-gnu amd64'
     test -x "$tmp/unpacked-$arch/usr/bin/zfm"
     grep -q '^Exec=zfm %f$' "$tmp/unpacked-$arch/usr/share/applications/zfm.desktop"
     test -s "$tmp/unpacked-$arch/usr/share/icons/hicolor/scalable/apps/zfm.svg"
+    cmp "$root/LICENSE" "$tmp/unpacked-$arch/usr/share/doc/zfm/copyright"
+    grep -q 'Upstream Rust 1.77.2 COPYRIGHT' "$tmp/unpacked-$arch/usr/share/doc/zfm/README"
+    grep -q 'The Rust Project is dual-licensed' "$tmp/unpacked-$arch/usr/share/doc/zfm/README"
+    python3 - "$root" "$tmp/unpacked-$arch/usr/share/doc/zfm/README" <<'PYTEST'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+readme = pathlib.Path(sys.argv[2]).read_bytes()
+for name in ('COPYRIGHT', 'LICENSE-MIT', 'LICENSE-APACHE'):
+    assert (root / 'LICENSES' / 'rust-1.77.2' / name).read_bytes() in readme, name
+PYTEST
 done
 if "$root/scripts/package-deb.sh" "$tmp/64" i686-unknown-linux-gnu v1.0 "$tmp/wrong.deb"; then
     echo 'Architecture mismatch was not rejected' >&2; exit 1

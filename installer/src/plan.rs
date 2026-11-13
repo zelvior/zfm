@@ -242,9 +242,14 @@ mod tests {
         let dir = scratch("incomplete");
         payload::install_files(&dir).unwrap();
         fs::write(dir.join("Uninstall.exe"), b"previous uninstaller").unwrap();
+        // Old releases installed a README without the Rust notice appendix.
+        // Changing that existing managed file must not block recovery.
+        fs::write(dir.join("README.txt"), b"old README").unwrap();
         // A prior ZFM install that failed before writing its registry key may
         // be completed in place.
         assert!(may_install(&dir, None).is_ok());
+        payload::install_files(&dir).unwrap();
+        assert_eq!(fs::read(dir.join("README.txt")).unwrap(), payload::README.as_bytes());
 
         // Tampering with the ZFM assets disqualifies the folder so unrelated
         // files are still protected.

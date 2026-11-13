@@ -75,6 +75,21 @@ fn main() {
         root.join("README.md").display()
     );
 
+    // Preserve the pinned Rust distribution's upstream notices in the
+    // installed README without adding new managed paths to existing installs.
+    for (name, env_key) in [
+        ("COPYRIGHT", "ZFM_RUST_COPYRIGHT_PATH"),
+        ("LICENSE-MIT", "ZFM_RUST_MIT_PATH"),
+        ("LICENSE-APACHE", "ZFM_RUST_APACHE_PATH"),
+    ] {
+        let path = root.join("LICENSES/rust-1.77.2").join(name);
+        if !path.is_file() {
+            panic!("missing upstream Rust notice: {}", path.display());
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rustc-env={}={}", env_key, path.display());
+    }
+
     let version = env::var("ZFM_VERSION").unwrap_or_else(|_| "dev".to_string());
     println!("cargo:rustc-env=ZFM_VERSION={}", version);
 

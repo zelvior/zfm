@@ -1,0 +1,3 @@
+# Per-release evidence
+
+**ACTION REQUIRED.** Record source commit/tag and branch, build workflow and inputs, build date, Rust/SDK versions, exact target triples, lockfile, source and binary SBOMs, artifact hashes, test results, required third-party notices and review, code-signature verification and publication authority. Confirm published assets correspond to the tag and contain the reviewed materials. Recheck GitHub private reporting, advisories, provenance, branding and law as scope changes. Archive evidence securely without exposing private data. None of these items is asserted complete by a GitHub release or a checksum file alone.
