@@ -56,8 +56,15 @@ try {
     # accidentally searched for an unlabelled button instead of any button.
     $controls = @(
         @{ Id = 101; Class = 'Button'; Label = 'Back' },
+        @{ Id = 105; Class = 'Button'; Label = 'Go' },
         @{ Id = 106; Class = 'Edit'; Label = $null },
-        @{ Id = 107; Class = 'ListBox'; Label = $null }
+        @{ Id = 107; Class = 'ListBox'; Label = $null },
+        @{ Id = 110; Class = 'Button'; Label = 'New tab' },
+        @{ Id = 111; Class = 'Button'; Label = 'Close tab' },
+        @{ Id = 112; Class = 'Edit'; Label = $null },
+        @{ Id = 115; Class = 'Button'; Label = 'Show hidden' },
+        @{ Id = 116; Class = 'Edit'; Label = $null },
+        @{ Id = 121; Class = 'Button'; Label = 'Root' }
     )
     foreach ($control in $controls) {
         $handle = [ZfmSmoke]::GetDlgItem($window, $control.Id)

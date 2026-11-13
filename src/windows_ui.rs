@@ -1,53 +1,87 @@
-//! Small Win32 browsing adapter. Directory reads run on workers; there are no
-//! browser components or runtime GUI dependencies beyond the OS.
-use std::ffi::{c_void, OsStr};
+//! Native Win32 dark-slate file manager interface.
+//!
+//! Directory enumeration and file mutations run on background workers; surfaces,
+//! vector icons, tabs, sidebar and 4-column rows are rendered offscreen into
+//! 32-bit DIB sections with ClearType typography and no external dependencies.
+
+use std::ffi::{c_void, OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use zfm::directory::{self, Entry, Listing};
 use zfm::navigation::{Destination, Tabs};
+use zfm::ui_theme::{
+    self, ActionIcon, BoxRect, ItemIcon, Rgb, SortColumn, ViewMode, WindowMetrics,
+};
 
 type H = *mut c_void;
+type P = *mut c_void;
 type WParam = usize;
 type LParam = isize;
 type LResult = isize;
-const WM_CREATE: u32 = 1;
-const WM_DESTROY: u32 = 2;
-const WM_SIZE: u32 = 5;
-const WM_COMMAND: u32 = 0x111;
-const WM_DRAWITEM: u32 = 0x2b;
-const WM_GETMINMAXINFO: u32 = 0x24;
-const WM_KEYDOWN: u32 = 0x100;
-const WM_SYSKEYDOWN: u32 = 0x104;
-const WM_SETFONT: u32 = 0x30;
-const WM_CTLCOLORSTATIC: u32 = 0x138;
-const WM_CTLCOLOREDIT: u32 = 0x133;
-const WM_CTLCOLORLISTBOX: u32 = 0x134;
+
+const WM_CREATE: u32 = 0x0001;
+const WM_DESTROY: u32 = 0x0002;
+const WM_SIZE: u32 = 0x0005;
+const WM_PAINT: u32 = 0x000f;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SETCURSOR: u32 = 0x0020;
+const WM_GETMINMAXINFO: u32 = 0x0024;
+const WM_DRAWITEM: u32 = 0x002b;
+const WM_SETFONT: u32 = 0x0030;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_COMMAND: u32 = 0x0111;
+const WM_CTLCOLOREDIT: u32 = 0x0133;
+const WM_CTLCOLORLISTBOX: u32 = 0x0134;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_MOUSELEAVE: u32 = 0x02a3;
 const WM_RESULT: u32 = 0x8001;
 const WM_OPERATION_RESULT: u32 = 0x8002;
+
 const GWLP_USERDATA: i32 = -21;
-const WS_OVERLAPPEDWINDOW: u32 = 0x00cf0000;
-const WS_CHILD: u32 = 0x40000000;
-const WS_VISIBLE: u32 = 0x10000000;
-const WS_BORDER: u32 = 0x00800000;
-const WS_VSCROLL: u32 = 0x00200000;
-const WS_TABSTOP: u32 = 0x00010000;
-const LB_ADDSTRING: u32 = 0x180;
-const LB_SETITEMHEIGHT: u32 = 0x1a0;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_VSCROLL: u32 = 0x0020_0000;
+const WS_TABSTOP: u32 = 0x0001_0000;
+const ES_AUTOHSCROLL: u32 = 0x0080;
+const EM_SETSEL: u32 = 0x00b1;
+const EM_SETCUEBANNER: u32 = 0x1501;
+
+const LBS_NOTIFY: u32 = 0x0001;
 const LBS_OWNERDRAWFIXED: u32 = 0x0010;
-const BS_OWNERDRAW: u32 = 0x0b;
-const LB_RESETCONTENT: u32 = 0x184;
-const LB_GETCURSEL: u32 = 0x188;
-const CB_ADDSTRING: u32 = 0x143;
-const CB_RESETCONTENT: u32 = 0x14b;
-const CB_SETCURSEL: u32 = 0x14e;
-const CB_GETCURSEL: u32 = 0x147;
-const BM_GETCHECK: u32 = 0xf0;
+const LBS_HASSTRINGS: u32 = 0x0040;
+const LB_ADDSTRING: u32 = 0x0180;
+const LB_RESETCONTENT: u32 = 0x0184;
+const LB_SETCURSEL: u32 = 0x0186;
+const LB_GETCURSEL: u32 = 0x0188;
+const LB_SETITEMHEIGHT: u32 = 0x01a0;
+
+const BS_OWNERDRAW: u32 = 0x000b;
+const ODT_LISTBOX: u32 = 2;
+const ODT_BUTTON: u32 = 4;
+const EN_SETFOCUS: usize = 0x0100;
+const EN_KILLFOCUS: usize = 0x0200;
+
+const DT_CENTER: u32 = 0x0001;
+const DT_RIGHT: u32 = 0x0002;
+const DT_VCENTER: u32 = 0x0004;
+const DT_SINGLELINE: u32 = 0x0020;
+const DT_NOPREFIX: u32 = 0x0800;
+const DT_END_ELLIPSIS: u32 = 0x8000;
+const SRCCOPY: u32 = 0x00cc_0020;
+
 const BACK: usize = 101;
 const FORWARD: usize = 102;
 const UP: usize = 103;
@@ -56,7 +90,6 @@ const GO: usize = 105;
 const ADDRESS: usize = 106;
 const LIST: usize = 107;
 const STATUS: usize = 108;
-const TABS: usize = 109;
 const NEW_TAB: usize = 110;
 const CLOSE_TAB: usize = 111;
 const FILTER: usize = 112;
@@ -68,6 +101,8 @@ const NEW_FILE: usize = 117;
 const NEW_FOLDER: usize = 118;
 const DELETE: usize = 119;
 const RENAME: usize = 120;
+const ROOT: usize = 121;
+
 #[repr(C)]
 struct WndClass {
     style: u32,
@@ -81,11 +116,13 @@ struct WndClass {
     menu: *const u16,
     class: *const u16,
 }
+
 #[repr(C)]
 struct Point {
     x: i32,
     y: i32,
 }
+
 #[repr(C)]
 struct Msg {
     hwnd: H,
@@ -96,6 +133,7 @@ struct Msg {
     point: Point,
     private: u32,
 }
+
 #[repr(C)]
 struct Rect {
     left: i32,
@@ -103,6 +141,17 @@ struct Rect {
     right: i32,
     bottom: i32,
 }
+
+#[repr(C)]
+struct PaintStruct {
+    hdc: H,
+    erase: i32,
+    paint: Rect,
+    restore: i32,
+    inc_update: i32,
+    reserved: [u8; 32],
+}
+
 #[repr(C)]
 struct DrawItem {
     control_type: u32,
@@ -115,6 +164,7 @@ struct DrawItem {
     rect: Rect,
     item_data: usize,
 }
+
 #[repr(C)]
 struct MinMaxInfo {
     reserved: Point,
@@ -123,6 +173,7 @@ struct MinMaxInfo {
     min_track_size: Point,
     max_track_size: Point,
 }
+
 #[repr(C)]
 struct CreateStruct {
     param: *mut c_void,
@@ -138,6 +189,36 @@ struct CreateStruct {
     class: *const u16,
     ex_style: u32,
 }
+
+#[repr(C)]
+struct BitmapInfoHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    size_image: u32,
+    x_pels_per_meter: i32,
+    y_pels_per_meter: i32,
+    clr_used: u32,
+    clr_important: u32,
+}
+
+#[repr(C)]
+struct BitmapInfo {
+    header: BitmapInfoHeader,
+    colors: [u32; 1],
+}
+
+#[repr(C)]
+struct TrackMouseEvent {
+    size: u32,
+    flags: u32,
+    hwnd_track: H,
+    hover_time: u32,
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClassW(c: *const WndClass) -> u16;
@@ -163,8 +244,14 @@ extern "system" {
     fn PostQuitMessage(code: i32);
     fn PostMessageW(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> i32;
     fn LoadCursorW(instance: H, name: *const u16) -> H;
+    fn SetCursor(cursor: H) -> H;
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
+    fn GetWindowRect(hwnd: H, rect: *mut Rect) -> i32;
+    fn ScreenToClient(hwnd: H, point: *mut Point) -> i32;
     fn MoveWindow(hwnd: H, x: i32, y: i32, w: i32, h: i32, repaint: i32) -> i32;
+    fn InvalidateRect(hwnd: H, rect: *const Rect, erase: i32) -> i32;
+    fn BeginPaint(hwnd: H, paint: *mut PaintStruct) -> H;
+    fn EndPaint(hwnd: H, paint: *const PaintStruct) -> i32;
     fn SendMessageW(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> LResult;
     fn SetWindowTextW(hwnd: H, text: *const u16) -> i32;
     fn GetWindowTextLengthW(hwnd: H) -> i32;
@@ -174,35 +261,61 @@ extern "system" {
     fn SetFocus(hwnd: H) -> H;
     fn GetKeyState(key: i32) -> i16;
     fn IsDialogMessageW(hwnd: H, msg: *mut Msg) -> i32;
-    fn FillRect(dc: H, rect: *const Rect, brush: H) -> i32;
-    fn FrameRect(dc: H, rect: *const Rect, brush: H) -> i32;
-    fn DrawFocusRect(dc: H, rect: *const Rect) -> i32;
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
     fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
+    fn TrackMouseEvent(event: *mut TrackMouseEvent) -> i32;
 }
-type P = *mut c_void;
+
 #[cfg(target_pointer_width = "64")]
 #[link(name = "user32")]
 extern "system" {
     fn SetWindowLongPtrW(hwnd: H, index: i32, value: isize) -> isize;
     fn GetWindowLongPtrW(hwnd: H, index: i32) -> isize;
 }
+
 #[cfg(target_pointer_width = "32")]
 #[link(name = "user32")]
 extern "system" {
     fn SetWindowLongW(hwnd: H, index: i32, value: i32) -> i32;
     fn GetWindowLongW(hwnd: H, index: i32) -> i32;
 }
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> H;
+    fn LoadLibraryW(name: *const u16) -> H;
+    fn GetProcAddress(module: H, name: *const u8) -> P;
+    fn GetLogicalDrives() -> u32;
+    fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> i32;
 }
+
 #[link(name = "gdi32")]
 extern "system" {
     fn SetTextColor(dc: H, color: u32) -> u32;
     fn SetBkColor(dc: H, color: u32) -> u32;
     fn SetBkMode(dc: H, mode: i32) -> i32;
     fn CreateSolidBrush(color: u32) -> H;
+    fn CreateCompatibleDC(dc: H) -> H;
+    fn DeleteDC(dc: H) -> i32;
+    fn CreateDIBSection(
+        dc: H,
+        info: *const BitmapInfo,
+        usage: u32,
+        bits: *mut P,
+        section: H,
+        offset: u32,
+    ) -> H;
+    fn BitBlt(
+        dest: H,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        src: H,
+        sx: i32,
+        sy: i32,
+        rop: u32,
+    ) -> i32;
     fn DeleteObject(object: H) -> i32;
     fn SelectObject(dc: H, object: H) -> H;
     fn CreateFontW(
@@ -222,6 +335,7 @@ extern "system" {
         face: *const u16,
     ) -> H;
 }
+
 #[link(name = "shell32")]
 extern "system" {
     fn ShellExecuteW(
@@ -233,16 +347,18 @@ extern "system" {
         show: i32,
     ) -> H;
 }
+
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
 }
+
 fn text(s: &str) -> Vec<u16> {
     wide(OsStr::new(s))
 }
+
 const IMAGE_ICON: u32 = 1;
 const LR_LOADFROMFILE: u32 = 0x0010;
-/// The installer places zfm.ico next to the executable; use it for the window
-/// and taskbar icon when it is present.
+
 fn companion_icon() -> H {
     let path = match std::env::current_exe() {
         Ok(exe) => match exe.parent() {
@@ -263,6 +379,7 @@ fn companion_icon() -> H {
         )
     }
 }
+
 unsafe fn set_data(hwnd: H, data: isize) {
     #[cfg(target_pointer_width = "64")]
     {
@@ -273,6 +390,7 @@ unsafe fn set_data(hwnd: H, data: isize) {
         SetWindowLongW(hwnd, GWLP_USERDATA, data as i32);
     }
 }
+
 unsafe fn get_data(hwnd: H) -> isize {
     #[cfg(target_pointer_width = "64")]
     {
@@ -283,28 +401,150 @@ unsafe fn get_data(hwnd: H) -> isize {
         GetWindowLongW(hwnd, GWLP_USERDATA) as isize
     }
 }
-// COLORREF uses 0x00BBGGRR. The interface is strictly black and white:
-// paper-white surfaces, near-black ink, and solid black primary actions.
-const BACKGROUND: u32 = 0xffffff;
-const INK: u32 = 0x0a0a0a;
-const MUTED: u32 = 0x5a5a5a;
-const BUTTON_BG: u32 = 0xf5f5f5;
-const BUTTON_DOWN: u32 = 0xdedede;
-const ACCENT: u32 = 0x0a0a0a;
-const ACCENT_DOWN: u32 = 0x2e2e2e;
-const BORDER: u32 = 0x0a0a0a;
+
+unsafe fn child_origin(parent: H, child_hwnd: H) -> (i32, i32) {
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if GetWindowRect(child_hwnd, &mut r) == 0 {
+        return (0, 0);
+    }
+    let mut pt = Point {
+        x: r.left,
+        y: r.top,
+    };
+    if ScreenToClient(parent, &mut pt) == 0 {
+        return (0, 0);
+    }
+    (pt.x, pt.y)
+}
+
+unsafe fn blit_pixels<F>(
+    dest_dc: H,
+    dst_x: i32,
+    dst_y: i32,
+    width: i32,
+    height: i32,
+    pixels: &[u32],
+    overlay: F,
+) where
+    F: FnOnce(H),
+{
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let count = (width * height) as usize;
+    if pixels.len() < count {
+        return;
+    }
+    let mem_dc = CreateCompatibleDC(dest_dc);
+    if mem_dc.is_null() {
+        return;
+    }
+    let info = BitmapInfo {
+        header: BitmapInfoHeader {
+            size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+            width,
+            height: -height,
+            planes: 1,
+            bit_count: 32,
+            compression: 0,
+            size_image: 0,
+            x_pels_per_meter: 0,
+            y_pels_per_meter: 0,
+            clr_used: 0,
+            clr_important: 0,
+        },
+        colors: [0],
+    };
+    let mut bits: P = ptr::null_mut();
+    let dib = CreateDIBSection(mem_dc, &info, 0, &mut bits, ptr::null_mut(), 0);
+    if !dib.is_null() && !bits.is_null() {
+        ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, count);
+        let old = SelectObject(mem_dc, dib);
+        overlay(mem_dc);
+        BitBlt(dest_dc, dst_x, dst_y, width, height, mem_dc, 0, 0, SRCCOPY);
+        SelectObject(mem_dc, old);
+        DeleteObject(dib);
+    }
+    DeleteDC(mem_dc);
+}
+
+unsafe fn apply_dark_window_chrome(hwnd: H) {
+    let module = LoadLibraryW(text("dwmapi.dll").as_ptr());
+    if module.is_null() {
+        return;
+    }
+    let proc = GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr());
+    if proc.is_null() {
+        return;
+    }
+    let set_attr: unsafe extern "system" fn(H, u32, *const c_void, u32) -> i32 =
+        std::mem::transmute(proc);
+    let size = std::mem::size_of::<u32>() as u32;
+    let dark: u32 = 1;
+    let round: u32 = 2;
+    let border = ui_theme::BORDER_SUBTLE.colorref();
+    let caption = ui_theme::CAPTION_BG.colorref();
+    let title_text = ui_theme::TEXT_BRIGHT.colorref();
+    let _ = set_attr(hwnd, 20, &dark as *const u32 as *const c_void, size);
+    let _ = set_attr(hwnd, 33, &round as *const u32 as *const c_void, size);
+    let _ = set_attr(hwnd, 34, &border as *const u32 as *const c_void, size);
+    let _ = set_attr(hwnd, 35, &caption as *const u32 as *const c_void, size);
+    let _ = set_attr(hwnd, 36, &title_text as *const u32 as *const c_void, size);
+}
+
+unsafe fn apply_dark_scrollbar(hwnd: H) {
+    let module = LoadLibraryW(text("uxtheme.dll").as_ptr());
+    if module.is_null() {
+        return;
+    }
+    let proc = GetProcAddress(module, b"SetWindowTheme\0".as_ptr());
+    if proc.is_null() {
+        return;
+    }
+    let set_theme: unsafe extern "system" fn(H, *const u16, *const u16) -> i32 =
+        std::mem::transmute(proc);
+    if set_theme(hwnd, text("DarkMode_Explorer").as_ptr(), ptr::null()) != 0 {
+        let _ = set_theme(hwnd, text("Explorer").as_ptr(), ptr::null());
+    }
+}
+
+fn format_local_modified(modified: Option<SystemTime>) -> String {
+    const WIN_EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+    let Some(ts) = modified else {
+        return String::new();
+    };
+    let unix_secs = match ts.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    };
+    let utc_ticks = ((unix_secs + WIN_EPOCH_DIFF_SECS).max(0) as u64) * 10_000_000;
+    let mut local_ticks: u64 = utc_ticks;
+    unsafe {
+        let _ = FileTimeToLocalFileTime(&utc_ticks, &mut local_ticks);
+    }
+    let local_secs = (local_ticks / 10_000_000) as i64 - WIN_EPOCH_DIFF_SECS;
+    ui_theme::format_timestamp_us(local_secs)
+}
 
 struct Theme {
-    background: H,
-    surface: H,
-    button: H,
-    pressed: H,
-    accent: H,
-    accent_pressed: H,
-    border: H,
+    window_brush: H,
+    address_brush: H,
+    filter_brush: H,
+    name_brush: H,
+    list_brush: H,
     font: H,
-    title_font: H,
+    semibold_font: H,
+    small_font: H,
+    brand_font: H,
+    subtitle_font: H,
+    hand_cursor: H,
 }
+
 impl Theme {
     unsafe fn new() -> Result<Self, String> {
         let font = |height, weight| {
@@ -326,26 +566,29 @@ impl Theme {
             )
         };
         let theme = Self {
-            background: CreateSolidBrush(BACKGROUND),
-            surface: CreateSolidBrush(BACKGROUND),
-            button: CreateSolidBrush(BUTTON_BG),
-            pressed: CreateSolidBrush(BUTTON_DOWN),
-            accent: CreateSolidBrush(ACCENT),
-            accent_pressed: CreateSolidBrush(ACCENT_DOWN),
-            border: CreateSolidBrush(BORDER),
-            font: font(-16, 400),
-            title_font: font(-24, 700),
+            window_brush: CreateSolidBrush(ui_theme::HEADER_TOP.colorref()),
+            address_brush: CreateSolidBrush(ui_theme::ADDRESS_EDIT_BG.colorref()),
+            filter_brush: CreateSolidBrush(ui_theme::FILTER_EDIT_BG.colorref()),
+            name_brush: CreateSolidBrush(ui_theme::NAME_EDIT_BG.colorref()),
+            list_brush: CreateSolidBrush(ui_theme::ROW_EVEN.colorref()),
+            font: font(-15, 400),
+            semibold_font: font(-15, 600),
+            small_font: font(-13, 400),
+            brand_font: font(-25, 700),
+            subtitle_font: font(-13, 600),
+            hand_cursor: LoadCursorW(ptr::null_mut(), 32649usize as *const u16),
         };
         if [
-            theme.background,
-            theme.surface,
-            theme.button,
-            theme.pressed,
-            theme.accent,
-            theme.accent_pressed,
-            theme.border,
+            theme.window_brush,
+            theme.address_brush,
+            theme.filter_brush,
+            theme.name_brush,
+            theme.list_brush,
             theme.font,
-            theme.title_font,
+            theme.semibold_font,
+            theme.small_font,
+            theme.brand_font,
+            theme.subtitle_font,
         ]
         .iter()
         .any(|h| h.is_null())
@@ -355,58 +598,1204 @@ impl Theme {
         Ok(theme)
     }
 }
+
 impl Drop for Theme {
     fn drop(&mut self) {
         unsafe {
-            for object in [
-                self.background,
-                self.surface,
-                self.button,
-                self.pressed,
-                self.accent,
-                self.accent_pressed,
-                self.border,
+            for obj in [
+                self.window_brush,
+                self.address_brush,
+                self.filter_brush,
+                self.name_brush,
+                self.list_brush,
                 self.font,
-                self.title_font,
+                self.semibold_font,
+                self.small_font,
+                self.brand_font,
+                self.subtitle_font,
             ] {
-                if !object.is_null() {
-                    DeleteObject(object);
+                if !obj.is_null() {
+                    DeleteObject(obj);
                 }
             }
         }
     }
 }
+
+#[derive(Clone)]
+struct SidebarEntry {
+    label: String,
+    icon: ItemIcon,
+    indent: i32,
+    target: Option<PathBuf>,
+    is_drives_header: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HotZone {
+    None,
+    AddressChip,
+    Tab(usize),
+    Sidebar(usize),
+    Column(SortColumn),
+    View(ViewMode),
+}
+
 struct App {
-    // Theme outlives the window and its controls.
     theme: *const Theme,
-    heading: H,
-    subtitle: H,
-    list_heading: H,
     tabs: Tabs,
-    tabs_control: H,
-    filter_control: H,
     filter: String,
     show_hidden: bool,
-    extra_buttons: [H; 9],
-    name_control: H,
-    filter_label: H,
-    name_label: H,
+    drives_expanded: bool,
+    sort_column: SortColumn,
+    sort_ascending: bool,
+    view_mode: ViewMode,
+    focused_edit: usize,
+    hovered_child: H,
+    hot_zone: HotZone,
+    tracking_mouse: bool,
     operation_busy: bool,
+    notice: Option<String>,
     token: Arc<AtomicU64>,
     address: H,
+    filter_control: H,
+    name_control: H,
     list: H,
     status: H,
-    buttons: [H; 5],
+    nav_buttons: [H; 6],
+    extra_buttons: [H; 9],
+    sidebar_items: Vec<SidebarEntry>,
     entries: Vec<Entry>,
+    backdrop_w: i32,
+    backdrop_h: i32,
+    backdrop: Vec<u32>,
 }
+
 struct OperationMessage {
     result: Result<String, String>,
 }
+
 struct ResultMessage {
     generation: u64,
     destination: Destination,
     result: std::io::Result<Option<Listing>>,
 }
+
+fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
+    let mut items = Vec::new();
+    let profile = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(base) = profile {
+        for (label, folder, icon) in [
+            ("Desktop", "Desktop", ItemIcon::Desktop),
+            ("Documents", "Documents", ItemIcon::Documents),
+            ("Downloads", "Downloads", ItemIcon::Downloads),
+            ("Music", "Music", ItemIcon::Music),
+            ("Videos", "Videos", ItemIcon::Videos),
+        ] {
+            items.push(SidebarEntry {
+                label: label.to_string(),
+                icon,
+                indent: 0,
+                target: Some(base.join(folder)),
+                is_drives_header: false,
+            });
+        }
+    }
+    items.push(SidebarEntry {
+        label: "Drives".to_string(),
+        icon: ItemIcon::Drives,
+        indent: 0,
+        target: None,
+        is_drives_header: true,
+    });
+    if drives_expanded {
+        let mask = unsafe { GetLogicalDrives() };
+        for bit in 0..26u32 {
+            if (mask & (1 << bit)) != 0 {
+                let letter = (b'A' + bit as u8) as char;
+                let root = format!("{letter}:\\");
+                items.push(SidebarEntry {
+                    label: root.clone(),
+                    icon: ItemIcon::DriveDisk,
+                    indent: 1,
+                    target: Some(PathBuf::from(root)),
+                    is_drives_header: false,
+                });
+            }
+        }
+    }
+    items
+}
+
+fn root_of(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let mut root = PathBuf::new();
+    if let Some(first) = components.next() {
+        root.push(first.as_os_str());
+        if let Some(second) = components.next() {
+            if matches!(second, std::path::Component::RootDir) {
+                root.push(second.as_os_str());
+            }
+        }
+    }
+    if root.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        root
+    }
+}
+
+fn tab_title(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn dynamic_tab_rects(metrics: &WindowMetrics, tab_count: usize) -> Vec<BoxRect> {
+    if tab_count == 0 {
+        return Vec::new();
+    }
+    let avail = (metrics.dynamic_tabs_right - metrics.dynamic_tabs_left).max(0);
+    if avail < 64 {
+        return Vec::new();
+    }
+    let gap = 4;
+    let per = ((avail - gap * (tab_count as i32 - 1).max(0)) / tab_count as i32).clamp(64, 136);
+    let mut rects = Vec::new();
+    let mut x = metrics.dynamic_tabs_left;
+    for _ in 0..tab_count {
+        if x + 56 > metrics.dynamic_tabs_right {
+            break;
+        }
+        let w = per.min(metrics.dynamic_tabs_right - x);
+        rects.push(BoxRect::new(x, metrics.new_tab.y, w, metrics.new_tab.height));
+        x += w + gap;
+    }
+    rects
+}
+
+fn sidebar_row_rect(metrics: &WindowMetrics, index: usize) -> Option<BoxRect> {
+    let row_h = 32;
+    let y = metrics.sidebar.y + 8 + (index as i32) * row_h;
+    if y + row_h > metrics.sidebar.bottom() {
+        return None;
+    }
+    Some(BoxRect::new(
+        metrics.sidebar.x + 6,
+        y,
+        (metrics.sidebar.width - 12).max(20),
+        row_h - 2,
+    ))
+}
+
+fn hit_test_custom(app: &App, metrics: &WindowMetrics, x: i32, y: i32) -> HotZone {
+    if metrics.address_chip.contains(x, y) {
+        return HotZone::AddressChip;
+    }
+    if metrics.view_details_btn.contains(x, y) {
+        return HotZone::View(ViewMode::Details);
+    }
+    if metrics.view_compact_btn.contains(x, y) {
+        return HotZone::View(ViewMode::Compact);
+    }
+    if metrics.col_name.contains(x, y) {
+        return HotZone::Column(SortColumn::Name);
+    }
+    if metrics.col_modified.contains(x, y) {
+        return HotZone::Column(SortColumn::Modified);
+    }
+    if metrics.col_type.contains(x, y) {
+        return HotZone::Column(SortColumn::Kind);
+    }
+    if metrics.col_size.contains(x, y) {
+        return HotZone::Column(SortColumn::Size);
+    }
+    for (idx, rect) in dynamic_tab_rects(metrics, app.tabs.len())
+        .into_iter()
+        .enumerate()
+    {
+        if rect.contains(x, y) {
+            return HotZone::Tab(idx);
+        }
+    }
+    if metrics.sidebar.contains(x, y) {
+        for idx in 0..app.sidebar_items.len() {
+            if let Some(rect) = sidebar_row_rect(metrics, idx) {
+                if rect.contains(x, y) {
+                    return HotZone::Sidebar(idx);
+                }
+            }
+        }
+    }
+    HotZone::None
+}
+
+unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(hwnd, &mut r);
+    let w = r.right.max(1);
+    let h = r.bottom.max(1);
+    let m = WindowMetrics::new(w, h);
+    let mut buf = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
+
+    // 1. Top branding + navigation bar
+    ui_theme::fill_vgrad(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, 0, w, m.tab_strip_top),
+        ui_theme::HEADER_TOP,
+        ui_theme::HEADER_BOTTOM,
+    );
+
+    // Unified address bar with left breadcrumb chip and angled `>` chevron
+    let addr_border = if app.focused_edit == ADDRESS {
+        ui_theme::BORDER_FOCUS
+    } else {
+        ui_theme::BORDER_SUBTLE
+    };
+    ui_theme::paint_rounded_box(
+        &mut buf,
+        w,
+        h,
+        m.address_frame,
+        6.0,
+        ui_theme::ADDRESS_EDIT_BG,
+        ui_theme::ADDRESS_EDIT_BG,
+        Some(addr_border),
+    );
+    let chip_bg = if app.hot_zone == HotZone::AddressChip {
+        Rgb(50, 59, 68)
+    } else {
+        ui_theme::ADDRESS_CHIP_BG
+    };
+    ui_theme::paint_rounded_box(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(
+            m.address_chip.x + 1,
+            m.address_chip.y + 1,
+            m.address_chip.width - 2,
+            m.address_chip.height - 2,
+        ),
+        5.0,
+        chip_bg,
+        chip_bg,
+        None,
+    );
+    ui_theme::paint_item_icon(
+        &mut buf,
+        w,
+        h,
+        m.address_chip.x + 10,
+        m.address_chip.y + 7,
+        ItemIcon::Folder,
+    );
+    let chev_x = (m.address_chip.right() - 6) as f32;
+    let chev_y = (m.address_chip.y + m.address_chip.height / 2) as f32;
+    let half_h = (m.address_chip.height / 2 - 2) as f32;
+    ui_theme::draw_segment_aa(
+        &mut buf,
+        w,
+        h,
+        chev_x - 5.0,
+        chev_y - half_h,
+        chev_x + 2.0,
+        chev_y,
+        1.4,
+        ui_theme::BORDER_STRONG,
+    );
+    ui_theme::draw_segment_aa(
+        &mut buf,
+        w,
+        h,
+        chev_x + 2.0,
+        chev_y,
+        chev_x - 5.0,
+        chev_y + half_h,
+        1.4,
+        ui_theme::BORDER_STRONG,
+    );
+
+    // 2. Browser-style tab strip + toolbar deck
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, m.tab_strip_top, w, m.deck_top - m.tab_strip_top),
+        ui_theme::TAB_STRIP_BG,
+    );
+    ui_theme::fill_vgrad(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, m.deck_top, w, m.split_top - m.deck_top),
+        ui_theme::DECK_TOP,
+        ui_theme::DECK_BOTTOM,
+    );
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, m.deck_top - 1, w, 1),
+        ui_theme::BORDER_STRONG,
+    );
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, m.split_top - 1, w, 1),
+        ui_theme::BORDER_SUBTLE,
+    );
+
+    // Open folder tab chips when multiple tabs exist
+    if app.tabs.len() > 1 {
+        for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len()).into_iter().enumerate() {
+            let active = idx == app.tabs.active();
+            let hovered = app.hot_zone == HotZone::Tab(idx);
+            let fill = if active {
+                ui_theme::DECK_TOP
+            } else if hovered {
+                Rgb(38, 44, 52)
+            } else {
+                ui_theme::TAB_INACTIVE_BG
+            };
+            ui_theme::paint_top_tab(
+                &mut buf,
+                w,
+                h,
+                rect,
+                6.5,
+                fill,
+                fill,
+                if active {
+                    ui_theme::BORDER_STRONG
+                } else {
+                    ui_theme::BORDER_SUBTLE
+                },
+                active,
+            );
+            if active {
+                ui_theme::fill_rect(
+                    &mut buf,
+                    w,
+                    h,
+                    BoxRect::new(rect.x + 1, m.deck_top - 1, rect.width - 2, 2),
+                    ui_theme::DECK_TOP,
+                );
+            }
+            ui_theme::paint_item_icon(&mut buf, w, h, rect.x + 8, rect.y + 8, ItemIcon::Folder);
+        }
+    }
+
+    // 3. Filter & New-name rounded input frames
+    let filter_border = if app.focused_edit == FILTER {
+        ui_theme::BORDER_FOCUS
+    } else {
+        ui_theme::BORDER_STRONG
+    };
+    ui_theme::paint_rounded_box(
+        &mut buf,
+        w,
+        h,
+        m.filter_frame,
+        6.0,
+        ui_theme::FILTER_EDIT_BG,
+        ui_theme::FILTER_EDIT_BG,
+        Some(filter_border),
+    );
+    ui_theme::paint_action_icon(
+        &mut buf,
+        w,
+        h,
+        (m.filter_frame.right() - 15) as f32,
+        (m.filter_frame.y + m.filter_frame.height / 2) as f32,
+        ActionIcon::Search,
+        ui_theme::TEXT_MUTED,
+    );
+
+    let name_border = if app.focused_edit == NAME {
+        ui_theme::BORDER_FOCUS
+    } else {
+        ui_theme::BORDER_SUBTLE
+    };
+    ui_theme::paint_rounded_box(
+        &mut buf,
+        w,
+        h,
+        m.name_frame,
+        6.0,
+        ui_theme::NAME_EDIT_BG,
+        ui_theme::NAME_EDIT_BG,
+        Some(name_border),
+    );
+
+    // 4. Sidebar & metallic splitter
+    ui_theme::fill_rect(&mut buf, w, h, m.sidebar, ui_theme::SIDEBAR_BG);
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(m.splitter_x, m.split_top, 1, m.sidebar.height),
+        ui_theme::SPLITTER_DARK,
+    );
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(m.splitter_x + 1, m.split_top, 2, m.sidebar.height),
+        ui_theme::SPLITTER_LIGHT,
+    );
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(m.splitter_x + 3, m.split_top, 1, m.sidebar.height),
+        ui_theme::SPLITTER_DARK,
+    );
+
+    let current_dir = app.tabs.current().current();
+    for (idx, item) in app.sidebar_items.iter().enumerate() {
+        let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+            break;
+        };
+        let is_current = item
+            .target
+            .as_deref()
+            .map_or(false, |t| t == current_dir);
+        let is_hovered = app.hot_zone == HotZone::Sidebar(idx);
+        if is_current || is_hovered {
+            let fill = if is_current {
+                ui_theme::SIDEBAR_ACTIVE
+            } else {
+                ui_theme::SIDEBAR_HOVER
+            };
+            ui_theme::paint_rounded_box(&mut buf, w, h, row_rect, 5.0, fill, fill, None);
+        }
+        let base_x = row_rect.x + 10 + item.indent * 16;
+        let cy = (row_rect.y + row_rect.height / 2) as f32;
+        ui_theme::paint_chevron(
+            &mut buf,
+            w,
+            h,
+            base_x as f32,
+            cy,
+            item.is_drives_header && app.drives_expanded,
+            ui_theme::TEXT_MUTED,
+        );
+        ui_theme::paint_item_icon(&mut buf, w, h, base_x + 10, row_rect.y + 6, item.icon);
+    }
+
+    // 5. Column Header Bar
+    ui_theme::fill_rect(&mut buf, w, h, m.col_header, ui_theme::COL_HEADER_BG);
+    for (col, rect) in [
+        (SortColumn::Name, m.col_name),
+        (SortColumn::Modified, m.col_modified),
+        (SortColumn::Kind, m.col_type),
+        (SortColumn::Size, m.col_size),
+    ] {
+        if app.hot_zone == HotZone::Column(col) {
+            ui_theme::fill_rect(
+                &mut buf,
+                w,
+                h,
+                BoxRect::new(rect.x, rect.y, rect.width, rect.height - 1),
+                ui_theme::COL_HEADER_HOVER,
+            );
+        }
+        if col != SortColumn::Name {
+            ui_theme::fill_rect(
+                &mut buf,
+                w,
+                h,
+                BoxRect::new(rect.x, rect.y + 7, 1, rect.height - 14),
+                ui_theme::BORDER_SUBTLE,
+            );
+        }
+    }
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(m.col_header.x, m.col_header.bottom() - 1, m.col_header.width, 1),
+        ui_theme::BORDER_SUBTLE,
+    );
+    // Fill list area background behind child listbox
+    ui_theme::fill_rect(&mut buf, w, h, m.list, ui_theme::ROW_EVEN);
+
+    // 6. Segmented Bottom Status Bar
+    ui_theme::fill_rect(&mut buf, w, h, m.status_bar, ui_theme::STATUS_BG);
+    ui_theme::fill_rect(
+        &mut buf,
+        w,
+        h,
+        BoxRect::new(0, m.status_bar.y, w, 1),
+        ui_theme::BORDER_SUBTLE,
+    );
+    ui_theme::paint_view_icon(
+        &mut buf,
+        w,
+        h,
+        m.view_details_btn,
+        ViewMode::Details,
+        app.view_mode == ViewMode::Details,
+        app.hot_zone == HotZone::View(ViewMode::Details),
+    );
+    ui_theme::paint_view_icon(
+        &mut buf,
+        w,
+        h,
+        m.view_compact_btn,
+        ViewMode::Compact,
+        app.view_mode == ViewMode::Compact,
+        app.hot_zone == HotZone::View(ViewMode::Compact),
+    );
+
+    app.backdrop_w = w;
+    app.backdrop_h = h;
+    app.backdrop = buf;
+}
+
+fn slice_backdrop(app: &App, ox: i32, oy: i32, width: i32, height: i32) -> Vec<u32> {
+    let w = width.max(1);
+    let h = height.max(1);
+    let mut out = vec![ui_theme::DECK_TOP.pixel(); (w * h) as usize];
+    if app.backdrop_w <= 0 || app.backdrop_h <= 0 || app.backdrop.is_empty() {
+        return out;
+    }
+    for y in 0..h {
+        let sy = (oy + y).clamp(0, app.backdrop_h - 1);
+        for x in 0..w {
+            let sx = (ox + x).clamp(0, app.backdrop_w - 1);
+            out[(y * w + x) as usize] = app.backdrop[(sy * app.backdrop_w + sx) as usize];
+        }
+    }
+    out
+}
+
+unsafe fn draw_text_in(
+    dc: H,
+    font: H,
+    color: Rgb,
+    rect: BoxRect,
+    value: &str,
+    flags: u32,
+) {
+    if rect.width <= 0 || rect.height <= 0 || value.is_empty() {
+        return;
+    }
+    let wide_str = text(value);
+    let old = SelectObject(dc, font);
+    SetBkMode(dc, 1);
+    SetTextColor(dc, color.colorref());
+    let mut bounds = Rect {
+        left: rect.x,
+        top: rect.y,
+        right: rect.right(),
+        bottom: rect.bottom(),
+    };
+    DrawTextW(dc, wide_str.as_ptr(), -1, &mut bounds, flags);
+    SelectObject(dc, old);
+}
+
+unsafe fn paint_window(hwnd: H, app: &mut App) {
+    let mut ps: PaintStruct = std::mem::zeroed();
+    let dc = BeginPaint(hwnd, &mut ps);
+    if app.backdrop.is_empty() {
+        rebuild_backdrop(hwnd, app);
+    }
+    let w = app.backdrop_w;
+    let h = app.backdrop_h;
+    let m = WindowMetrics::new(w, h);
+    let theme = &*app.theme;
+    let current_path = app.tabs.current().current().display().to_string();
+    let sel_index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
+    let selected_count = if sel_index >= 0 && (sel_index as usize) < app.entries.len() {
+        1
+    } else {
+        0
+    };
+    let active_path = if selected_count == 1 {
+        app.entries[sel_index as usize].path.display().to_string()
+    } else {
+        current_path.clone()
+    };
+
+    // Sort indicator coordinates in the column header
+    let mut pixels = app.backdrop.clone();
+    let arrow_col_rect = match app.sort_column {
+        SortColumn::Name => (m.col_name, 58),
+        SortColumn::Modified => (m.col_modified, 108),
+        SortColumn::Kind => (m.col_type, 46),
+        SortColumn::Size => (m.col_size, 42),
+    };
+    ui_theme::paint_sort_arrow(
+        &mut pixels,
+        w,
+        h,
+        (arrow_col_rect.0.x + arrow_col_rect.1) as f32,
+        (arrow_col_rect.0.y + arrow_col_rect.0.height / 2) as f32,
+        app.sort_ascending,
+        ui_theme::TEXT_MUTED,
+    );
+
+    blit_pixels(dc, 0, 0, w, h, &pixels, |mem_dc| {
+        // Brand lockup
+        draw_text_in(
+            mem_dc,
+            theme.brand_font,
+            ui_theme::TEXT_BRIGHT,
+            m.brand_title,
+            "ZFM",
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        draw_text_in(
+            mem_dc,
+            theme.subtitle_font,
+            ui_theme::TEXT_MUTED,
+            m.brand_subtitle,
+            "FILE MANAGER",
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+
+        // Address breadcrumb chip text
+        draw_text_in(
+            mem_dc,
+            theme.small_font,
+            ui_theme::TEXT_PRIMARY,
+            BoxRect::new(
+                m.address_chip.x + 32,
+                m.address_chip.y,
+                (m.address_chip.width - 46).max(16),
+                m.address_chip.height,
+            ),
+            &current_path,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+
+        // Open tab labels
+        if app.tabs.len() > 1 {
+            for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len()).into_iter().enumerate() {
+                if let Some(hist) = app.tabs.history(idx) {
+                    let title = tab_title(hist.current());
+                    let active = idx == app.tabs.active();
+                    draw_text_in(
+                        mem_dc,
+                        if active { theme.semibold_font } else { theme.small_font },
+                        if active {
+                            ui_theme::TEXT_BRIGHT
+                        } else {
+                            ui_theme::TEXT_MUTED
+                        },
+                        BoxRect::new(rect.x + 30, rect.y + 1, rect.width - 36, rect.height - 2),
+                        &title,
+                        DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                    );
+                }
+            }
+        }
+
+        // Row labels
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_PRIMARY,
+            m.filter_label,
+            "Filter:",
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_PRIMARY,
+            m.name_label,
+            "New name:",
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+
+        // Sidebar labels
+        for (idx, item) in app.sidebar_items.iter().enumerate() {
+            let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+                break;
+            };
+            let base_x = row_rect.x + 10 + item.indent * 16 + 34;
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ui_theme::TEXT_BRIGHT,
+                BoxRect::new(
+                    base_x,
+                    row_rect.y,
+                    (row_rect.right() - base_x - 4).max(10),
+                    row_rect.height,
+                ),
+                &item.label,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+
+        // Column header titles
+        for (rect, pad_left, title, right_align) in [
+            (m.col_name, 16, "Name", false),
+            (m.col_modified, 10, "Date Modified", false),
+            (m.col_type, 10, "Type", false),
+            (m.col_size, 10, "Size", true),
+        ] {
+            let flags = DT_VCENTER
+                | DT_SINGLELINE
+                | DT_NOPREFIX
+                | if right_align { DT_RIGHT } else { 0 };
+            draw_text_in(
+                mem_dc,
+                theme.semibold_font,
+                ui_theme::TEXT_PRIMARY,
+                BoxRect::new(rect.x + pad_left, rect.y, rect.width - pad_left - 8, rect.height),
+                title,
+                flags,
+            );
+        }
+
+        // Bottom Status Bar segments
+        let sy = m.status_bar.y;
+        let sh = m.status_bar.height;
+        let items_str = format!("{} items", app.entries.len());
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_PRIMARY,
+            BoxRect::new(14, sy, 84, sh),
+            &items_str,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let left_detail = app.notice.as_deref().unwrap_or(&current_path);
+        let right_zone_w = (w * 42 / 100).clamp(240, 380);
+        let right_start = (m.view_details_btn.x - 12 - right_zone_w).max(200);
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_MUTED,
+            BoxRect::new(98, sy, 12, sh),
+            "|",
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_PRIMARY,
+            BoxRect::new(112, sy, (right_start - 120).max(40), sh),
+            left_detail,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        let right_summary = format!("Selected: {selected_count}   |   Path: {active_path}");
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ui_theme::TEXT_PRIMARY,
+            BoxRect::new(right_start, sy, m.view_details_btn.x - 10 - right_start, sh),
+            &right_summary,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    });
+    EndPaint(hwnd, &ps);
+}
+
+unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
+    let w = (item.rect.right - item.rect.left).max(1);
+    let h = (item.rect.bottom - item.rect.top).max(1);
+    let (ox, oy) = child_origin(parent, item.hwnd);
+    let mut pixels = slice_backdrop(app, ox, oy, w, h);
+    let id = item.control_id as usize;
+    let pressed = item.item_state & 1 != 0;
+    let disabled = item.item_state & 4 != 0;
+    let focused = item.item_state & 0x10 != 0;
+    let hovered = !disabled && app.hovered_child == item.hwnd;
+    let theme = &*app.theme;
+
+    // 1. Show hidden toggle pill
+    if id == HIDDEN {
+        ui_theme::paint_toggle_switch(
+            &mut pixels,
+            w,
+            h,
+            w - 36,
+            (h - 16) / 2,
+            app.show_hidden,
+            hovered,
+        );
+        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                if hovered {
+                    ui_theme::TEXT_BRIGHT
+                } else {
+                    ui_theme::TEXT_PRIMARY
+                },
+                BoxRect::new(2, 0, (w - 42).max(10), h),
+                "Show hidden",
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        });
+        return 1;
+    }
+
+    // 2. Browser-style New tab / Close tab buttons
+    if id == NEW_TAB || id == CLOSE_TAB {
+        let is_new = id == NEW_TAB;
+        let active_look = is_new && app.tabs.len() == 1;
+        let fill_top = if pressed {
+            ui_theme::BTN_PRESS_TOP
+        } else if hovered {
+            Rgb(56, 63, 72)
+        } else if active_look {
+            ui_theme::TAB_ACTIVE_BG
+        } else {
+            ui_theme::TAB_INACTIVE_BG
+        };
+        let fill_bot = if active_look && !pressed {
+            ui_theme::DECK_TOP
+        } else {
+            fill_top
+        };
+        let border = if focused {
+            ui_theme::BORDER_FOCUS
+        } else if active_look || hovered {
+            ui_theme::BORDER_STRONG
+        } else {
+            ui_theme::BORDER_SUBTLE
+        };
+        ui_theme::paint_top_tab(
+            &mut pixels,
+            w,
+            h,
+            BoxRect::new(0, 0, w, h),
+            6.5,
+            fill_top,
+            fill_bot,
+            border,
+            active_look,
+        );
+        let icon = if is_new {
+            ActionIcon::NewTab
+        } else {
+            ActionIcon::CloseTab
+        };
+        let ink = if active_look || hovered {
+            ui_theme::TEXT_BRIGHT
+        } else {
+            ui_theme::TEXT_MUTED
+        };
+        ui_theme::paint_action_icon(&mut pixels, w, h, 18.0, (h / 2) as f32, icon, ink);
+        let caption = if is_new { "New tab" } else { "Close tab" };
+        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
+            draw_text_in(
+                mem_dc,
+                if active_look {
+                    theme.semibold_font
+                } else {
+                    theme.font
+                },
+                ink,
+                BoxRect::new(30, 0, w - 34, h),
+                caption,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        });
+        return 1;
+    }
+
+    // 3. Standard dark rounded toolbar & navigation buttons
+    let (top_c, bot_c) = if disabled {
+        (Rgb(38, 42, 48), Rgb(34, 38, 44))
+    } else if pressed {
+        (ui_theme::BTN_PRESS_TOP, ui_theme::BTN_PRESS_BOTTOM)
+    } else if hovered {
+        (ui_theme::BTN_HOVER_TOP, ui_theme::BTN_HOVER_BOTTOM)
+    } else {
+        (ui_theme::BTN_TOP, ui_theme::BTN_BOTTOM)
+    };
+    let stroke = if focused {
+        ui_theme::BORDER_FOCUS
+    } else if hovered {
+        Rgb(102, 112, 124)
+    } else {
+        ui_theme::BORDER_STRONG
+    };
+    ui_theme::paint_rounded_box(
+        &mut pixels,
+        w,
+        h,
+        BoxRect::new(0, 0, w, h),
+        6.0,
+        top_c,
+        bot_c,
+        Some(stroke),
+    );
+
+    let shift = if pressed && !disabled { 1 } else { 0 };
+    let ink = if disabled {
+        ui_theme::TEXT_DIM
+    } else if hovered {
+        ui_theme::TEXT_BRIGHT
+    } else {
+        ui_theme::TEXT_PRIMARY
+    };
+
+    let icon_only = match id {
+        BACK => Some(ActionIcon::Back),
+        FORWARD => Some(ActionIcon::Forward),
+        UP => Some(ActionIcon::Up),
+        ROOT => Some(ActionIcon::Root),
+        REFRESH => Some(ActionIcon::Refresh),
+        _ => None,
+    };
+    if let Some(icon) = icon_only {
+        ui_theme::paint_action_icon(
+            &mut pixels,
+            w,
+            h,
+            (w as f32) * 0.5,
+            (h as f32) * 0.5 + shift as f32,
+            icon,
+            ink,
+        );
+        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |_| {});
+        return 1;
+    }
+
+    let leading_icon = match id {
+        GO => Some((ActionIcon::Go, "Go")),
+        APPLY_FILTER => Some((ActionIcon::Search, "Search")),
+        NEW_FILE => Some((ActionIcon::NewFile, "New file")),
+        NEW_FOLDER => Some((ActionIcon::NewFolder, "New folder")),
+        RENAME => Some((ActionIcon::Rename, "Rename")),
+        DELETE => Some((ActionIcon::Delete, "Delete...")),
+        _ => None,
+    };
+    if let Some((icon, caption)) = leading_icon {
+        ui_theme::paint_action_icon(
+            &mut pixels,
+            w,
+            h,
+            16.0,
+            (h as f32) * 0.5 + shift as f32,
+            icon,
+            ink,
+        );
+        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ink,
+                BoxRect::new(26, shift, w - 30, h),
+                caption,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        });
+        return 1;
+    }
+
+    let raw_label = control_value(item.hwnd).to_string_lossy().into_owned();
+    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
+        draw_text_in(
+            mem_dc,
+            theme.font,
+            ink,
+            BoxRect::new(4, shift, w - 8, h),
+            &raw_label,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+    });
+    1
+}
+
+unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
+    if item.item_id == u32::MAX {
+        return 1;
+    }
+    let w = (item.rect.right - item.rect.left).max(1);
+    let h = (item.rect.bottom - item.rect.top).max(1);
+    let row_index = item.item_id as usize;
+    let selected = item.item_state & 1 != 0;
+    let base_bg = if row_index % 2 == 0 {
+        ui_theme::ROW_EVEN
+    } else {
+        ui_theme::ROW_ODD
+    };
+    let mut pixels = vec![base_bg.pixel(); (w * h) as usize];
+    ui_theme::fill_rect(
+        &mut pixels,
+        w,
+        h,
+        BoxRect::new(0, h - 1, w, 1),
+        ui_theme::ROW_LINE,
+    );
+
+    if selected {
+        ui_theme::paint_rounded_box(
+            &mut pixels,
+            w,
+            h,
+            BoxRect::new(6, 1, (w - 12).max(8), (h - 2).max(4)),
+            5.0,
+            ui_theme::ROW_SELECTED_BG,
+            ui_theme::ROW_SELECTED_BG,
+            Some(ui_theme::ROW_SELECTED_BORDER),
+        );
+    }
+
+    let Some(entry) = app.entries.get(row_index) else {
+        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |_| {});
+        return 1;
+    };
+
+    let icon = ui_theme::classify_entry_icon(entry);
+    ui_theme::paint_item_icon(&mut pixels, w, h, 18, (h - 18) / 2, icon);
+
+    let mut client = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(parent, &mut client);
+    let m = WindowMetrics::new(client.right, client.bottom);
+    let base_x = m.col_header.x;
+    let name_end = (m.col_name.right() - base_x).min(w);
+    let mod_x = (m.col_modified.x - base_x).max(44);
+    let mod_w = (m.col_modified.width).max(20);
+    let type_x = (m.col_type.x - base_x).max(mod_x + 20);
+    let type_w = (m.col_type.width).max(20);
+    let size_x = (m.col_size.x - base_x).max(type_x + 20);
+    let size_w = (m.col_size.width).min((w - size_x).max(0));
+
+    let modified_text = format_local_modified(entry.modified);
+    let type_text = ui_theme::entry_type_label(entry);
+    let size_text = ui_theme::format_human_size(entry);
+    let theme = &*app.theme;
+
+    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
+        if app.view_mode == ViewMode::Compact {
+            draw_text_in(
+                mem_dc,
+                theme.semibold_font,
+                ui_theme::TEXT_BRIGHT,
+                BoxRect::new(44, 2, (w - 56).max(20), h / 2),
+                &entry.name,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            let sub = if size_text.is_empty() {
+                format!("{type_text}  ·  {modified_text}")
+            } else {
+                format!("{type_text}  ·  {size_text}  ·  {modified_text}")
+            };
+            draw_text_in(
+                mem_dc,
+                theme.small_font,
+                ui_theme::TEXT_MUTED,
+                BoxRect::new(44, h / 2, (w - 56).max(20), h / 2 - 2),
+                &sub,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        } else {
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ui_theme::TEXT_BRIGHT,
+                BoxRect::new(44, 0, (name_end - 52).max(20), h),
+                &entry.name,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ui_theme::TEXT_PRIMARY,
+                BoxRect::new(mod_x + 10, 0, (mod_w - 16).max(10), h),
+                &modified_text,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ui_theme::TEXT_MUTED,
+                BoxRect::new(type_x + 10, 0, (type_w - 16).max(10), h),
+                &type_text,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            if !size_text.is_empty() && size_w > 12 {
+                draw_text_in(
+                    mem_dc,
+                    theme.font,
+                    ui_theme::TEXT_MUTED,
+                    BoxRect::new(size_x + 4, 0, size_w - 10, h),
+                    &size_text,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+        }
+    });
+    1
+}
+
+unsafe fn control_value(control: H) -> OsString {
+    let length = GetWindowTextLengthW(control).max(0) as usize;
+    let mut value = vec![0u16; length + 1];
+    let n = GetWindowTextW(control, value.as_mut_ptr(), (length + 1) as i32).max(0) as usize;
+    OsString::from_wide(&value[..n])
+}
+
+unsafe fn set_status(hwnd: H, app: &mut App, notice: Option<String>) {
+    let current = app.tabs.current().current().display().to_string();
+    let summary = match &notice {
+        Some(msg) => msg.clone(),
+        None => format!("{} items  |  {}", app.entries.len(), current),
+    };
+    app.notice = notice;
+    SetWindowTextW(app.status, text(&summary).as_ptr());
+    invalidate_status_bar(hwnd);
+}
+
+unsafe fn invalidate_status_bar(hwnd: H) {
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(hwnd, &mut r);
+    let m = WindowMetrics::new(r.right, r.bottom);
+    let bar = Rect {
+        left: 0,
+        top: m.status_bar.y,
+        right: r.right,
+        bottom: r.bottom,
+    };
+    InvalidateRect(hwnd, &bar, 0);
+}
+
+unsafe fn populate_listbox(app: &App, preserve_path: Option<&Path>) {
+    SendMessageW(app.list, LB_RESETCONTENT, 0, 0);
+    let mut select_idx: Option<usize> = None;
+    for (idx, entry) in app.entries.iter().enumerate() {
+        if preserve_path.map_or(false, |p| p == entry.path) {
+            select_idx = Some(idx);
+        }
+        SendMessageW(app.list, LB_ADDSTRING, 0, text(&entry.name).as_ptr() as isize);
+    }
+    if let Some(idx) = select_idx {
+        SendMessageW(app.list, LB_SETCURSEL, idx, 0);
+    }
+}
+
 unsafe fn child(hwnd: H, class: &str, value: &str, style: u32, id: usize) -> H {
     let control = CreateWindowExW(
         0,
@@ -430,21 +1819,76 @@ unsafe fn child(hwnd: H, class: &str, value: &str, style: u32, id: usize) -> H {
     }
     control
 }
-unsafe fn set_status(app: *mut App, value: &str) {
-    let status = (*app).status;
-    SetWindowTextW(status, text(value).as_ptr());
+
+unsafe fn place_box(control: H, rect: BoxRect) {
+    if !control.is_null() {
+        MoveWindow(
+            control,
+            rect.x,
+            rect.y,
+            rect.width.max(1),
+            rect.height.max(1),
+            1,
+        );
+    }
 }
-unsafe fn load(hwnd: H, app: *mut App, destination: Destination) {
-    let path = match (*app).tabs.current().resolve(&destination) {
+
+unsafe fn layout(hwnd: H, app: &mut App) {
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(hwnd, &mut r);
+    let m = WindowMetrics::new(r.right, r.bottom);
+
+    place_box(app.nav_buttons[0], m.nav_back);
+    place_box(app.nav_buttons[1], m.nav_forward);
+    place_box(app.nav_buttons[2], m.nav_up);
+    place_box(app.nav_buttons[3], m.nav_root);
+    place_box(app.nav_buttons[4], m.nav_refresh);
+    place_box(app.nav_buttons[5], m.nav_go);
+    place_box(app.address, m.address_edit);
+
+    place_box(app.extra_buttons[0], m.new_tab);
+    place_box(app.extra_buttons[1], m.close_tab);
+
+    place_box(app.filter_control, m.filter_edit);
+    place_box(app.extra_buttons[2], m.search_btn);
+    place_box(app.extra_buttons[3], m.clear_btn);
+    place_box(app.extra_buttons[4], m.hidden_btn);
+
+    place_box(app.name_control, m.name_edit);
+    place_box(app.extra_buttons[5], m.new_file_btn);
+    place_box(app.extra_buttons[6], m.new_folder_btn);
+    place_box(app.extra_buttons[8], m.rename_btn);
+    place_box(app.extra_buttons[7], m.delete_btn);
+
+    place_box(app.list, m.list);
+
+    rebuild_backdrop(hwnd, app);
+    InvalidateRect(hwnd, ptr::null(), 0);
+    for btn in app.nav_buttons.iter().chain(app.extra_buttons.iter()) {
+        if !btn.is_null() {
+            InvalidateRect(*btn, ptr::null(), 0);
+        }
+    }
+}
+
+unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice: bool) {
+    let path = match app.tabs.current().resolve(&destination) {
         Some(path) => path,
         None => return,
     };
-    let generation = (*app).token.fetch_add(1, Ordering::Relaxed) + 1;
-    let token = (*app).token.clone();
+    let generation = app.token.fetch_add(1, Ordering::Relaxed) + 1;
+    let token = app.token.clone();
     let target = hwnd as usize;
-    let filter = (*app).filter.clone();
-    let show_hidden = (*app).show_hidden;
-    set_status(app, &format!("Loading {}…", path.display()));
+    let filter = app.filter.clone();
+    let show_hidden = app.show_hidden;
+    if !preserve_notice {
+        set_status(hwnd, app, Some(format!("Loading {}…", path.display())));
+    }
     thread::spawn(move || {
         let result =
             directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
@@ -464,236 +1908,25 @@ unsafe fn load(hwnd: H, app: *mut App, destination: Destination) {
         }
     });
 }
-unsafe fn layout(hwnd: H, app: *mut App) {
-    let mut r = Rect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    GetClientRect(hwnd, &mut r);
-    let width = r.right.max(690);
-    let height = r.bottom.max(420);
-    let margin = 18;
-    let right = width - margin;
-    let h = 30;
-    MoveWindow((*app).heading, margin, 12, 65, 30, 1);
-    MoveWindow((*app).subtitle, margin + 70, 20, 300, 20, 1);
 
-    // Navigation, tabs, filtering, and operations each have their own row.
-    let top = 52;
-    let buttons = (*app).buttons;
-    for (i, button) in buttons.iter().take(4).enumerate() {
-        MoveWindow(*button, margin + (i as i32) * 62, top, 58, h, 1);
-    }
-    let address_x = margin + 4 * 62 + 4;
-    MoveWindow(buttons[4], right - 56, top, 56, h, 1);
-    MoveWindow(
-        (*app).address,
-        address_x,
-        top + 2,
-        (right - 66 - address_x).max(1),
-        h - 4,
-        1,
-    );
-
-    let second = top + 40;
-    let extra = (*app).extra_buttons;
-    MoveWindow(
-        (*app).tabs_control,
-        margin,
-        second + 2,
-        (right - margin - 204).max(80),
-        300,
-        1,
-    );
-    MoveWindow(extra[0], right - 196, second, 96, h, 1);
-    MoveWindow(extra[1], right - 96, second, 96, h, 1);
-
-    let third = second + 40;
-    MoveWindow((*app).filter_label, margin, third + 5, 48, 22, 1);
-    MoveWindow(
-        (*app).filter_control,
-        margin + 51,
-        third + 2,
-        (right - margin - 335).max(30),
-        h - 4,
-        1,
-    );
-    MoveWindow(extra[2], right - 274, third, 76, h, 1);
-    MoveWindow(extra[3], right - 194, third, 76, h, 1);
-    MoveWindow(extra[4], right - 114, third, 114, h, 1);
-
-    let fourth = third + 40;
-    MoveWindow((*app).name_label, margin, fourth + 5, 80, 22, 1);
-    MoveWindow(
-        (*app).name_control,
-        margin + 83,
-        fourth + 2,
-        (right - margin - 497).max(30),
-        h - 4,
-        1,
-    );
-    MoveWindow(extra[5], right - 400, fourth, 96, h, 1);
-    MoveWindow(extra[6], right - 300, fourth, 100, h, 1);
-    MoveWindow(extra[8], right - 196, fourth, 96, h, 1);
-    MoveWindow(extra[7], right - 96, fourth, 96, h, 1);
-    let list_top = fourth + h + 32;
-    MoveWindow((*app).list_heading, margin, fourth + h + 9, 300, 20, 1);
-    MoveWindow(
-        (*app).list,
-        margin,
-        list_top,
-        width - 2 * margin,
-        (height - list_top - 35).max(1),
-        1,
-    );
-    MoveWindow(
-        (*app).status,
-        margin,
-        height - 28,
-        width - 2 * margin,
-        22,
-        1,
-    );
-}
-
-unsafe fn draw_button(app: *mut App, item: *mut DrawItem) -> LResult {
-    let item = &mut *item;
-    let theme = &*(*app).theme;
-    let primary = item.control_id as usize == GO || item.control_id as usize == APPLY_FILTER;
-    let pressed = item.item_state & 1 != 0;
-    let disabled = item.item_state & 4 != 0;
-    let brush = if primary && !disabled {
-        if pressed {
-            theme.accent_pressed
-        } else {
-            theme.accent
-        }
-    } else if pressed {
-        theme.pressed
-    } else {
-        theme.button
-    };
-    FillRect(item.dc, &item.rect, brush);
-    if !primary || disabled {
-        FrameRect(item.dc, &item.rect, theme.border);
-    }
-    let old_font = SelectObject(item.dc, theme.font);
-    SetBkMode(item.dc, 1);
-    SetTextColor(
-        item.dc,
-        if disabled {
-            MUTED
-        } else if primary {
-            BACKGROUND
-        } else {
-            INK
-        },
-    );
-    let label = control_value(item.hwnd);
-    let label = wide(&label);
-    let mut bounds = Rect {
-        left: item.rect.left + 4,
-        top: item.rect.top,
-        right: item.rect.right - 4,
-        bottom: item.rect.bottom,
-    };
-    DrawTextW(
-        item.dc,
-        label.as_ptr(),
-        -1,
-        &mut bounds,
-        0x0001 | 0x0004 | 0x0020 | 0x8000,
-    );
-    if item.item_state & 0x10 != 0 {
-        let focus = Rect {
-            left: item.rect.left + 4,
-            top: item.rect.top + 4,
-            right: item.rect.right - 4,
-            bottom: item.rect.bottom - 4,
-        };
-        DrawFocusRect(item.dc, &focus);
-    }
-    SelectObject(item.dc, old_font);
-    1
-}
-fn entry_line(entry: &Entry) -> String {
-    if entry.is_dir {
-        format!("[Folder]  {}", entry.name)
-    } else {
-        format!("{}     {} bytes", entry.name, entry.size.unwrap_or(0))
-    }
-}
-
-// The list is owner-drawn so a selected row is solid black with white text,
-// matching the rest of the monochrome interface instead of the system accent.
-unsafe fn draw_list_item(app: *mut App, item: *mut DrawItem) -> LResult {
-    let item = &mut *item;
-    let theme = &*(*app).theme;
-    let selected = item.item_state & 1 != 0;
-    let brush = if selected { theme.accent } else { theme.surface };
-    FillRect(item.dc, &item.rect, brush);
-    let line = match (*app).entries.get(item.item_id as usize) {
-        Some(entry) => entry_line(entry),
-        None => String::new(),
-    };
-    let old_font = SelectObject(item.dc, theme.font);
-    SetBkMode(item.dc, 1);
-    SetTextColor(item.dc, if selected { BACKGROUND } else { INK });
-    let label = text(&line);
-    let mut bounds = Rect {
-        left: item.rect.left + 8,
-        top: item.rect.top,
-        right: item.rect.right - 4,
-        bottom: item.rect.bottom,
-    };
-    DrawTextW(
-        item.dc,
-        label.as_ptr(),
-        -1,
-        &mut bounds,
-        0x0004 | 0x0020 | 0x8000,
-    );
-    SelectObject(item.dc, old_font);
-    1
-}
-
-unsafe fn control_value(address: H) -> std::ffi::OsString {
-    let length = GetWindowTextLengthW(address).max(0) as usize;
-    let mut value = vec![0u16; length + 1];
-    let n = GetWindowTextW(address, value.as_mut_ptr(), (length + 1) as i32).max(0) as usize;
-    std::ffi::OsString::from_wide(&value[..n])
-}
-unsafe fn refresh_tabs(app: *mut App) {
-    let control = (*app).tabs_control;
-    SendMessageW(control, CB_RESETCONTENT, 0, 0);
-    let count = (*app).tabs.len();
-    for i in 0..count {
-        let label = (*app)
-            .tabs
-            .history(i)
-            .unwrap()
-            .current()
-            .to_string_lossy()
-            .into_owned();
-        SendMessageW(control, CB_ADDSTRING, 0, text(&label).as_ptr() as isize);
-    }
-    SendMessageW(control, CB_SETCURSEL, (*app).tabs.active(), 0);
-}
 enum Operation {
-    NewFile(PathBuf, std::ffi::OsString),
-    NewFolder(PathBuf, std::ffi::OsString),
+    NewFile(PathBuf, OsString),
+    NewFolder(PathBuf, OsString),
     Delete(PathBuf),
-    Rename(PathBuf, std::ffi::OsString),
+    Rename(PathBuf, OsString),
 }
-unsafe fn start_operation(hwnd: H, app: *mut App, operation: Operation) {
-    if (*app).operation_busy {
-        set_status(app, "Another file operation is already running.");
+
+unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
+    if app.operation_busy {
+        set_status(
+            hwnd,
+            app,
+            Some("Another file operation is already running.".into()),
+        );
         return;
     }
-    (*app).operation_busy = true;
-    set_status(app, "Working…");
+    app.operation_busy = true;
+    set_status(hwnd, app, Some("Working…".into()));
     let target = hwnd as usize;
     thread::spawn(move || {
         let result = match operation {
@@ -716,58 +1949,126 @@ unsafe fn start_operation(hwnd: H, app: *mut App, operation: Operation) {
         }
     });
 }
-/// Surface initialization errors even when launched from Explorer without a console.
+
 pub fn show_startup_error(message: &str) {
     unsafe {
         show_error(ptr::null_mut(), &format!("ZFM could not start: {message}"));
     }
 }
+
 unsafe fn show_error(hwnd: H, message: &str) {
     MessageBoxW(hwnd, text(message).as_ptr(), text("ZFM").as_ptr(), 0x10);
 }
+
+unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    GetClientRect(hwnd, &mut r);
+    let m = WindowMetrics::new(r.right, r.bottom);
+    match hit_test_custom(app, &m, x, y) {
+        HotZone::AddressChip => {
+            SetFocus(app.address);
+            SendMessageW(app.address, EM_SETSEL, 0, -1);
+        }
+        HotZone::Tab(idx) => {
+            if app.tabs.select(idx) {
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                load(hwnd, app, Destination::Refresh, false);
+            }
+        }
+        HotZone::Sidebar(idx) => {
+            if let Some(item) = app.sidebar_items.get(idx).cloned() {
+                if item.is_drives_header {
+                    app.drives_expanded = !app.drives_expanded;
+                    app.sidebar_items = build_sidebar_items(app.drives_expanded);
+                    rebuild_backdrop(hwnd, app);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                } else if let Some(target) = item.target {
+                    load(hwnd, app, Destination::Visit(target), false);
+                }
+            }
+        }
+        HotZone::Column(col) => {
+            if app.sort_column == col {
+                app.sort_ascending = !app.sort_ascending;
+            } else {
+                app.sort_column = col;
+                app.sort_ascending = matches!(col, SortColumn::Name | SortColumn::Kind);
+            }
+            let selected_path = {
+                let idx = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
+                if idx >= 0 {
+                    app.entries.get(idx as usize).map(|e| e.path.clone())
+                } else {
+                    None
+                }
+            };
+            ui_theme::sort_entries(&mut app.entries, app.sort_column, app.sort_ascending);
+            populate_listbox(app, selected_path.as_deref());
+            InvalidateRect(hwnd, ptr::null(), 0);
+            InvalidateRect(app.list, ptr::null(), 0);
+        }
+        HotZone::View(mode) => {
+            if app.view_mode != mode {
+                app.view_mode = mode;
+                let row_h = match mode {
+                    ViewMode::Details => 30,
+                    ViewMode::Compact => 38,
+                };
+                SendMessageW(app.list, LB_SETITEMHEIGHT, 0, row_h);
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                InvalidateRect(app.list, ptr::null(), 0);
+            }
+        }
+        HotZone::None => {}
+    }
+}
+
 unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> LResult {
     if msg == WM_CREATE {
-        let app = (*(lp as *const CreateStruct)).param as *mut App;
-        set_data(hwnd, app as isize);
-        let heading = child(hwnd, "STATIC", "ZFM", 0, 0);
-        let subtitle = child(hwnd, "STATIC", "FILE MANAGER", 0, 0);
-        let list_heading = child(hwnd, "STATIC", "FILES AND FOLDERS", 0, 0);
-        if heading.is_null() || subtitle.is_null() || list_heading.is_null() {
-            return -1;
-        }
-        (*app).heading = heading;
-        (*app).subtitle = subtitle;
-        (*app).list_heading = list_heading;
-        SendMessageW(heading, WM_SETFONT, (*(*app).theme).title_font as usize, 1);
-        let buttons = [
+        let app = &mut *(*(lp as *const CreateStruct)).param.cast::<App>();
+        set_data(hwnd, app as *mut App as isize);
+
+        let nav_buttons = [
             child(hwnd, "BUTTON", "Back", WS_TABSTOP | BS_OWNERDRAW, BACK),
             child(hwnd, "BUTTON", "Next", WS_TABSTOP | BS_OWNERDRAW, FORWARD),
             child(hwnd, "BUTTON", "Up", WS_TABSTOP | BS_OWNERDRAW, UP),
+            child(hwnd, "BUTTON", "Root", WS_TABSTOP | BS_OWNERDRAW, ROOT),
             child(hwnd, "BUTTON", "Reload", WS_TABSTOP | BS_OWNERDRAW, REFRESH),
             child(hwnd, "BUTTON", "Go", WS_TABSTOP | BS_OWNERDRAW, GO),
         ];
-        let address = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, ADDRESS);
+        let address = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, ADDRESS);
         let list = child(
             hwnd,
             "LISTBOX",
             "",
-            WS_BORDER | WS_TABSTOP | WS_VSCROLL | 1 | LBS_OWNERDRAWFIXED,
+            WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
             LIST,
         );
-        let status = child(hwnd, "STATIC", "", 0, STATUS);
-        let tabs_control = child(hwnd, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | 3, TABS);
-        let filter_control = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, FILTER);
-        let name_control = child(hwnd, "EDIT", "", WS_BORDER | WS_TABSTOP | 0x80, NAME);
-        let filter_label = child(hwnd, "STATIC", "Filter:", 0, 0);
-        let name_label = child(hwnd, "STATIC", "New name:", 0, 0);
+        let status = CreateWindowExW(
+            0,
+            text("STATIC").as_ptr(),
+            text("").as_ptr(),
+            WS_CHILD,
+            0,
+            0,
+            1,
+            1,
+            hwnd,
+            STATUS as H,
+            GetModuleHandleW(ptr::null()),
+            ptr::null_mut(),
+        );
+        let filter_control = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, FILTER);
+        let name_control = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, NAME);
         let extra_buttons = [
-            child(
-                hwnd,
-                "BUTTON",
-                "New tab",
-                WS_TABSTOP | BS_OWNERDRAW,
-                NEW_TAB,
-            ),
+            child(hwnd, "BUTTON", "New tab", WS_TABSTOP | BS_OWNERDRAW, NEW_TAB),
             child(
                 hwnd,
                 "BUTTON",
@@ -789,7 +2090,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 WS_TABSTOP | BS_OWNERDRAW,
                 CLEAR_FILTER,
             ),
-            child(hwnd, "BUTTON", "Show hidden", WS_TABSTOP | 3, HIDDEN),
+            child(
+                hwnd,
+                "BUTTON",
+                "Show hidden",
+                WS_TABSTOP | BS_OWNERDRAW,
+                HIDDEN,
+            ),
             child(
                 hwnd,
                 "BUTTON",
@@ -804,183 +2111,300 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 WS_TABSTOP | BS_OWNERDRAW,
                 NEW_FOLDER,
             ),
-            child(hwnd, "BUTTON", "Delete…", WS_TABSTOP | BS_OWNERDRAW, DELETE),
+            child(
+                hwnd,
+                "BUTTON",
+                "Delete...",
+                WS_TABSTOP | BS_OWNERDRAW,
+                DELETE,
+            ),
             child(hwnd, "BUTTON", "Rename", WS_TABSTOP | BS_OWNERDRAW, RENAME),
         ];
+
         if address.is_null()
             || list.is_null()
             || status.is_null()
-            || buttons.iter().any(|b| b.is_null())
-            || tabs_control.is_null()
             || filter_control.is_null()
             || name_control.is_null()
-            || filter_label.is_null()
-            || name_label.is_null()
+            || nav_buttons.iter().any(|b| b.is_null())
             || extra_buttons.iter().any(|b| b.is_null())
         {
             return -1;
         }
-        (*app).buttons = buttons;
-        (*app).address = address;
-        (*app).list = list;
-        SendMessageW(list, LB_SETITEMHEIGHT, 0, 25);
-        (*app).status = status;
-        (*app).tabs_control = tabs_control;
-        (*app).filter_control = filter_control;
-        (*app).name_control = name_control;
-        (*app).filter_label = filter_label;
-        (*app).name_label = name_label;
-        (*app).extra_buttons = extra_buttons;
-        refresh_tabs(app);
-        let path = wide((*app).tabs.current().current().as_os_str());
+
+        app.nav_buttons = nav_buttons;
+        app.address = address;
+        app.list = list;
+        app.status = status;
+        app.filter_control = filter_control;
+        app.name_control = name_control;
+        app.extra_buttons = extra_buttons;
+
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, 30);
+        SendMessageW(
+            filter_control,
+            EM_SETCUEBANNER,
+            1,
+            text("Filter").as_ptr() as isize,
+        );
+        SendMessageW(
+            name_control,
+            EM_SETCUEBANNER,
+            1,
+            text("New name").as_ptr() as isize,
+        );
+        apply_dark_scrollbar(list);
+        apply_dark_window_chrome(hwnd);
+
+        let path = wide(app.tabs.current().current().as_os_str());
         SetWindowTextW(address, path.as_ptr());
         layout(hwnd, app);
-        load(hwnd, app, Destination::Refresh);
+        load(hwnd, app, Destination::Refresh, false);
         return 0;
     }
+
     let data = get_data(hwnd);
     if data == 0 {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    let app = data as *mut App;
+    let app = &mut *(data as *mut App);
+
     match msg {
+        WM_ERASEBKGND => 1,
         WM_GETMINMAXINFO => {
             let info = &mut *(lp as *mut MinMaxInfo);
-            info.min_track_size.x = 720;
-            info.min_track_size.y = 480;
+            info.min_track_size.x = 760;
+            info.min_track_size.y = 500;
             0
         }
-        WM_DRAWITEM if lp != 0 => {
-            let item = &*(lp as *const DrawItem);
-            if item.control_id as usize == LIST {
-                draw_list_item(app, lp as *mut DrawItem)
-            } else {
-                draw_button(app, lp as *mut DrawItem)
-            }
+        WM_PAINT => {
+            paint_window(hwnd, app);
+            0
         }
         WM_SIZE => {
             layout(hwnd, app);
             0
         }
+        WM_SETCURSOR => {
+            let target = wp as H;
+            let is_btn = app
+                .nav_buttons
+                .iter()
+                .chain(app.extra_buttons.iter())
+                .any(|&b| b == target);
+            let next_hover = if is_btn { target } else { ptr::null_mut() };
+            if app.hovered_child != next_hover {
+                let prev = app.hovered_child;
+                app.hovered_child = next_hover;
+                if !prev.is_null() {
+                    InvalidateRect(prev, ptr::null(), 0);
+                }
+                if !next_hover.is_null() {
+                    InvalidateRect(next_hover, ptr::null(), 0);
+                }
+            }
+            let hand = &*app.theme;
+            if !hand.hand_cursor.is_null() && (lp & 0xffff) == 1 {
+                if is_btn || (target == hwnd && app.hot_zone != HotZone::None) {
+                    SetCursor(hand.hand_cursor);
+                    return 1;
+                }
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSEMOVE => {
+            if !app.tracking_mouse {
+                let mut tme = TrackMouseEvent {
+                    size: std::mem::size_of::<TrackMouseEvent>() as u32,
+                    flags: 2, // TME_LEAVE
+                    hwnd_track: hwnd,
+                    hover_time: 0,
+                };
+                if TrackMouseEvent(&mut tme) != 0 {
+                    app.tracking_mouse = true;
+                }
+            }
+            let mx = (lp as i16) as i32;
+            let my = ((lp >> 16) as i16) as i32;
+            let mut r = Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            GetClientRect(hwnd, &mut r);
+            let m = WindowMetrics::new(r.right, r.bottom);
+            let zone = hit_test_custom(app, &m, mx, my);
+            if app.hot_zone != zone {
+                app.hot_zone = zone;
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            app.tracking_mouse = false;
+            if app.hot_zone != HotZone::None {
+                app.hot_zone = HotZone::None;
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let mx = (lp as i16) as i32;
+            let my = ((lp >> 16) as i16) as i32;
+            handle_custom_click(hwnd, app, mx, my);
+            0
+        }
+        WM_DRAWITEM if lp != 0 => {
+            let item = &mut *(lp as *mut DrawItem);
+            if item.control_type == ODT_LISTBOX || item.control_id as usize == LIST {
+                draw_list_item(hwnd, app, item)
+            } else if item.control_type == ODT_BUTTON {
+                draw_button(hwnd, app, item)
+            } else {
+                0
+            }
+        }
         WM_RESULT => {
             let message = Box::from_raw(lp as *mut ResultMessage);
-            if (*app).token.load(Ordering::Relaxed) != message.generation {
+            if app.token.load(Ordering::Relaxed) != message.generation {
                 return 0;
             }
             match message.result {
-                Ok(Some(listing)) => {
-                    (*app).tabs.current_mut().commit(message.destination);
-                    refresh_tabs(app);
-                    let path = wide((*app).tabs.current().current().as_os_str());
-                    let status = format!(
-                        "{} items  ·  {}{}",
-                        listing.entries.len(),
-                        (*app).tabs.current().current().display(),
-                        if listing.skipped > 0 {
-                            format!("  ·  {} entries had errors", listing.skipped)
-                        } else {
-                            String::new()
-                        }
-                    );
-                    (*app).entries = listing.entries;
-                    let address = (*app).address;
-                    let list = (*app).list;
-                    SetWindowTextW(address, path.as_ptr());
-                    SendMessageW(list, LB_RESETCONTENT, 0, 0);
-                    for index in 0..(*app).entries.len() {
-                        let line = entry_line(&(&(*app).entries)[index]);
-                        SendMessageW(list, LB_ADDSTRING, 0, text(&line).as_ptr() as isize);
-                    }
-                    set_status(app, &status);
+                Ok(Some(mut listing)) => {
+                    app.tabs.current_mut().commit(message.destination);
+                    ui_theme::sort_entries(&mut listing.entries, app.sort_column, app.sort_ascending);
+                    let path = wide(app.tabs.current().current().as_os_str());
+                    SetWindowTextW(app.address, path.as_ptr());
+                    let skipped_note = if listing.skipped > 0 {
+                        Some(format!(
+                            "{}  ({} entries skipped)",
+                            app.tabs.current().current().display(),
+                            listing.skipped
+                        ))
+                    } else {
+                        None
+                    };
+                    app.entries = listing.entries;
+                    populate_listbox(app, None);
+                    rebuild_backdrop(hwnd, app);
+                    set_status(hwnd, app, skipped_note);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                    InvalidateRect(app.extra_buttons[0], ptr::null(), 0);
+                    InvalidateRect(app.extra_buttons[1], ptr::null(), 0);
                 }
-                Ok(None) => (),
+                Ok(None) => {}
                 Err(e) => {
-                    let path = wide((*app).tabs.current().current().as_os_str());
-                    let address = (*app).address;
-                    SetWindowTextW(address, path.as_ptr());
-                    set_status(app, &format!("Could not open folder: {e}"));
+                    let path = wide(app.tabs.current().current().as_os_str());
+                    SetWindowTextW(app.address, path.as_ptr());
+                    set_status(hwnd, app, Some(format!("Could not open folder: {e}")));
                 }
             }
             0
         }
         WM_OPERATION_RESULT => {
             let message = Box::from_raw(lp as *mut OperationMessage);
-            (*app).operation_busy = false;
+            app.operation_busy = false;
             match message.result {
                 Ok(status) => {
-                    load(hwnd, app, Destination::Refresh);
-                    set_status(app, &status);
+                    set_status(hwnd, app, Some(status));
+                    load(hwnd, app, Destination::Refresh, true);
                 }
-                Err(error) => set_status(app, &format!("File operation failed: {error}")),
+                Err(error) => set_status(hwnd, app, Some(format!("File operation failed: {error}"))),
             }
             0
         }
         WM_COMMAND => {
             let id = wp & 0xffff;
             let code = (wp >> 16) & 0xffff;
+
+            if matches!(id, ADDRESS | FILTER | NAME)
+                && (code == EN_SETFOCUS || code == EN_KILLFOCUS)
+            {
+                let next_focus = if code == EN_SETFOCUS {
+                    id
+                } else if app.focused_edit == id {
+                    0
+                } else {
+                    app.focused_edit
+                };
+                if app.focused_edit != next_focus {
+                    app.focused_edit = next_focus;
+                    rebuild_backdrop(hwnd, app);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                }
+                return 0;
+            }
+
             match id {
-                BACK => load(hwnd, app, Destination::Back),
-                FORWARD => load(hwnd, app, Destination::Forward),
-                REFRESH => load(hwnd, app, Destination::Refresh),
-                UP => {
-                    let parent = (*app)
+                BACK if code == 0 => load(hwnd, app, Destination::Back, false),
+                FORWARD if code == 0 => load(hwnd, app, Destination::Forward, false),
+                REFRESH if code == 0 => load(hwnd, app, Destination::Refresh, false),
+                UP if code == 0 => {
+                    let parent = app
                         .tabs
                         .current()
                         .current()
                         .parent()
                         .map(|p| p.to_path_buf());
                     if let Some(parent) = parent {
-                        load(hwnd, app, Destination::Visit(parent));
+                        load(hwnd, app, Destination::Visit(parent), false);
                     }
                 }
-                GO => {
-                    let path = PathBuf::from(control_value((*app).address));
-                    let path = if path.is_absolute() {
-                        path
+                ROOT if code == 0 => {
+                    let root = root_of(app.tabs.current().current());
+                    load(hwnd, app, Destination::Visit(root), false);
+                }
+                GO if code == 0 => {
+                    let typed = PathBuf::from(control_value(app.address));
+                    let path = if typed.is_absolute() {
+                        typed
                     } else {
-                        (*app).tabs.current().current().join(path)
+                        app.tabs.current().current().join(typed)
                     };
-                    load(hwnd, app, Destination::Visit(path));
+                    load(hwnd, app, Destination::Visit(path), false);
                 }
                 NEW_TAB if code == 0 => {
-                    let path = (*app).tabs.current().current().to_path_buf();
-                    (*app).tabs.add(path);
-                    refresh_tabs(app);
-                    load(hwnd, app, Destination::Refresh);
+                    let path = app.tabs.current().current().to_path_buf();
+                    app.tabs.add(path);
+                    rebuild_backdrop(hwnd, app);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                    load(hwnd, app, Destination::Refresh, false);
                 }
                 CLOSE_TAB if code == 0 => {
-                    if (*app).tabs.close() {
-                        refresh_tabs(app);
-                        load(hwnd, app, Destination::Refresh);
+                    if app.tabs.close() {
+                        rebuild_backdrop(hwnd, app);
+                        InvalidateRect(hwnd, ptr::null(), 0);
+                        load(hwnd, app, Destination::Refresh, false);
                     } else {
-                        set_status(app, "At least one tab must remain open.");
-                    }
-                }
-                TABS if code == 1 => {
-                    let index = SendMessageW((*app).tabs_control, CB_GETCURSEL, 0, 0);
-                    if index >= 0 && (*app).tabs.select(index as usize) {
-                        load(hwnd, app, Destination::Refresh);
+                        set_status(
+                            hwnd,
+                            app,
+                            Some("At least one tab must remain open.".into()),
+                        );
                     }
                 }
                 APPLY_FILTER if code == 0 => {
-                    (*app).filter = control_value((*app).filter_control)
+                    app.filter = control_value(app.filter_control)
                         .to_string_lossy()
                         .into_owned();
-                    load(hwnd, app, Destination::Refresh);
+                    load(hwnd, app, Destination::Refresh, false);
                 }
                 CLEAR_FILTER if code == 0 => {
-                    (*app).filter.clear();
-                    SetWindowTextW((*app).filter_control, text("").as_ptr());
-                    load(hwnd, app, Destination::Refresh);
+                    app.filter.clear();
+                    SetWindowTextW(app.filter_control, text("").as_ptr());
+                    load(hwnd, app, Destination::Refresh, false);
                 }
                 HIDDEN if code == 0 => {
-                    (*app).show_hidden =
-                        SendMessageW((*app).extra_buttons[4], BM_GETCHECK, 0, 0) == 1;
-                    load(hwnd, app, Destination::Refresh);
+                    app.show_hidden = !app.show_hidden;
+                    InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
+                    load(hwnd, app, Destination::Refresh, false);
                 }
                 NEW_FILE | NEW_FOLDER if code == 0 => {
-                    let name = control_value((*app).name_control);
-                    let dir = (*app).tabs.current().current().to_path_buf();
+                    let name = control_value(app.name_control);
+                    let dir = app.tabs.current().current().to_path_buf();
                     let operation = if id == NEW_FILE {
                         Operation::NewFile(dir, name)
                     } else {
@@ -989,32 +2413,35 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     start_operation(hwnd, app, operation);
                 }
                 RENAME if code == 0 => {
-                    let index = SendMessageW((*app).list, LB_GETCURSEL, 0, 0);
+                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
                     let path = if index >= 0 {
-                        (&(*app).entries)
-                            .get(index as usize)
-                            .map(|e| e.path.clone())
+                        app.entries.get(index as usize).map(|e| e.path.clone())
                     } else {
                         None
                     };
                     if let Some(path) = path {
-                        let name = control_value((*app).name_control);
+                        let name = control_value(app.name_control);
                         start_operation(hwnd, app, Operation::Rename(path, name));
                     } else {
-                        set_status(app, "Select an item and enter a new name.");
+                        set_status(
+                            hwnd,
+                            app,
+                            Some("Select an item and enter a new name.".into()),
+                        );
                     }
                 }
                 DELETE if code == 0 => {
-                    let index = SendMessageW((*app).list, LB_GETCURSEL, 0, 0);
+                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
                     let path = if index >= 0 {
-                        (&(*app).entries)
-                            .get(index as usize)
-                            .map(|e| e.path.clone())
+                        app.entries.get(index as usize).map(|e| e.path.clone())
                     } else {
                         None
                     };
                     if let Some(path) = path {
-                        let message = format!("Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.", path.display());
+                        let message = format!(
+                            "Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.",
+                            path.display()
+                        );
                         if MessageBoxW(
                             hwnd,
                             text(&message).as_ptr(),
@@ -1025,14 +2452,16 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             start_operation(hwnd, app, Operation::Delete(path));
                         }
                     } else {
-                        set_status(app, "Select an item to delete.");
+                        set_status(hwnd, app, Some("Select an item to delete.".into()));
                     }
                 }
+                LIST if code == 1 => {
+                    invalidate_status_bar(hwnd);
+                }
                 LIST if code == 2 => {
-                    let list = (*app).list;
-                    let index = SendMessageW(list, LB_GETCURSEL, 0, 0);
+                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
                     let entry = if index >= 0 {
-                        (&(*app).entries)
+                        app.entries
                             .get(index as usize)
                             .map(|e| (e.path.clone(), e.is_dir))
                     } else {
@@ -1040,7 +2469,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     };
                     if let Some((path, is_dir)) = entry {
                         if is_dir {
-                            load(hwnd, app, Destination::Visit(path));
+                            load(hwnd, app, Destination::Visit(path), false);
                         } else {
                             let result = ShellExecuteW(
                                 hwnd,
@@ -1056,33 +2485,33 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         }
                     }
                 }
-                _ => (),
-            };
+                _ => {}
+            }
             0
         }
-        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
-            let theme = &*(*app).theme;
-            if msg == WM_CTLCOLORSTATIC {
-                let control = lp as H;
-                let color = if control == (*app).subtitle
-                    || control == (*app).list_heading
-                    || control == (*app).status
-                {
-                    MUTED
-                } else {
-                    INK
-                };
-                SetTextColor(wp as H, color);
-                SetBkColor(wp as H, BACKGROUND);
-                theme.background as LResult
+        WM_CTLCOLOREDIT => {
+            let theme = &*app.theme;
+            let ctrl = lp as H;
+            SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
+            if ctrl == app.address {
+                SetBkColor(wp as H, ui_theme::ADDRESS_EDIT_BG.colorref());
+                theme.address_brush as LResult
+            } else if ctrl == app.filter_control {
+                SetBkColor(wp as H, ui_theme::FILTER_EDIT_BG.colorref());
+                theme.filter_brush as LResult
             } else {
-                SetTextColor(wp as H, INK);
-                SetBkColor(wp as H, BACKGROUND);
-                theme.surface as LResult
+                SetBkColor(wp as H, ui_theme::NAME_EDIT_BG.colorref());
+                theme.name_brush as LResult
             }
         }
+        WM_CTLCOLORLISTBOX | WM_CTLCOLORSTATIC => {
+            let theme = &*app.theme;
+            SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
+            SetBkColor(wp as H, ui_theme::ROW_EVEN.colorref());
+            theme.list_brush as LResult
+        }
         WM_DESTROY => {
-            (*app).token.fetch_add(1, Ordering::Relaxed);
+            app.token.fetch_add(1, Ordering::Relaxed);
             set_data(hwnd, 0);
             PostQuitMessage(0);
             0
@@ -1090,6 +2519,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
+
 pub fn run() -> Result<(), String> {
     unsafe {
         let instance = GetModuleHandleW(ptr::null());
@@ -1106,7 +2536,7 @@ pub fn run() -> Result<(), String> {
             instance,
             icon: companion_icon(),
             cursor: LoadCursorW(ptr::null_mut(), 32512usize as *const u16),
-            background: theme.background,
+            background: theme.window_brush,
             menu: ptr::null(),
             class: class.as_ptr(),
         };
@@ -1126,38 +2556,46 @@ pub fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?
                 .join(initial)
         };
-        // The state is retained until process exit; background messages may still be queued.
+
         let app = Box::into_raw(Box::new(App {
             theme: &theme,
-            heading: ptr::null_mut(),
-            subtitle: ptr::null_mut(),
-            list_heading: ptr::null_mut(),
             tabs: Tabs::new(initial),
-            tabs_control: ptr::null_mut(),
-            filter_control: ptr::null_mut(),
             filter: String::new(),
             show_hidden: false,
-            extra_buttons: [ptr::null_mut(); 9],
-            name_control: ptr::null_mut(),
-            filter_label: ptr::null_mut(),
-            name_label: ptr::null_mut(),
+            drives_expanded: true,
+            sort_column: SortColumn::Name,
+            sort_ascending: true,
+            view_mode: ViewMode::Details,
+            focused_edit: 0,
+            hovered_child: ptr::null_mut(),
+            hot_zone: HotZone::None,
+            tracking_mouse: false,
             operation_busy: false,
+            notice: None,
             token: Arc::new(AtomicU64::new(0)),
             address: ptr::null_mut(),
+            filter_control: ptr::null_mut(),
+            name_control: ptr::null_mut(),
             list: ptr::null_mut(),
             status: ptr::null_mut(),
-            buttons: [ptr::null_mut(); 5],
+            nav_buttons: [ptr::null_mut(); 6],
+            extra_buttons: [ptr::null_mut(); 9],
+            sidebar_items: build_sidebar_items(true),
             entries: Vec::new(),
+            backdrop_w: 0,
+            backdrop_h: 0,
+            backdrop: Vec::new(),
         }));
+
         let window = CreateWindowExW(
             0,
             class.as_ptr(),
             text("ZFM — Zelvior File Manager").as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            0x80000000u32 as i32,
-            0x80000000u32 as i32,
-            950,
-            650,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            0x8000_0000u32 as i32,
+            0x8000_0000u32 as i32,
+            1040,
+            640,
             ptr::null_mut(),
             ptr::null_mut(),
             instance,
@@ -1198,14 +2636,11 @@ pub fn run() -> Result<(), String> {
                 }
                 if ctrl && !alt && msg.wparam == 0x4c {
                     SetFocus((*app).address);
+                    SendMessageW((*app).address, EM_SETSEL, 0, -1);
                     continue;
                 }
-                if ctrl && !alt && msg.wparam == 0x46 {
-                    SetFocus((*app).filter_control);
-                    continue;
-                }
-                if msg.wparam == 0x0d && focus == (*app).list && !ctrl && !alt {
-                    SendMessageW(window, WM_COMMAND, LIST | (2 << 16), 0);
+                if msg.wparam == 0x0d && focus == (*app).list {
+                    SendMessageW(window, WM_COMMAND, LIST | (2 << 16), (*app).list as isize);
                     continue;
                 }
             }
@@ -1214,6 +2649,6 @@ pub fn run() -> Result<(), String> {
                 DispatchMessageW(&msg);
             }
         }
+        Ok(())
     }
-    Ok(())
 }
