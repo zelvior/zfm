@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Modified: cover the compact layout and tab behavior.
 # Run under xvfb-run with GTK and xdotool installed, using the released binary.
 set -euo pipefail
 if [ "$#" -ne 1 ]; then echo 'Usage: gui-smoke-linux.sh /path/to/zfm' >&2; exit 2; fi
@@ -26,6 +27,17 @@ if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&
 # Exercise the GTK event loop without requiring a window manager.
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
+# Tabs must remain usable without forcing the compact toolbar off-screen.
+xdotool windowsize "$window" 900 600
+for _ in $(seq 1 7); do xdotool key --window "$window" ctrl+t; done
+sleep 1
+width=$(xdotool getwindowgeometry --shell "$window" | sed -n 's/^WIDTH=//p')
+if [ -z "$width" ] || [ "$width" -gt 920 ]; then
+    echo "Tab strip expanded the window unexpectedly (width ${width:-unknown})." >&2
+    cat "$work/stderr" >&2
+    exit 1
+fi
+for _ in $(seq 1 7); do xdotool key --window "$window" ctrl+w; done
 sleep 1
 # Keyboard-triggered background menu should open and dismiss without a GTK critical.
 xdotool key --window "$window" shift+F10

@@ -1,0 +1,31 @@
+/* Compact dark details view, inspired by a traditional file manager. */
+* { background-image: none; }
+window, dialog { background-color: #1d252e; color: #e4e5e6; }
+.zfm-nav { background-color: #202a34; padding: 4px 6px; }
+.zfm-tabs { background-color: #26303a; padding: 3px 6px; border-bottom: 1px solid #41464b; }
+.zfm-sidebar { background-color: #1b2226; border-right: 1px solid #45494c; padding: 4px 2px; }
+.zfm-sidebar-heading { color: #e3e5e7; font-weight: bold; padding: 5px 8px 1px; }
+.zfm-sidebar button { background-color: transparent; border-color: transparent; color: #e3e5e7; padding: 2px 8px; border-radius: 3px; min-height: 18px; }
+.zfm-sidebar button:hover { background-color: #30373b; }
+.zfm-sidebar button.zfm-sidebar-active { background-color: #343a3d; }
+.zfm-col-bar { background-color: #1d1e20; border-bottom: 1px solid #3d3e40; }
+.zfm-col-bar button { background-color: transparent; border: 0; border-right: 1px solid #383a3c; border-radius: 0; color: #dedede; font-weight: normal; padding: 2px 7px; min-height: 18px; }
+.zfm-col-bar button:hover { background-color: #303235; }
+scrolledwindow, list { background-color: #1c1c1c; color: #eeeeee; }
+row { background-color: #1c1c1c; color: #eeeeee; }
+.zfm-row-odd { background-color: #202020; }
+row:hover { background-color: #303234; }
+row:selected, row:selected box, row:selected label { background-color: #3b3b3d; color: #ffffff; }
+.zfm-file-icon { color: #9da1a4; }
+button { background-color: #303943; color: #e4e5e6; border: 1px solid #454b50; border-radius: 4px; padding: 2px 7px; min-height: 20px; box-shadow: none; }
+button:hover { background-color: #404a53; border-color: #667078; }
+button:active, button:checked { background-color: #252c32; color: #ffffff; }
+.zfm-tab-btn { border-radius: 4px; background-color: #29313a; color: #d9dcdf; padding: 2px 7px; }
+.zfm-tab-active, .zfm-tab-btn:disabled { background-color: #3c4248; color: #ffffff; }
+entry { background-color: #252d33; color: #eeeeee; border: 1px solid #454b50; border-radius: 4px; padding: 2px 6px; min-height: 20px; box-shadow: none; }
+entry:focus { border-color: #5c94d0; }
+.zfm-status { background-color: #303132; border-top: 1px solid #494a4b; padding: 5px 12px; color: #e2e2e2; }
+menu, menuitem { background-color: #252930; color: #eeeeee; }
+menuitem:hover { background-color: #38414d; color: #ffffff; }
+separator { background-color: #3d434b; }
+label, checkbutton, radiobutton { color: #e2e2e2; }

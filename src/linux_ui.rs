@@ -1,3 +1,4 @@
+// Modified: compact reference-inspired file-manager layout and visuals.
 //! Minimal GTK 3 adapter. GTK is loaded at runtime so the filesystem core can
 //! be built and tested without GTK headers. All widget calls stay on GTK's
 //! main thread; workers only call GLib's thread-safe g_idle_add.
@@ -85,6 +86,9 @@ api! {
     gtk_check_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
+    gtk_entry_set_width_chars: unsafe extern "C" fn(P, c_int),
+    gtk_image_new_from_icon_name: unsafe extern "C" fn(*const c_char, c_int) -> P,
+    gtk_image_set_from_icon_name: unsafe extern "C" fn(P, *const c_char, c_int),
     gtk_combo_box_text_new: unsafe extern "C" fn() -> P,
     gtk_combo_box_text_append_text: unsafe extern "C" fn(P, *const c_char),
     gtk_combo_box_set_active: unsafe extern "C" fn(P, c_int),
@@ -97,6 +101,7 @@ api! {
     gtk_label_set_xalign: unsafe extern "C" fn(P, f32),
     gtk_label_set_ellipsize: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_new: unsafe extern "C" fn(P, P) -> P,
+    gtk_scrolled_window_set_policy: unsafe extern "C" fn(P, c_int, c_int),
     gtk_list_box_new: unsafe extern "C" fn() -> P,
     gtk_list_box_row_new: unsafe extern "C" fn() -> P,
     gtk_list_box_select_row: unsafe extern "C" fn(P, P),
@@ -144,6 +149,7 @@ api! {
     gtk_style_context_add_provider_for_screen: unsafe extern "C" fn(P, P, c_uint),
     gtk_widget_get_style_context: unsafe extern "C" fn(P) -> P,
     gtk_style_context_add_class: unsafe extern "C" fn(P, *const c_char),
+    gtk_style_context_remove_class: unsafe extern "C" fn(P, *const c_char),
     gdk_screen_get_default: unsafe extern "C" fn() -> P,
     g_object_unref: unsafe extern "C" fn(P),
     g_signal_connect_data: unsafe extern "C" fn(P, *const c_char, P, P, P, c_int) -> usize,
@@ -169,6 +175,7 @@ struct App {
     address: P,
     list: P,
     status: P,
+    status_icon: P,
     hidden: P,
     entries: Vec<Entry>,
     render_index: usize,
@@ -187,6 +194,7 @@ struct App {
     sort_column: SortColumn,
     sort_ascending: bool,
     columns: [P; 4],
+    sidebar_shortcuts: Vec<(PathBuf, P)>,
 }
 struct ResultMessage {
     app: usize,
@@ -285,6 +293,14 @@ unsafe extern "C" fn receive(data: P) -> c_int {
     match msg.result {
         Ok(Some(mut listing)) => {
             app.tabs.current_mut().commit(msg.destination);
+            for (path, widget) in &app.sidebar_shortcuts {
+                let context = (api().gtk_widget_get_style_context)(*widget);
+                if path == app.tabs.current().current() {
+                    (api().gtk_style_context_add_class)(context, c("zfm-sidebar-active").as_ptr());
+                } else {
+                    (api().gtk_style_context_remove_class)(context, c("zfm-sidebar-active").as_ptr());
+                }
+            }
             rebuild_tabs(app);
             app.error = None;
             (api().gtk_entry_set_text)(
@@ -344,22 +360,12 @@ unsafe fn modified(entry: &Entry) -> String {
     }
     String::new()
 }
-fn linux_item_badge(entry: &Entry) -> &'static str {
+fn linux_item_icon(entry: &Entry) -> &'static str {
     match ui_theme::classify_entry_icon(entry) {
-        ItemIcon::Desktop => "🖥",
-        ItemIcon::Documents => "📄",
-        ItemIcon::Downloads => "⬇",
-        ItemIcon::Music => "🎵",
-        ItemIcon::Videos => "🎬",
-        ItemIcon::Contacts => "👤",
-        ItemIcon::Favorites => "⭐",
-        ItemIcon::Links => "↗",
-        ItemIcon::Folder => "📁",
-        ItemIcon::FileArchive => "🗜",
-        ItemIcon::FileMedia => "🖼",
-        ItemIcon::FileCode => "📝",
-        ItemIcon::FileExec => "⚙",
-        _ => "📄",
+        ItemIcon::Desktop | ItemIcon::Documents | ItemIcon::Downloads | ItemIcon::Music
+        | ItemIcon::Videos | ItemIcon::Contacts | ItemIcon::Favorites | ItemIcon::Links
+        | ItemIcon::Folder => "folder-symbolic",
+        _ => "text-x-generic-symbolic",
     }
 }
 unsafe extern "C" fn render_batch(data: P) -> c_int {
@@ -372,12 +378,13 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
     let end = (app.render_index + 64).min(app.entries.len());
     for (offset, entry) in app.entries[app.render_index..end].iter().enumerate() {
         let row_idx = app.render_index + offset;
-        let row = (api().gtk_box_new)(0, 10);
-        (api().gtk_widget_set_margin_start)(row, 12);
-        (api().gtk_widget_set_margin_end)(row, 12);
-        (api().gtk_widget_set_margin_top)(row, 5);
-        (api().gtk_widget_set_margin_bottom)(row, 5);
-        let kind = label(linux_item_badge(entry));
+        let row = (api().gtk_box_new)(0, 6);
+        (api().gtk_widget_set_margin_start)(row, 8);
+        (api().gtk_widget_set_margin_end)(row, 8);
+        (api().gtk_widget_set_margin_top)(row, 1);
+        (api().gtk_widget_set_margin_bottom)(row, 1);
+        let kind = (api().gtk_image_new_from_icon_name)(c(linux_item_icon(entry)).as_ptr(), 1);
+        add_class(kind, "zfm-file-icon");
         let name = label(&entry.name);
         (api().gtk_label_set_xalign)(name, 0.0);
         (api().gtk_label_set_ellipsize)(name, 3);
@@ -513,7 +520,7 @@ unsafe fn apply_linux_sort(p: P, col: SortColumn) {
     }
     for (widget, column, label) in [
         (app.columns[0], SortColumn::Name, "Name"),
-        (app.columns[1], SortColumn::Modified, "Date Modified"),
+        (app.columns[1], SortColumn::Modified, "Date"),
         (app.columns[2], SortColumn::Kind, "Type"),
         (app.columns[3], SortColumn::Size, "Size"),
     ] {
@@ -637,24 +644,18 @@ unsafe fn selected_rows(list: P) -> Vec<P> {
 unsafe extern "C" fn selection_changed(_: P, data: P) {
     let app = &*(data as *mut App);
     let rows = selected_rows(app.list);
-    let path = if rows.len() == 1 {
+    if rows.len() == 1 {
         let i = (api().gtk_list_box_row_get_index)(rows[0]);
-        app.entries
-            .get(i as usize)
-            .map(|e| e.path.as_path())
-            .unwrap_or(app.tabs.current().current())
-    } else {
-        app.tabs.current().current()
-    };
-    set_status(
-        app,
-        &format!(
-            "{} items   |   Selected: {}   |   Path: {}",
-            app.entries.len(),
-            rows.len(),
-            path.display()
-        ),
-    );
+        if let Some(entry) = app.entries.get(i as usize) {
+            (api().gtk_image_set_from_icon_name)(app.status_icon, c(linux_item_icon(entry)).as_ptr(), 6);
+            set_status(app, &format!("{}   Date modified: {}\n{}   ·   {} items   ·   {}",
+                entry.name, modified(entry), ui_theme::entry_type_label(entry), app.entries.len(), entry.path.display()));
+            return;
+        }
+    }
+    (api().gtk_image_set_from_icon_name)(app.status_icon, c("folder-symbolic").as_ptr(), 6);
+    set_status(app, &format!("{}\n{} items   ·   {} selected",
+        app.tabs.current().current().display(), app.entries.len(), rows.len()));
 }
 unsafe fn focus_entry(entry: P) {
     (api().gtk_widget_grab_focus)(entry);
@@ -974,6 +975,23 @@ unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     (api().gtk_menu_shell_append)(menu, item);
     connect(item, "activate", callback, data);
 }
+unsafe extern "C" fn organize_menu(widget: P, data: P) {
+    let menu = (api().gtk_menu_new)();
+    for (title, callback) in [
+        ("New file…", new_file as P), ("New folder…", new_folder as P),
+        ("Rename…", rename as P), ("Move to trash", move_to_trash as P),
+        ("Delete permanently…", delete_permanently as P),
+        ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
+        ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
+        ("Cancel copy", cancel_operation as P),
+    ] {
+        menu_action(menu, title, callback, data);
+    }
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    (api().gtk_menu_popup_at_widget)(menu, widget, 6, 2, ptr::null_mut());
+}
+
 struct Shortcut {
     app: usize,
     path: PathBuf,
@@ -1020,8 +1038,8 @@ pub fn run() -> Result<(), String> {
             return Err("could not connect to a graphical display".into());
         }
         let css = (api().gtk_css_provider_new)();
-        // Dark-slate desktop theme matching the ZFM file manager design.
-        let style = c("* { background-image: none; } window, dialog { background-color: #1d252e; color: #ecf1f6; } .zfm-header { background-color: #1d252e; padding: 6px 14px 2px 14px; } .zfm-brand { color: #ecf1f6; font-weight: bold; font-size: 18pt; } .zfm-subtitle { color: #9aa3ae; font-size: 9.5pt; } .zfm-nav { background-color: #212a34; padding: 4px 14px 8px 14px; } .zfm-tabs { background-color: #212933; padding: 4px 14px 0 14px; border-bottom: 1px solid #4f5761; } .zfm-deck { background-color: #29303a; padding: 5px 14px; border-bottom: 1px solid #3d434b; } .zfm-sidebar { background-color: #212426; border-right: 2px solid #565a60; padding: 8px 6px; } .zfm-sidebar button { background-color: transparent; border-color: transparent; color: #ecf1f6; padding: 6px 10px; border-radius: 5px; } .zfm-sidebar button:hover { background-color: #2d3238; border-color: #3d434b; } .zfm-col-bar { background-color: #252629; border-bottom: 1px solid #3d434b; padding: 2px 8px; } .zfm-col-bar button { background-color: transparent; border-color: transparent; color: #d8dfe7; font-weight: bold; border-radius: 4px; padding: 5px 8px; } .zfm-col-bar button:hover { background-color: #2e3136; } scrolledwindow, list { background-color: #1f2022; color: #ecf1f6; } row { background-color: #1f2022; color: #ecf1f6; border-bottom: 1px solid #2c2e32; } .zfm-row-odd { background-color: #242628; } row:hover { background-color: #2b2f35; } row:selected, row:selected box, row:selected label { background-color: #34383e; color: #ecf1f6; border-radius: 5px; } button { background-color: #323841; color: #ecf1f6; border: 1px solid #4f5761; border-radius: 6px; padding: 5px 10px; box-shadow: none; } button:hover { background-color: #3e4652; border-color: #66707c; } button:active, button:checked { background-color: #24282e; color: #ffffff; } .zfm-tab-btn { border-radius: 6px 6px 0 0; border-bottom-width: 0; background-color: #1e2329; color: #9aa3ae; padding: 6px 12px; } .zfm-tab-active, .zfm-tab-btn:disabled { background-color: #2e333a; color: #ecf1f6; font-weight: bold; } entry { background-color: #313b44; color: #ecf1f6; border: 1px solid #4f5761; border-radius: 6px; padding: 5px 8px; box-shadow: none; } entry:focus { border: 1px solid #5c94d0; } .zfm-status { background-color: #212327; border-top: 1px solid #3d434b; padding: 6px 14px; color: #d8dfe7; } menu, menuitem { background-color: #252930; color: #ecf1f6; } menuitem:hover { background-color: #38414d; color: #ffffff; } separator { background-color: #3d434b; } label, checkbutton, radiobutton { color: #d8dfe7; } ");
+        // Keep the compact desktop theme separate from widget construction.
+        let style = c(include_str!("linux-theme.css"));
         (api().gtk_css_provider_load_from_data)(css, style.as_ptr(), -1, ptr::null_mut());
         (api().gtk_style_context_add_provider_for_screen)(
             (api().gdk_screen_get_default)(),
@@ -1036,43 +1054,24 @@ pub fn run() -> Result<(), String> {
         let outer = (api().gtk_box_new)(1, 0);
         (api().gtk_container_add)(window, outer);
 
-        // Brand lockup row
-        let brand_row = (api().gtk_box_new)(0, 10);
-        add_class(brand_row, "zfm-header");
-        let brand = label("ZFM");
-        add_class(brand, "zfm-brand");
-        let subtitle = label("FILE MANAGER");
-        add_class(subtitle, "zfm-subtitle");
-        (api().gtk_box_pack_start)(brand_row, brand, 0, 0, 0);
-        (api().gtk_box_pack_start)(brand_row, subtitle, 0, 0, 0);
-        (api().gtk_box_pack_start)(outer, brand_row, 0, 0, 0);
-
-        // Navigation & address bar row
-        let top = (api().gtk_box_new)(0, 6);
+        // Navigation/address/search and a compact command/tab strip.
+        let top = (api().gtk_box_new)(0, 4);
         add_class(top, "zfm-nav");
         (api().gtk_box_pack_start)(outer, top, 0, 0, 0);
-
-        // Browser-style tab row
         let tabs_row = (api().gtk_box_new)(0, 4);
         add_class(tabs_row, "zfm-tabs");
         (api().gtk_box_pack_start)(outer, tabs_row, 0, 0, 0);
         let tab_strip = (api().gtk_box_new)(0, 4);
 
-        // Filter & operations deck
-        let search = (api().gtk_box_new)(0, 6);
-        add_class(search, "zfm-deck");
-        (api().gtk_box_pack_start)(outer, search, 0, 0, 0);
-        let operations = (api().gtk_box_new)(0, 6);
-        add_class(operations, "zfm-deck");
-        (api().gtk_box_pack_start)(outer, operations, 0, 0, 0);
-
         // Split workspace: left sidebar + right table pane
         let content = (api().gtk_box_new)(0, 0);
         (api().gtk_box_pack_start)(outer, content, 1, 1, 0);
-        let sidebar = (api().gtk_box_new)(1, 2);
+        let sidebar_scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        (api().gtk_widget_set_size_request)(sidebar_scroll, 150, -1);
+        (api().gtk_box_pack_start)(content, sidebar_scroll, 0, 0, 0);
+        let sidebar = (api().gtk_box_new)(1, 0);
         add_class(sidebar, "zfm-sidebar");
-        (api().gtk_widget_set_size_request)(sidebar, 210, -1);
-        (api().gtk_box_pack_start)(content, sidebar, 0, 0, 0);
+        (api().gtk_container_add)(sidebar_scroll, sidebar);
 
         let right_pane = (api().gtk_box_new)(1, 0);
         (api().gtk_box_pack_start)(content, right_pane, 1, 1, 0);
@@ -1090,8 +1089,12 @@ pub fn run() -> Result<(), String> {
 
         let status_box = (api().gtk_box_new)(0, 0);
         add_class(status_box, "zfm-status");
+        let status_icon = (api().gtk_image_new_from_icon_name)(c("folder-symbolic").as_ptr(), 6);
+        add_class(status_icon, "zfm-file-icon");
+        (api().gtk_box_pack_start)(status_box, status_icon, 0, 0, 8);
         let status = label("Ready");
         (api().gtk_label_set_xalign)(status, 0.0);
+        (api().gtk_label_set_ellipsize)(status, 3);
         (api().gtk_box_pack_start)(status_box, status, 1, 1, 0);
         (api().gtk_box_pack_start)(outer, status_box, 0, 0, 0);
 
@@ -1114,6 +1117,7 @@ pub fn run() -> Result<(), String> {
             address: ptr::null_mut(),
             list,
             status,
+            status_icon,
             hidden: ptr::null_mut(),
             entries: Vec::new(),
             render_index: 0,
@@ -1132,79 +1136,76 @@ pub fn run() -> Result<(), String> {
             sort_column: SortColumn::Name,
             sort_ascending: true,
             columns: [ptr::null_mut(); 4],
+            sidebar_shortcuts: Vec::new(),
         }));
         let p = app as P;
 
-        // Tab strip controls
-        (*app).tab_strip = tab_strip;
-        let new_tab_btn = button(tabs_row, "🗀 New tab", new_tab as P, p);
+        // Frequently used actions are visible; the rest remain in Organize.
+        button(tabs_row, "Organize ▾", organize_menu as P, p);
+        button(tabs_row, "New folder", new_folder as P, p);
+        button(tabs_row, "New file", new_file as P, p);
+        let new_tab_btn = button(tabs_row, "+ New tab", new_tab as P, p);
         add_class(new_tab_btn, "zfm-tab-btn");
-        add_class(new_tab_btn, "zfm-tab-active");
         let close_tab_btn = button(tabs_row, "× Close tab", close_tab as P, p);
         add_class(close_tab_btn, "zfm-tab-btn");
-        let tab_background = (api().gtk_event_box_new)();
-        (api().gtk_container_add)(tab_background, tab_strip);
-        (api().gtk_box_pack_start)(tabs_row, tab_background, 1, 1, 0);
-        (api().gtk_widget_add_events)(tab_background, 1 << 8);
-        connect(
-            tab_background,
-            "button-press-event",
-            tab_background_button as P,
-            p,
-        );
-        rebuild_tabs(&*app);
-
-        // Filter row
-        (api().gtk_box_pack_start)(search, label("Filter:"), 0, 0, 0);
-        let search_entry = (api().gtk_entry_new)();
-        (*app).search_entry = search_entry;
-        (api().gtk_entry_set_placeholder_text)(search_entry, c("Filter").as_ptr());
-        (api().gtk_box_pack_start)(search, search_entry, 1, 1, 0);
-        connect(search_entry, "activate", search_apply as P, p);
-        button(search, "🔍 Search", search_apply as P, p);
-        button(search, "Clear", search_clear as P, p);
         let case_toggle = (api().gtk_check_button_new_with_label)(c("Case").as_ptr());
         (*app).case_toggle = case_toggle;
-        (api().gtk_box_pack_start)(search, case_toggle, 0, 0, 0);
-        let hidden = (api().gtk_check_button_new_with_label)(c("Show hidden").as_ptr());
+        (api().gtk_box_pack_start)(tabs_row, case_toggle, 0, 0, 0);
+        let hidden = (api().gtk_check_button_new_with_label)(c("Hidden").as_ptr());
         (*app).hidden = hidden;
-        (api().gtk_box_pack_start)(search, hidden, 0, 0, 0);
+        (api().gtk_box_pack_start)(tabs_row, hidden, 0, 0, 0);
         connect(hidden, "toggled", refresh as P, p);
+        (*app).tab_strip = tab_strip;
+        let tab_background = (api().gtk_event_box_new)();
+        (api().gtk_container_add)(tab_background, tab_strip);
+        // Many tabs must not force the main window wider than the screen.
+        let tab_scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        (api().gtk_scrolled_window_set_policy)(tab_scroll, 1, 2); // automatic / never
+        (api().gtk_widget_set_size_request)(tab_scroll, 72, -1);
+        (api().gtk_container_add)(tab_scroll, tab_background);
+        (api().gtk_box_pack_start)(tabs_row, tab_scroll, 1, 1, 0);
+        (api().gtk_widget_add_events)(tab_background, 1 << 8);
+        connect(tab_background, "button-press-event", tab_background_button as P, p);
+        rebuild_tabs(&*app);
 
-        // Operations row
-        button(operations, "📄 New file", new_file as P, p);
-        button(operations, "📁 New folder", new_folder as P, p);
-        button(operations, "✎ Rename…", rename as P, p);
-        button(operations, "🗑 Delete…", delete_permanently as P, p);
-        button(operations, "Trash", move_to_trash as P, p);
-        button(operations, "Paste", paste_from_clipboard as P, p);
-        button(operations, "Copy to…", copy_to as P, p);
-        button(operations, "Move to…", move_to as P, p);
-        button(operations, "Duplicate…", duplicate as P, p);
-        button(operations, "Cancel copy", cancel_operation as P, p);
-
-        // Navigation row
-        button(top, "←", back as P, p);
-        button(top, "→", forward as P, p);
-        button(top, "↑", up as P, p);
-        button(top, "⤒", go_root as P, p);
-        button(top, "↻", refresh as P, p);
+        // Navigation and search share the top line, as in the reference.
+        for (caption, callback, tooltip) in [
+            ("←", back as P, "Back"), ("→", forward as P, "Forward"),
+            ("↑", up as P, "Parent folder"), ("⌂", go_root as P, "Root"),
+            ("↻", refresh as P, "Refresh"),
+        ] {
+            let nav = button(top, caption, callback, p);
+            (api().gtk_widget_set_tooltip_text)(nav, c(tooltip).as_ptr());
+        }
         let entry = (api().gtk_entry_new)();
         (*app).address = entry;
+        (api().gtk_entry_set_width_chars)(entry, 12);
         (api().gtk_box_pack_start)(top, entry, 1, 1, 0);
         connect(entry, "activate", address as P, p);
-        button(top, "|→ Go", go_address as P, p);
+        button(top, "Go", go_address as P, p);
+        let search_entry = (api().gtk_entry_new)();
+        (*app).search_entry = search_entry;
+        (api().gtk_entry_set_width_chars)(search_entry, 12);
+        (api().gtk_entry_set_placeholder_text)(search_entry, c("Search this folder").as_ptr());
+        (api().gtk_box_pack_start)(top, search_entry, 0, 0, 0);
+        connect(search_entry, "activate", search_apply as P, p);
+        button(top, "Search", search_apply as P, p);
+        button(top, "Clear", search_clear as P, p);
 
         // Sortable column header bar
         let col_name = button(col_bar, "Name ▲", sort_by_name as P, p);
         (api().gtk_widget_set_hexpand)(col_name, 1);
-        let col_mod = button(col_bar, "Date Modified", sort_by_modified as P, p);
+        let col_mod = button(col_bar, "Date", sort_by_modified as P, p);
         (api().gtk_widget_set_size_request)(col_mod, 175, -1);
         let col_type = button(col_bar, "Type", sort_by_type as P, p);
         (api().gtk_widget_set_size_request)(col_type, 135, -1);
         let col_size = button(col_bar, "Size", sort_by_size as P, p);
         (api().gtk_widget_set_size_request)(col_size, 86, -1);
 
+        for col in [col_name, col_mod, col_type, col_size] {
+            let child = (api().gtk_bin_get_child)(col);
+            if !child.is_null() { (api().gtk_label_set_xalign)(child, 0.0); }
+        }
         (*app).columns = [col_name, col_mod, col_type, col_size];
         connect(list, "row-activated", row_activated as P, p);
         connect(list, "selected-rows-changed", selection_changed as P, p);
@@ -1213,37 +1214,45 @@ pub fn run() -> Result<(), String> {
         connect(window, "destroy", quit as P, p);
         connect(window, "key-press-event", key_press as P, p);
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            for (name, path) in [
-                ("› 🖥  Desktop", home.join("Desktop")),
-                ("› 📄  Documents", home.join("Documents")),
-                ("› ⬇  Downloads", home.join("Downloads")),
-                ("› 🎵  Music", home.join("Music")),
-                ("› 🎬  Videos", home.join("Videos")),
-                ("⌄ 🖴  Drives — /", PathBuf::from("/")),
-                ("   💽  Home", home.clone()),
+            // Headings are presentation only; every shortcut remains a real path.
+            for (heading, shortcuts) in [
+                ("★  Favorites", vec![
+                    ("  ▣  Desktop", home.join("Desktop")),
+                    ("  ↓  Downloads", home.join("Downloads")),
+                ]),
+                ("▣  Libraries", vec![
+                    ("  ▤  Documents", home.join("Documents")),
+                    ("  ♫  Music", home.join("Music")),
+                    ("  ▧  Pictures", home.join("Pictures")),
+                    ("  ▷  Videos", home.join("Videos")),
+                    ("  ▰  Home", home.clone()),
+                ]),
+                ("▣  Computer", vec![("  ▰  Filesystem", PathBuf::from("/"))]),
             ] {
-                let data = Box::into_raw(Box::new(Shortcut {
-                    app: app as usize,
-                    path,
-                })) as P;
-                let b = button(sidebar, name, shortcut as P, data);
-                (api().gtk_widget_add_events)(b, 1 << 8);
-                connect(b, "button-press-event", sidebar_button as P, data);
-                let child_lbl = (api().gtk_bin_get_child)(b);
-                if !child_lbl.is_null() {
-                    (api().gtk_label_set_xalign)(child_lbl, 0.0);
+                let group = label(heading);
+                add_class(group, "zfm-sidebar-heading");
+                (api().gtk_label_set_xalign)(group, 0.0);
+                (api().gtk_box_pack_start)(sidebar, group, 0, 0, 0);
+                for (name, path) in shortcuts {
+                    let data = Box::into_raw(Box::new(Shortcut {
+                        app: app as usize, path: path.clone(),
+                    })) as P;
+                    let b = button(sidebar, name, shortcut as P, data);
+                    (*app).sidebar_shortcuts.push((path, b));
+                    (api().gtk_widget_add_events)(b, 1 << 8);
+                    connect(b, "button-press-event", sidebar_button as P, data);
+                    let child_lbl = (api().gtk_bin_get_child)(b);
+                    if !child_lbl.is_null() { (api().gtk_label_set_xalign)(child_lbl, 0.0); }
                 }
             }
         }
         for (caption, cb) in [
             ("⚙  Converter", show_converter as P),
-            ("🗜  Archives", show_archive as P),
+            ("▣  Archives", show_archive as P),
         ] {
             let b = button(sidebar, caption, cb, p);
             let child_lbl = (api().gtk_bin_get_child)(b);
-            if !child_lbl.is_null() {
-                (api().gtk_label_set_xalign)(child_lbl, 0.0);
-            }
+            if !child_lbl.is_null() { (api().gtk_label_set_xalign)(child_lbl, 0.0); }
         }
         (*app).converter = create_converter(window);
         (*app).archive_manager = create_archive_manager(window);
@@ -2062,7 +2071,7 @@ unsafe fn rebuild_tabs(app: &App) {
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| path.display().to_string());
-        let widget = (api().gtk_button_new_with_label)(c(&format!("📁 {name}")).as_ptr());
+        let widget = (api().gtk_button_new_with_label)(c(&name).as_ptr());
         add_class(widget, "zfm-tab-btn");
         (api().gtk_widget_set_tooltip_text)(widget, c(&path.to_string_lossy()).as_ptr());
         if index == app.tabs.active() {
