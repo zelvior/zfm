@@ -30,6 +30,8 @@ public static class ZfmSmoke {
     public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, string text);
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+    public static extern IntPtr GetControlText(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
 }
 '@
 }
@@ -142,8 +144,9 @@ try {
     $previewEdit = [ZfmSmoke]::GetDlgItem($preview, 1001)
     if ($previewEdit -eq [IntPtr]::Zero -or (([ZfmSmoke]::GetWindowLongW($previewEdit, -16) -band 0x0800) -eq 0)) { throw 'Preview is not read-only.' }
     $previewText = New-Object System.Text.StringBuilder 256
-    [void][ZfmSmoke]::GetWindowTextW($previewEdit, $previewText, $previewText.Capacity)
-    if ($previewText.ToString() -notmatch 'GUI smoke fixture') { throw 'Preview text is incorrect.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::GetControlText($previewEdit, 0x000D, [UIntPtr]$previewText.Capacity, $previewText, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read preview text.' }
+    if ($previewText.ToString() -notmatch 'GUI smoke fixture') { throw "Preview text is incorrect: $previewText" }
     if (-not [ZfmSmoke]::PostMessageW($preview, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close preview.' }
     # Clear the selection after the preview.
     $result = [UIntPtr]::Zero
