@@ -2249,6 +2249,7 @@ enum Operation {
     Copy(PathBuf, PathBuf, OsString),
     Move(PathBuf, PathBuf),
     CopyItems(Vec<PathBuf>, PathBuf),
+    MoveItems(Vec<PathBuf>, PathBuf),
     Trash(PathBuf, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
@@ -2287,6 +2288,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                         .map(|p| format!("Copied to {}", p.display()))
                 }
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
+                    .map(|result| result.message(paths.len())),
+                Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
                     .map(|result| result.message(paths.len())),
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
                     .map(|p| format!("Moved to {}", p.display())),
@@ -3510,9 +3513,8 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 COPY_TO | MOVE_TO if code == 0 => {
                     let selected = selected_indices(app);
-                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS
-                        || (id == MOVE_TO && selected.len() != 1) {
-                        set_status(hwnd, app, Some(if id == MOVE_TO { "Move supports exactly one item." } else { "Select between 1 and 1024 files or folders to copy." }.into()));
+                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS {
+                        set_status(hwnd, app, Some(if id == MOVE_TO { "Select between 1 and 1024 items to move." } else { "Select between 1 and 1024 files or folders to copy." }.into()));
                         return 0;
                     }
                     if id == COPY_TO && selected.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
@@ -3528,7 +3530,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         show_error(hwnd, "Choose an existing absolute destination folder."); return 0;
                     }
                     if id == COPY_TO { start_operation(hwnd, app, Operation::CopyItems(paths, destination)); }
-                    else { start_operation(hwnd, app, Operation::Move(paths[0].clone(), destination)); }
+                    else { start_operation(hwnd, app, Operation::MoveItems(paths, destination)); }
                 }
                 DUPLICATE if code == 0 => {
                     if let Some(path) = selected_path(hwnd, app) {

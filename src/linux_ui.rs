@@ -1916,6 +1916,7 @@ enum Operation {
     Rename(PathBuf, String),
     Duplicate(PathBuf, String),
     CopyItems(Vec<PathBuf>, PathBuf),
+    MoveItems(Vec<PathBuf>, PathBuf),
     MoveTo(PathBuf, PathBuf),
     Trash(PathBuf),
     Delete(PathBuf),
@@ -1995,6 +1996,9 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
+            }
+            Operation::MoveItems(paths, destination) => {
+                operations::move_items(&paths, &destination, &cancel, |_| {}).map(|result| result.message(paths.len()))
             }
             Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
                 .map(|p| format!("Moved to {}", p.display())),
@@ -2166,15 +2170,32 @@ unsafe extern "C" fn copy_to(_: P, data: P) {
     }
 }
 unsafe extern "C" fn move_to(_: P, data: P) {
-    let path = match selected_path(data) {
-        Some(p) => p,
-        None => return,
-    };
-    let parent = (*(data as *mut App)).window;
-    let alive = (*(data as *mut App)).alive.clone();
-    let source_dir = path.parent().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf();
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS {
+        set_status(app, "Select between 1 and 1024 items to move."); return;
+    }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) => paths.push(entry.path.clone()),
+            None => { set_status(app, "The selection changed; select the items again."); return; }
+        }
+    }
+    let parent = app.window;
+    let alive = app.alive.clone();
+    let source_dir = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
     if let Some(destination) = choose_folder(parent) {
-        if alive.load(Ordering::Relaxed) { start_operation(data, source_dir, Operation::MoveTo(path, destination)); }
+        if alive.load(Ordering::Relaxed) {
+            let app = &*(data as *mut App);
+            if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != source_dir {
+                set_status(app, "Move cancelled because the view changed; select the items again.");
+                return;
+            }
+            start_operation(data, source_dir, Operation::MoveItems(paths, destination));
+        }
     }
 }
 unsafe extern "C" fn move_to_trash(_: P, data: P) {

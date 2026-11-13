@@ -159,6 +159,9 @@ pub fn move_into(source: &Path, directory: &Path) -> io::Result<PathBuf> {
         .ok_or_else(|| invalid("Source has no filename"))?;
     validate_name(name)?;
     let dest = directory.join(name);
+    if path_within(source, &dest) && path_within(&dest, source) {
+        return Err(invalid("The item is already in the destination folder"));
+    }
     rename_no_replace(source, &dest)?;
     Ok(dest)
 }
@@ -627,6 +630,69 @@ pub fn copy_items(
     })
 }
 
+/// A same-filesystem batch move stops at the first error or cancellation.
+/// Earlier moves remain in place; there is no rollback or overwrite.
+#[derive(Debug)]
+pub struct BatchMoveResult {
+    pub completed: usize,
+    pub failure: Option<(PathBuf, String)>,
+}
+impl BatchMoveResult {
+    pub fn message(&self, total: usize) -> String {
+        match &self.failure {
+            Some((path, error)) => format!(
+                "Moved {} of {total} items; stopped at {}: {error}. Remaining items were not moved.",
+                self.completed, path.display()
+            ),
+            None => format!("Moved {} items.", self.completed),
+        }
+    }
+}
+
+/// Move up to 1024 absolute, non-overlapping paths without replacement. Moves
+/// are atomic per item, not as a batch, and cannot cross filesystems. `cancel`
+/// is checked between renames; a blocked filesystem operation cannot be stopped.
+/// Lexical overlap checks are not a defense against aliases or concurrent path
+/// changes: source and destination directories must be trusted.
+pub fn move_items<F: FnMut(usize)>(
+    paths: &[PathBuf], destination: &Path, cancel: &AtomicBool, mut progress: F,
+) -> io::Result<BatchMoveResult> {
+    if paths.is_empty() || paths.len() > MAX_COPY_ITEMS {
+        return Err(invalid("Select between 1 and 1024 items to move"));
+    }
+    let valid_path = |path: &Path| path.is_absolute() && path.file_name().is_some()
+        && !path.components().any(|c| matches!(c, Component::ParentDir));
+    if !destination.is_absolute() || destination.components().any(|c| matches!(c, Component::ParentDir))
+        || paths.iter().any(|p| !valid_path(p)) {
+        return Err(invalid("Move paths must be absolute and must not contain parent components"));
+    }
+    // Prevent moving a selected parent and its selected child in either order,
+    // including case-insensitive comparisons on Windows.
+    for (i, path) in paths.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BatchMoveResult { completed: 0, failure: Some((paths[0].clone(), "Move cancelled".into())) });
+        }
+        if path_within(destination, path) {
+            return Err(invalid("The destination must not be inside a selected item"));
+        }
+        if paths[..i].iter().any(|other| path_within(path, other) || path_within(other, path)) {
+            return Err(invalid("Selected move paths must be distinct and must not contain one another"));
+        }
+    }
+    let mut completed = 0;
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BatchMoveResult { completed, failure: Some((path.clone(), "Move cancelled".into())) });
+        }
+        if let Err(error) = move_into(path, destination) {
+            return Ok(BatchMoveResult { completed, failure: Some((path.clone(), error.to_string())) });
+        }
+        completed += 1;
+        progress(completed);
+    }
+    Ok(BatchMoveResult { completed, failure: None })
+}
+
 /// Permanently remove a file/symlink or an *empty* folder. Never recurse or
 /// follow the final symlink. Confirmation is the caller's responsibility.
 pub fn remove_one(path: &Path) -> io::Result<()> {
@@ -1038,6 +1104,80 @@ mod tests {
             &cancel
         )
         .is_err());
+    }
+
+    #[test]
+    fn batch_move_stops_on_conflict_without_losing_items() {
+        let t = Temp::new();
+        let source = t.0.join("source"); let target = t.0.join("target");
+        fs::create_dir(&source).unwrap(); fs::create_dir(&target).unwrap();
+        fs::write(source.join("first"), b"first").unwrap();
+        fs::create_dir(source.join("folder")).unwrap();
+        fs::write(source.join("folder/nested"), b"nested").unwrap();
+        fs::write(source.join("last"), b"last").unwrap();
+        fs::write(target.join("last"), b"keep").unwrap();
+        let paths = vec![source.join("first"), source.join("folder"), source.join("last")];
+        let result = move_items(&paths, &target, &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(result.completed, 2);
+        assert_eq!(result.failure.as_ref().unwrap().0, paths[2]);
+        assert!(result.message(3).contains("Moved 2 of 3"));
+        assert_eq!(fs::read(target.join("first")).unwrap(), b"first");
+        assert_eq!(fs::read(target.join("folder/nested")).unwrap(), b"nested");
+        assert_eq!(fs::read(target.join("last")).unwrap(), b"keep");
+        assert_eq!(fs::read(source.join("last")).unwrap(), b"last");
+        assert!(!source.join("first").exists());
+    }
+    #[test]
+    fn batch_move_cancel_and_preflight_reject_overlaps() {
+        let t = Temp::new(); let source = t.0.join("source"); let target = t.0.join("target");
+        fs::create_dir(&source).unwrap(); fs::create_dir(&target).unwrap();
+        fs::create_dir_all(source.join("folder/child")).unwrap();
+        fs::write(source.join("one"), b"1").unwrap(); fs::write(source.join("two"), b"2").unwrap();
+        let folder = source.join("folder"); let child = folder.join("child");
+        let cancel = AtomicBool::new(false);
+        assert!(move_items(&[], &target, &cancel, |_| {}).is_err());
+        assert!(move_items(&[folder.clone(), folder.clone()], &target, &cancel, |_| {}).is_err());
+        assert!(move_items(&[folder.clone(), child.clone()], &target, &cancel, |_| {}).is_err());
+        assert!(move_items(&[child.clone(), folder.clone()], &target, &cancel, |_| {}).is_err());
+        assert!(move_items(&[folder.clone()], &child, &cancel, |_| {}).is_err());
+        assert!(move_items(&[PathBuf::from("relative")], &target, &cancel, |_| {}).is_err());
+        assert!(move_items(&[folder.clone()], &source.join("../target"), &cancel, |_| {}).is_err());
+        assert!(move_items(&vec![folder.clone(); MAX_COPY_ITEMS + 1], &target, &cancel, |_| {}).is_err());
+        assert!(folder.is_dir());
+        let paths = [source.join("one"), source.join("two")];
+        let result = move_items(&paths, &target, &cancel, |_| cancel.store(true, Ordering::Relaxed)).unwrap();
+        assert_eq!(result.completed, 1);
+        assert!(result.failure.unwrap().1.contains("cancelled"));
+        assert!(target.join("one").exists()); assert!(source.join("two").exists());
+        let result = move_items(&[source.join("two")], &target, &cancel, |_| {}).unwrap();
+        assert_eq!(result.completed, 0); assert!(source.join("two").exists());
+    }
+    #[test]
+    fn batch_move_same_folder_is_a_conflict_and_never_overwrites() {
+        let t = Temp::new(); let item = t.0.join("item");
+        fs::write(&item, b"keep").unwrap();
+        let result = move_items(&[item.clone()], &t.0, &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(result.completed, 0); assert!(result.failure.is_some());
+        assert_eq!(fs::read(item).unwrap(), b"keep");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn batch_move_rejects_case_insensitive_overlaps() {
+        let t = Temp::new(); let parent = t.0.join("Folder");
+        fs::create_dir(&parent).unwrap();
+        let alias = t.0.join("folder").join("child");
+        assert!(move_items(&[parent, alias], &t.0, &AtomicBool::new(false), |_| {}).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn batch_move_moves_the_symlink_not_its_target() {
+        let t = Temp::new(); let target = t.0.join("target"); fs::create_dir(&target).unwrap();
+        let original = t.0.join("original"); fs::write(&original, b"keep").unwrap();
+        let link = t.0.join("link"); std::os::unix::fs::symlink(&original, &link).unwrap();
+        let result = move_items(&[link.clone()], &target, &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(result.completed, 1); assert!(result.failure.is_none());
+        assert!(!link.exists()); assert!(fs::symlink_metadata(target.join("link")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(original).unwrap(), b"keep");
     }
 
     #[test]
