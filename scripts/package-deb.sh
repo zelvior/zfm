@@ -34,7 +34,7 @@ Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Maintainer: ZFM contributors
+Maintainer: Zelvior Labs
 Depends: libc6 (>= 2.27), libgtk-3-0 (>= 3.22), libarchive13, xdg-utils
 Description: lightweight native file manager
  ZFM is a native desktop file manager with navigation and file operations.

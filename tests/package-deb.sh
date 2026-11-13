@@ -13,6 +13,7 @@ for spec in '32 i686-unknown-linux-gnu i386' '64 x86_64-unknown-linux-gnu amd64'
     read -r bits target arch <<< "$spec"
     "$root/scripts/package-deb.sh" "$tmp/$bits" "$target" v1.2.3-rc_1 "$tmp/$arch.deb"
     [ "$(dpkg-deb -f "$tmp/$arch.deb" Architecture)" = "$arch" ]
+    [ "$(dpkg-deb -f "$tmp/$arch.deb" Maintainer)" = "Zelvior Labs" ]
     [ "$(dpkg-deb -f "$tmp/$arch.deb" Version)" = '1.2.3~rc.1' ]
     dpkg-deb -f "$tmp/$arch.deb" Depends | grep -q 'libgtk-3-0 (>= 3.22)'
     dpkg-deb -x "$tmp/$arch.deb" "$tmp/unpacked-$arch"

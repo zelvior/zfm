@@ -24,7 +24,7 @@ pub const README: &str = include_str!(env!("ZFM_README_PATH"));
 pub const VERSION: &str = env!("ZFM_VERSION");
 
 pub const APP_NAME: &str = "ZFM File Manager";
-pub const PUBLISHER: &str = "ZFM contributors";
+pub const PUBLISHER: &str = "Zelvior Labs";
 
 /// Every file the installer creates. The uninstaller removes exactly these and
 /// never touches anything else in the selected folder.
