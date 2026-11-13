@@ -208,7 +208,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         let caption = CreateWindowExW(
             0,
             text("STATIC").as_ptr(),
-            text(if state.password { "Password:" } else { "Name:" }).as_ptr(),
+            text(if state.password { "Password:" } else if String::from_utf16_lossy(&state.title).to_lowercase().contains("folder") { "Folder:" } else { "Name:" }).as_ptr(),
             WS_CHILD | WS_VISIBLE,
             16,
             15,
@@ -237,7 +237,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0,
             text("BUTTON").as_ptr(),
             text("OK").as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | 1,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 190,
             84,
             80,
@@ -251,7 +251,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0,
             text("BUTTON").as_ptr(),
             text("Cancel").as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 96,
             84,
             80,
@@ -264,6 +264,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         for control in [caption, state.edit, ok, cancel] {
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
         }
+        SendMessageW(hwnd, 0x0401, 1, 0); // DM_SETDEFID
         SetFocus(state.edit);
         let end = if state.select_stem {
             Path::new(&state.initial)
@@ -298,6 +299,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             EndDialog(hwnd, 0);
             1
         }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button((*state).theme, &*(lp as *const DrawItem)),
         0x0136 => (*(*state).theme).window_brush as isize,
         WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
@@ -370,4 +372,65 @@ unsafe fn prompt_inner(
         show_error(hwnd, "Could not open the name dialog.");
     }
     state.result
+}
+
+struct ConfirmDialog {
+    theme: *const Theme,
+    title: Vec<u16>,
+    message: Vec<u16>,
+    accepted: bool,
+    affirmative: &'static str,
+    has_cancel: bool,
+}
+unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
+    if msg == 0x0110 { // WM_INITDIALOG
+        let state = &mut *(lp as *mut ConfirmDialog);
+        set_data(hwnd, lp);
+        SetWindowTextW(hwnd, state.title.as_ptr());
+        apply_dark_window_chrome(hwnd);
+        let instance = GetModuleHandleW(ptr::null());
+        let mut rect: Rect = std::mem::zeroed();
+        GetClientRect(hwnd, &mut rect);
+        let width = rect.right.max(360);
+        let message = CreateWindowExW(0, text("EDIT").as_ptr(), state.message.as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x0800,
+            18, 16, width - 36, 98, hwnd, ptr::null_mut(), instance, ptr::null_mut());
+        let yes = CreateWindowExW(0, text("BUTTON").as_ptr(), text(state.affirmative).as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            width - 192, 125, 82, 28, hwnd, 1usize as H, instance, ptr::null_mut());
+        let cancel = if state.has_cancel { CreateWindowExW(0, text("BUTTON").as_ptr(), text("Cancel").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            width - 100, 125, 82, 28, hwnd, 2usize as H, instance, ptr::null_mut()) } else { ptr::null_mut() };
+        if message.is_null() || yes.is_null() || (state.has_cancel && cancel.is_null()) { EndDialog(hwnd, -1); return 1; }
+        for control in [message, yes, cancel] {
+            if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }
+        }
+        // Make cancellation the default for destructive or extract actions.
+        SendMessageW(hwnd, 0x0401, if state.has_cancel { 2 } else { 1 }, 0);
+        SetFocus(if state.has_cancel { cancel } else { yes });
+        return 0;
+    }
+    let state = get_data(hwnd) as *mut ConfirmDialog;
+    if state.is_null() { return 0; }
+    match msg {
+        WM_COMMAND if wp & 0xffff == 1 => { (*state).accepted = true; EndDialog(hwnd, 1); 1 }
+        WM_COMMAND if wp & 0xffff == 2 => { EndDialog(hwnd, 0); 1 }
+        0x0010 => { EndDialog(hwnd, 0); 1 }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button((*state).theme, &*(lp as *const DrawItem)),
+        0x0136 => (*(*state).theme).window_brush as isize,
+        WM_CTLCOLORSTATIC => {
+            SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
+            SetBkColor(wp as H, ui_theme::HEADER_TOP.colorref());
+            (*(*state).theme).window_brush as isize
+        }
+        _ => 0,
+    }
+}
+
+pub(super) unsafe fn confirm(hwnd: H, theme: *const Theme, title: &str, message: &str) -> bool {
+    question(hwnd, theme, title, message, "Extract", true).unwrap_or(false)
+}
+pub(super) unsafe fn question(hwnd: H, theme: *const Theme, title: &str, message: &str, affirmative: &'static str, has_cancel: bool) -> Option<bool> {
+    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
+    let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 360, 145, 0, 0, 0];
+    let mut state = ConfirmDialog { theme, title: text(title), message: text(&message.replace("\n", "\r\n")), accepted: false, affirmative, has_cancel };
+    let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(confirm_proc), &mut state as *mut _ as isize);
+    if result == -1 { None } else { Some(state.accepted) }
 }

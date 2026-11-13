@@ -133,6 +133,30 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $populated) { throw 'ZFM did not list the fixture file within 10 seconds.' }
+    # External changes appear without pressing Reload; selection survives the update.
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    $liveFixture = Join-Path $work 'live-external.txt'
+    [IO.File]::WriteAllText($liveFixture, 'external')
+    $appeared = $false
+    for ($i = 0; $i -lt 150; $i++) {
+        $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'live-external.txt').ToInt64()
+        if ($index -ge 0) { $appeared = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $appeared) { throw 'Automatic folder refresh did not detect an external file.' }
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result)
+    if ($result.ToUInt64() -ne 1) { throw 'Automatic refresh lost the selection.' }
+    Remove-Item -LiteralPath $liveFixture
+    $removed = $false
+    for ($i = 0; $i -lt 150; $i++) {
+        if ([ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'live-external.txt').ToInt64() -lt 0) { $removed = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $removed) { throw 'Automatic folder refresh did not detect a removal.' }
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
     # Preview the first text fixture; this command opens a modal dialog.
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot select preview fixture.' }
@@ -164,7 +188,9 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($settings -eq [IntPtr]::Zero) { throw 'Settings dialog did not appear.' }
-    if ([ZfmSmoke]::GetDlgItem($settings, 1001) -eq [IntPtr]::Zero -or [ZfmSmoke]::GetDlgItem($settings, 1002) -eq [IntPtr]::Zero) { throw 'Settings controls are missing.' }
+    foreach ($id in @(1001, 1002, 1004, 1005, 1006, 1007)) {
+        if ([ZfmSmoke]::GetDlgItem($settings, $id) -eq [IntPtr]::Zero) { throw "Settings control $id is missing." }
+    }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not cancel settings.' }
     $configFile = Join-Path $configRoot 'zfm\settings.conf'
@@ -365,6 +391,12 @@ try {
     }
     if ($settings -eq [IntPtr]::Zero) { throw 'Settings did not open for saving.' }
     $hiddenSetting = [ZfmSmoke]::GetDlgItem($settings, 1001)
+    $compactSetting = [ZfmSmoke]::GetDlgItem($settings, 1005)
+    $refreshSetting = [ZfmSmoke]::GetDlgItem($settings, 1004)
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($refreshSetting, 0x00f1, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not disable automatic refresh.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($compactSetting, 0x00f1, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not change compact view.' }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($hiddenSetting, 0x00f1, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not change the setting.' }
     if (-not [ZfmSmoke]::PostMessageW($settings, 0x111, [UIntPtr]1, [IntPtr]::Zero)) { throw 'Could not apply settings.' }
@@ -393,6 +425,12 @@ try {
     $result = [UIntPtr]::Zero
     $hiddenSetting = [ZfmSmoke]::GetDlgItem($settings, 1001)
     if ([ZfmSmoke]::SendMessageTimeoutW($hiddenSetting, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 1) { throw 'Hidden-file setting was not restored.' }
+    $result = [UIntPtr]::Zero
+    $compactSetting = [ZfmSmoke]::GetDlgItem($settings, 1005)
+    if ([ZfmSmoke]::SendMessageTimeoutW($compactSetting, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 1) { throw 'Compact-view setting was not restored.' }
+    $result = [UIntPtr]::Zero
+    $refreshSetting = [ZfmSmoke]::GetDlgItem($settings, 1004)
+    if ([ZfmSmoke]::SendMessageTimeoutW($refreshSetting, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 0) { throw 'Automatic-refresh setting was not restored.' }
     [void][ZfmSmoke]::PostMessageW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)
     Write-Host "Win32 window and basic controls detected: $title"
 } catch {

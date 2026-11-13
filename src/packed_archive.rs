@@ -218,9 +218,9 @@ pub fn format_for_path(path: &Path) -> Option<Format> {
         Some(Format::SevenZip)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         Some(Format::TarGzip)
-    } else if name.ends_with(".tar.bz2") {
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
         Some(Format::TarBzip2)
-    } else if name.ends_with(".tar.xz") {
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
         Some(Format::TarXz)
     } else {
         None

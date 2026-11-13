@@ -113,16 +113,16 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 SendMessageW(state.edit, WM_SETFONT, (*state.theme).font as usize, 1);
             }
         } else {
-            state.minus = create("BUTTON", text("−").as_ptr(), WS_TABSTOP, 10);
-            state.fit = create("BUTTON", text("Fit").as_ptr(), WS_TABSTOP, 11);
-            state.plus = create("BUTTON", text("+").as_ptr(), WS_TABSTOP, 12);
+            state.minus = create("BUTTON", text("−").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 10);
+            state.fit = create("BUTTON", text("Fit").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 11);
+            state.plus = create("BUTTON", text("+").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 12);
         }
         if state.pdf.is_some() {
-            state.previous = create("BUTTON", text("Previous").as_ptr(), WS_TABSTOP, 13);
-            state.next = create("BUTTON", text("Next").as_ptr(), WS_TABSTOP, 14);
+            state.previous = create("BUTTON", text("Previous").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 13);
+            state.next = create("BUTTON", text("Next").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 14);
             state.page_label = create("STATIC", text(&format!("1 / {}", state.page_count)).as_ptr(), 0, 15);
         }
-        state.close = create("BUTTON", text("Close").as_ptr(), WS_TABSTOP, 2);
+        state.close = create("BUTTON", text("Close").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 2);
         for b in [state.minus, state.fit, state.plus, state.previous, state.next, state.page_label, state.close] { if !b.is_null() { SendMessageW(b, WM_SETFONT, (*state.theme).font as usize, 1); } }
         layout(hwnd, state);
         if state.office_receiver.is_some() && SetTimer(hwnd, 1, 100, ptr::null_mut()) == 0 {
@@ -157,11 +157,11 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                                         CreateWindowExW(0, text(class).as_ptr(), text(value).as_ptr(), WS_CHILD | WS_VISIBLE | style,
                                             0, 0, 1, 1, hwnd, id as H, instance, ptr::null_mut())
                                     };
-                                    state.minus = make("BUTTON", "−", WS_TABSTOP, 10);
-                                    state.fit = make("BUTTON", "Fit", WS_TABSTOP, 11);
-                                    state.plus = make("BUTTON", "+", WS_TABSTOP, 12);
-                                    state.previous = make("BUTTON", "Previous", WS_TABSTOP, 13);
-                                    state.next = make("BUTTON", "Next", WS_TABSTOP, 14);
+                                    state.minus = make("BUTTON", "−", WS_TABSTOP | BS_OWNERDRAW, 10);
+                                    state.fit = make("BUTTON", "Fit", WS_TABSTOP | BS_OWNERDRAW, 11);
+                                    state.plus = make("BUTTON", "+", WS_TABSTOP | BS_OWNERDRAW, 12);
+                                    state.previous = make("BUTTON", "Previous", WS_TABSTOP | BS_OWNERDRAW, 13);
+                                    state.next = make("BUTTON", "Next", WS_TABSTOP | BS_OWNERDRAW, 14);
                                     state.page_label = make("STATIC", &format!("1 / {count}"), 0, 15);
                                     for control in [state.minus, state.fit, state.plus, state.previous, state.next, state.page_label] {
                                         if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }
@@ -208,6 +208,8 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             _ => 0,
         },
         WM_CLOSE => { KillTimer(hwnd, 1); EndDialog(hwnd, 0); 1 }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button(state.theme, &*(lp as *const DrawItem)),
+        0x0136 => (*state.theme).window_brush as isize,
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
             SetBkColor(wp as H, ui_theme::NAME_EDIT_BG.colorref());

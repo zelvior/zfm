@@ -15,7 +15,8 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zfm::directory::{self, Entry, Listing};
 use zfm::navigation::{Destination, Tabs};
@@ -26,6 +27,8 @@ mod windows_actions;
 mod windows_viewer;
 #[path = "windows_settings.rs"]
 mod windows_settings;
+#[path = "windows_drives.rs"]
+mod windows_drives;
 #[path = "windows_archive.rs"]
 mod windows_archive;
 use zfm::ui_theme::{
@@ -50,6 +53,10 @@ const WM_SETFONT: u32 = 0x0030;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_COMMAND: u32 = 0x0111;
+const WM_TIMER: u32 = 0x0113;
+const WM_DEVICECHANGE: u32 = 0x0219;
+const WM_MOUSEWHEEL: u32 = 0x020a;
+const SCAN_TIMER: usize = 91;
 const WM_CTLCOLOREDIT: u32 = 0x0133;
 const WM_CTLCOLORLISTBOX: u32 = 0x0134;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
@@ -89,6 +96,7 @@ const LB_SETCARETINDEX: u32 = 0x019e;
 const LB_SETITEMHEIGHT: u32 = 0x01a0;
 const LB_GETITEMHEIGHT: u32 = 0x01a1;
 const LB_GETTOPINDEX: u32 = 0x018e;
+const LB_SETTOPINDEX: u32 = 0x0197;
 
 const BS_OWNERDRAW: u32 = 0x000b;
 const ODT_LISTBOX: u32 = 2;
@@ -141,6 +149,12 @@ const SETTINGS: usize = 143;
 const ARCHIVE: usize = 144;
 const ARCHIVE_CREATE: usize = 145;
 const ARCHIVE_CREATE_ENCRYPTED: usize = 146;
+const ARCHIVE_FORMAT_BASE: usize = 150; // 150..158 follow Format::ALL
+const ARCHIVE_ENCRYPTED_7Z: usize = 159;
+const ARCHIVE_ENCRYPTED_ZIP: usize = 160;
+const ARCHIVE_EXTRACT_HERE: usize = 161;
+const ARCHIVE_EXTRACT_TO: usize = 162;
+const ARCHIVE_EXTRACT_PASSWORD: usize = 163;
 
 #[repr(C)]
 struct WndClass {
@@ -282,6 +296,8 @@ extern "system" {
     fn DispatchMessageW(msg: *const Msg) -> LResult;
     fn PostQuitMessage(code: i32);
     fn PostMessageW(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> i32;
+    fn SetTimer(hwnd: H, id: usize, milliseconds: u32, callback: P) -> usize;
+    fn KillTimer(hwnd: H, id: usize) -> i32;
     fn LoadCursorW(instance: H, name: *const u16) -> H;
     fn SetCursor(cursor: H) -> H;
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
@@ -313,6 +329,7 @@ extern "system" {
     fn SetFocus(hwnd: H) -> H;
     fn GetKeyState(key: i32) -> i16;
     fn IsDialogMessageW(hwnd: H, msg: *mut Msg) -> i32;
+    fn IsWindowEnabled(hwnd: H) -> i32;
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
     fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
     fn TrackMouseEvent(event: *mut TrackMouseEvent) -> i32;
@@ -364,7 +381,6 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> H;
     fn LoadLibraryW(name: *const u16) -> H;
     fn GetProcAddress(module: H, name: *const u8) -> P;
-    fn GetLogicalDrives() -> u32;
     fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> i32;
     fn GlobalAlloc(flags: u32, bytes: usize) -> H;
     fn GlobalLock(memory: H) -> P;
@@ -723,6 +739,13 @@ struct App {
     filter: String,
     show_hidden: bool,
     drives_expanded: bool,
+    preferences: zfm::settings::Settings,
+    drives: windows_drives::Drives,
+    sidebar_scroll: usize,
+    folder_scan: Option<Receiver<FolderScan>>,
+    next_folder_scan: Instant,
+    listing_pending: bool,
+    refresh_error: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
     view_mode: ViewMode,
@@ -758,7 +781,13 @@ struct ResultMessage {
     result: std::io::Result<Option<Listing>>,
 }
 
-fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
+struct FolderScan {
+    generation: u64,
+    path: PathBuf,
+    result: std::io::Result<Option<Listing>>,
+}
+
+fn build_sidebar_items(drives_expanded: bool, drives: &windows_drives::Drives, labels: bool) -> Vec<SidebarEntry> {
     let mut items = Vec::new();
     let profile = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -790,26 +819,16 @@ fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
         }
     }
     items.push(SidebarEntry {
-        label: "Computer".to_string(),
+        label: if drives.available() { "Computer" } else { "Computer (unavailable)" }.to_string(),
         icon: ItemIcon::Drives,
         indent: 0,
         target: None,
         is_drives_header: true,
     });
     if drives_expanded {
-        let mask = unsafe { GetLogicalDrives() };
-        for bit in 0..26u32 {
-            if (mask & (1 << bit)) != 0 {
-                let letter = (b'A' + bit as u8) as char;
-                let root = format!("{letter}:\\");
-                items.push(SidebarEntry {
-                    label: root.clone(),
-                    icon: ItemIcon::DriveDisk,
-                    indent: 1,
-                    target: Some(PathBuf::from(root)),
-                    is_drives_header: false,
-                });
-            }
+        for (label, root) in drives.entries(labels) {
+            items.push(SidebarEntry { label, icon: ItemIcon::DriveDisk, indent: 1,
+                target: Some(PathBuf::from(root)), is_drives_header: false });
         }
     }
     items
@@ -913,8 +932,8 @@ fn hit_test_custom(app: &App, metrics: &WindowMetrics, x: i32, y: i32) -> HotZon
         }
     }
     if metrics.sidebar.contains(x, y) {
-        for idx in 0..app.sidebar_items.len() {
-            if let Some(rect) = sidebar_row_rect(metrics, idx) {
+        for idx in app.sidebar_scroll..app.sidebar_items.len() {
+            if let Some(rect) = sidebar_row_rect(metrics, idx - app.sidebar_scroll) {
                 let item = &app.sidebar_items[idx];
                 if rect.contains(x, y) && (item.target.is_some() || item.is_drives_header) {
                     return HotZone::Sidebar(idx);
@@ -1159,8 +1178,8 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
     );
 
     let current_dir = app.tabs.current().current();
-    for (idx, item) in app.sidebar_items.iter().enumerate() {
-        let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+    for (idx, item) in app.sidebar_items.iter().enumerate().skip(app.sidebar_scroll) {
+        let Some(row_rect) = sidebar_row_rect(&m, idx - app.sidebar_scroll) else {
             break;
         };
         let is_current = item.target.as_deref().map_or(false, |t| t == current_dir);
@@ -1415,8 +1434,8 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
         );
 
         // Sidebar labels
-        for (idx, item) in app.sidebar_items.iter().enumerate() {
-            let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+        for (idx, item) in app.sidebar_items.iter().enumerate().skip(app.sidebar_scroll) {
+            let Some(row_rect) = sidebar_row_rect(&m, idx - app.sidebar_scroll) else {
                 break;
             };
             let base_x = row_rect.x + 10 + item.indent * 16 + 34;
@@ -1487,6 +1506,30 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
         );
     });
     EndPaint(hwnd, &ps);
+}
+
+/// The same palette and rounded treatment as the main toolbar, reused by
+/// native dialogs while retaining Win32 button focus and keyboard behavior.
+unsafe fn draw_dialog_button(theme: *const Theme, item: &DrawItem) -> LResult {
+    let w = item.rect.right - item.rect.left;
+    let h = item.rect.bottom - item.rect.top;
+    if w <= 0 || h <= 0 || w > 4096 || h > 1024 { return 1; }
+    let pressed = item.item_state & 1 != 0;
+    let disabled = item.item_state & 4 != 0;
+    let focused = item.item_state & 0x10 != 0;
+    let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
+    let (top, bottom) = if disabled { (Rgb(38, 42, 48), Rgb(34, 38, 44)) }
+        else if pressed { (ui_theme::BTN_PRESS_TOP, ui_theme::BTN_PRESS_BOTTOM) }
+        else { (ui_theme::BTN_TOP, ui_theme::BTN_BOTTOM) };
+    ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(0, 0, w, h), 6.0,
+        top, bottom, Some(if focused { ui_theme::BORDER_FOCUS } else { ui_theme::BORDER_STRONG }));
+    let caption = control_value(item.hwnd).to_string_lossy().into_owned();
+    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |dc| {
+        draw_text_in(dc, (*theme).font, if disabled { ui_theme::TEXT_DIM } else { ui_theme::TEXT_PRIMARY },
+            BoxRect::new(4, 0, (w - 8).max(1), h), &caption,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    });
+    1
 }
 
 unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
@@ -2065,12 +2108,86 @@ unsafe fn layout(hwnd: H, app: &mut App) {
     }
 }
 
+// The sidebar is owner-drawn; scroll by rows so every detected drive remains
+// accessible on short windows or systems with many mapped drives.
+unsafe fn clamp_sidebar_scroll(hwnd: H, app: &mut App) {
+    let mut rect: Rect = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rect);
+    let metrics = WindowMetrics::new(rect.right, rect.bottom);
+    let rows = ((metrics.sidebar.height - 5).max(0) / 22) as usize;
+    app.sidebar_scroll = app.sidebar_scroll.min(app.sidebar_items.len().saturating_sub(rows.max(1)));
+}
+
+unsafe fn poll_drives(hwnd: H, app: &mut App) {
+    if app.drives.poll(app.preferences.windows_drive_labels) {
+        app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, app.preferences.windows_drive_labels);
+        clamp_sidebar_scroll(hwnd, app);
+        app.hot_zone = HotZone::None;
+        rebuild_backdrop(hwnd, app);
+        InvalidateRect(hwnd, ptr::null(), 0);
+    }
+}
+
+// A single background poller, separate from navigation, avoids blocking the UI
+// on slow filesystems. Generation/path checks discard results for old folders.
+unsafe fn poll_folder(hwnd: H, app: &mut App) {
+    let received = match app.folder_scan.as_ref().map(|rx| rx.try_recv()) {
+        Some(Ok(message)) => { app.folder_scan = None; Some(message) }
+        Some(Err(TryRecvError::Disconnected)) => { app.folder_scan = None; None }
+        _ => None,
+    };
+    if let Some(message) = received {
+        if app.preferences.windows_live_refresh && !app.listing_pending && !app.operation_busy
+            && app.token.load(Ordering::Relaxed) == message.generation
+            && app.tabs.current().current() == message.path {
+            if let Ok(Some(mut listing)) = message.result {
+                if app.refresh_error { app.refresh_error = false; set_status(hwnd, app, None); }
+                ui_theme::sort_entries(&mut listing.entries, app.sort_column, app.sort_ascending);
+                if app.entries != listing.entries {
+                    let selected: std::collections::HashSet<PathBuf> = selected_indices(app).into_iter()
+                        .map(|i| app.entries[i].path.clone()).collect();
+                    let top = SendMessageW(app.list, LB_GETTOPINDEX, 0, 0).max(0) as usize;
+                    app.entries = listing.entries;
+                    populate_listbox(app, None);
+                    for (i, entry) in app.entries.iter().enumerate() {
+                        if selected.contains(&entry.path) { SendMessageW(app.list, LB_SETSEL, 1, i as isize); }
+                    }
+                    if !app.entries.is_empty() { SendMessageW(app.list, LB_SETTOPINDEX, top.min(app.entries.len() - 1), 0); }
+                    set_status(hwnd, app, if listing.skipped > 0 { Some(format!("{} entries skipped during refresh", listing.skipped)) } else { None });
+                    InvalidateRect(app.list, ptr::null(), 0);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                }
+            } else if let Err(error) = message.result {
+                if !app.refresh_error {
+                    app.refresh_error = true;
+                    set_status(hwnd, app, Some(format!("Automatic folder refresh failed: {error}")));
+                }
+            }
+        }
+    }
+    if !app.preferences.windows_live_refresh || app.listing_pending || app.operation_busy
+        || app.folder_scan.is_some() || Instant::now() < app.next_folder_scan { return; }
+    app.next_folder_scan = Instant::now() + Duration::from_secs(3);
+    let path = app.tabs.current().current().to_path_buf();
+    let token = app.token.clone();
+    let generation = token.load(Ordering::Relaxed);
+    let filter = app.filter.clone();
+    let show_hidden = app.show_hidden;
+    let (sender, receiver) = mpsc::channel();
+    app.folder_scan = Some(receiver);
+    thread::spawn(move || {
+        let result = directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
+        let _ = sender.send(FolderScan { generation, path, result });
+    });
+}
+
 unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice: bool) {
     let path = match app.tabs.current().resolve(&destination) {
         Some(path) => path,
         None => return,
     };
     let generation = app.token.fetch_add(1, Ordering::Relaxed) + 1;
+    app.listing_pending = true;
     let token = app.token.clone();
     let target = hwnd as usize;
     let filter = app.filter.clone();
@@ -2109,6 +2226,7 @@ enum Operation {
     Trash(PathBuf, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
+    ArchiveExtract(PathBuf, PathBuf, Option<String>),
 }
 
 unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
@@ -2147,6 +2265,9 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::ArchiveCreate(inputs, output, password) =>
                     zfm::archive_engine::create_items_password(&inputs, &output, &AtomicBool::new(false), password.as_deref())
                         .map(|_| format!("Created {}", output.display())),
+                Operation::ArchiveExtract(archive, destination, password) =>
+                    zfm::archive_engine::extract_all_password(&archive, &destination, &AtomicBool::new(false), password.as_deref())
+                        .map(|count| format!("Extracted {count} files to {}", destination.display())),
                 Operation::Convert(input, output, mode) => {
                     let cancel = AtomicBool::new(false);
                     let result = match mode {
@@ -2177,6 +2298,11 @@ pub fn show_startup_error(message: &str) {
 }
 
 unsafe fn show_error(hwnd: H, message: &str) {
+    // If resource creation or the custom dialog itself fails (including during
+    // startup), retain a native alert as a last-resort error path.
+    if let Ok(theme) = Theme::new() {
+        if windows_actions::question(hwnd, &theme, "ZFM", message, "OK", false).is_some() { return; }
+    }
     MessageBoxW(hwnd, text(message).as_ptr(), text("ZFM").as_ptr(), 0x10);
 }
 
@@ -2218,7 +2344,8 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
             if let Some(item) = app.sidebar_items.get(idx).cloned() {
                 if item.is_drives_header {
                     app.drives_expanded = !app.drives_expanded;
-                    app.sidebar_items = build_sidebar_items(app.drives_expanded);
+                    app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, app.preferences.windows_drive_labels);
+                    clamp_sidebar_scroll(hwnd, app);
                     rebuild_backdrop(hwnd, app);
                     InvalidateRect(hwnd, ptr::null(), 0);
                 } else if let Some(target) = item.target {
@@ -2417,13 +2544,31 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
+            if zfm::archive_actions::can_extract(&app.entries[selected_items[0]].path) {
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_HERE, text("Extract here…").as_ptr());
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_TO, text("Extract to folder…").as_ptr());
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_PASSWORD, text("Extract with password…").as_ptr());
+            }
             if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
             }
         }
         if !selected_items.is_empty() && selected_items.len() <= 1024 && selected_items.iter().all(|i| app.entries[*i].is_file || app.entries[*i].is_dir) {
-            AppendMenuW(menu, 0, ARCHIVE_CREATE, text("Create archive from selection…").as_ptr());
-            AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive from selection…").as_ptr());
+            let submenu = CreatePopupMenu();
+            if !submenu.is_null() {
+                for (index, format) in zfm::archive_actions::Format::ALL.iter().enumerate() {
+                    // Single-stream codecs cannot represent folders or multiple files.
+                    if format.single_file() && (selected_items.len() != 1 || !app.entries[selected_items[0]].is_file) { continue; }
+                    AppendMenuW(submenu, 0, ARCHIVE_FORMAT_BASE + index, text(&format!("{}…", format.suffix())).as_ptr());
+                }
+                AppendMenuW(submenu, 0x800, 0, ptr::null());
+                AppendMenuW(submenu, 0, ARCHIVE_ENCRYPTED_7Z, text("Encrypted .7z…").as_ptr());
+                AppendMenuW(submenu, 0, ARCHIVE_ENCRYPTED_ZIP, text("Encrypted .zip…").as_ptr());
+                AppendMenuW(submenu, 0x800, 0, ptr::null());
+                AppendMenuW(submenu, 0, ARCHIVE_CREATE, text("Custom filename…").as_ptr());
+                AppendMenuW(menu, 0x10, submenu as usize, text("Compress to").as_ptr());
+            }
+            AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive…").as_ptr());
         }
         AppendMenuW(menu, 0x800, 0, ptr::null());
         for (id, title) in [
@@ -2723,7 +2868,8 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         app.extra_buttons = extra_buttons;
         SetWindowSubclass(list, Some(list_proc), 1, hwnd as usize);
 
-        SendMessageW(list, LB_SETITEMHEIGHT, 0, 22);
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, if app.view_mode == ViewMode::Compact { 38 } else { 22 });
+        let timer_started = SetTimer(hwnd, SCAN_TIMER, 1000, ptr::null_mut()) != 0;
         SendMessageW(
             filter_control,
             EM_SETCUEBANNER,
@@ -2743,9 +2889,16 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         SetWindowTextW(address, path.as_ptr());
         layout(hwnd, app);
         load(hwnd, app, Destination::Refresh, false);
+        if !timer_started { set_status(hwnd, app, Some("Automatic refresh could not start; use Reload.".into())); }
         return 0;
     }
 
+    // A modal dialog disables its owner and runs a nested message loop. Defer
+    // scanner updates until it closes rather than mutating the list or sidebar
+    // underneath a settings, confirmation, or preview dialog.
+    if ((msg == WM_TIMER && wp == SCAN_TIMER) || msg == WM_DEVICECHANGE) && IsWindowEnabled(hwnd) == 0 {
+        return if msg == WM_TIMER { 0 } else { DefWindowProcW(hwnd, msg, wp, lp) };
+    }
     let data = get_data(hwnd);
     if data == 0 {
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -2765,8 +2918,38 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0
         }
         WM_SIZE => {
+            clamp_sidebar_scroll(hwnd, app);
             layout(hwnd, app);
             0
+        }
+        WM_TIMER if wp == SCAN_TIMER => {
+            poll_drives(hwnd, app);
+            poll_folder(hwnd, app);
+            0
+        }
+        WM_DEVICECHANGE => {
+            // Arrival/removal can change a volume label without changing the letter.
+            if matches!(wp, 0x8000 | 0x8004 | 0x0007) { app.drives.invalidate_labels(); }
+            poll_drives(hwnd, app);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSEWHEEL => {
+            let mut point = Point { x: (lp as i16) as i32, y: ((lp >> 16) as i16) as i32 };
+            ScreenToClient(hwnd, &mut point);
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            let metrics = WindowMetrics::new(rect.right, rect.bottom);
+            if metrics.sidebar.contains(point.x, point.y) {
+                let delta = ((wp >> 16) as u16) as i16;
+                if delta > 0 { app.sidebar_scroll = app.sidebar_scroll.saturating_sub(3); }
+                else if delta < 0 { app.sidebar_scroll = app.sidebar_scroll.saturating_add(3); }
+                clamp_sidebar_scroll(hwnd, app);
+                app.hot_zone = HotZone::None;
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_SETCURSOR => {
             let target = wp as H;
@@ -2930,6 +3113,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             if app.token.load(Ordering::Relaxed) != message.generation {
                 return 0;
             }
+            app.listing_pending = false;
             match message.result {
                 Ok(Some(mut listing)) => {
                     app.tabs.current_mut().commit(message.destination);
@@ -3005,7 +3189,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             match id {
                 BACK if code == 0 => load(hwnd, app, Destination::Back, false),
                 FORWARD if code == 0 => load(hwnd, app, Destination::Forward, false),
-                REFRESH if code == 0 => load(hwnd, app, Destination::Refresh, false),
+                REFRESH if code == 0 => {
+                    poll_drives(hwnd, app);
+                    load(hwnd, app, Destination::Refresh, false);
+                }
                 UP if code == 0 => {
                     let parent = app
                         .tabs
@@ -3058,14 +3245,23 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     load(hwnd, app, Destination::Refresh, false);
                 }
                 SETTINGS if code == 0 => {
-                    if let Some((hidden, ascending)) = windows_settings::show(hwnd, app.theme, app.show_hidden, app.sort_ascending) {
-                        let settings = zfm::settings::Settings { show_hidden: hidden, sort_ascending: ascending };
+                    let mut current = app.preferences;
+                    current.show_hidden = app.show_hidden;
+                    current.sort_ascending = app.sort_ascending;
+                    if let Some(settings) = windows_settings::show(hwnd, app.theme, current) {
                         if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, settings)) {
                             show_error(hwnd, &format!("Settings were not saved or applied: {error}"));
                             return 0;
                         }
-                        app.show_hidden = hidden;
-                        app.sort_ascending = ascending;
+                        app.preferences = settings;
+                        app.show_hidden = settings.show_hidden;
+                        app.sort_ascending = settings.sort_ascending;
+                        app.drives_expanded = settings.windows_expand_drives;
+                        app.view_mode = if settings.windows_compact_view { ViewMode::Compact } else { ViewMode::Details };
+                        SendMessageW(app.list, LB_SETITEMHEIGHT, 0, if settings.windows_compact_view { 38 } else { 22 });
+                        app.drives.poll(settings.windows_drive_labels);
+                        app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, settings.windows_drive_labels);
+                        clamp_sidebar_scroll(hwnd, app);
                         InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
                         rebuild_backdrop(hwnd, app);
                         InvalidateRect(hwnd, ptr::null(), 0);
@@ -3281,13 +3477,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             "Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.",
                             path.display()
                         );
-                        if MessageBoxW(
-                            hwnd,
-                            text(&message).as_ptr(),
-                            text("Confirm permanent deletion").as_ptr(),
-                            0x134,
-                        ) == 6
-                        {
+                        if windows_actions::question(hwnd, app.theme, "Confirm permanent deletion", &message, "Delete", true) == Some(true) {
                             start_operation(hwnd, app, Operation::Delete(path));
                         }
                     } else {
@@ -3297,19 +3487,32 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 LIST if code == 1 => {
                     invalidate_status_bar(hwnd);
                 }
-                ARCHIVE_CREATE | ARCHIVE_CREATE_ENCRYPTED if code == 0 => {
+                ARCHIVE_CREATE | ARCHIVE_CREATE_ENCRYPTED | ARCHIVE_FORMAT_BASE..=ARCHIVE_ENCRYPTED_ZIP if code == 0 => {
+                    let chosen = if (ARCHIVE_FORMAT_BASE..ARCHIVE_FORMAT_BASE + zfm::archive_actions::Format::ALL.len()).contains(&id) {
+                        Some(zfm::archive_actions::Format::ALL[id - ARCHIVE_FORMAT_BASE])
+                    } else if id == ARCHIVE_ENCRYPTED_7Z { Some(zfm::archive_actions::Format::SevenZip) }
+                    else if id == ARCHIVE_ENCRYPTED_ZIP { Some(zfm::archive_actions::Format::Zip) }
+                    else { None };
+                    let encrypted = matches!(id, ARCHIVE_CREATE_ENCRYPTED | ARCHIVE_ENCRYPTED_7Z | ARCHIVE_ENCRYPTED_ZIP);
                     let selected = selected_indices(app);
                     if selected.is_empty() || selected.len() > 1024 { set_status(hwnd, app, Some("Select between 1 and 1024 items.".into())); return 0; }
+                    if selected.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
+                        set_status(hwnd, app, Some("Select regular files or folders only.".into())); return 0;
+                    }
+                    if chosen.map_or(false, |f| f.single_file()) && (selected.len() != 1 || !app.entries[selected[0]].is_file) {
+                        set_status(hwnd, app, Some("This compression format requires one regular file.".into())); return 0;
+                    }
                     let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
-                    let proposed = if paths.len() == 1 { format!("{}.7z", paths[0].file_name().unwrap_or_default().to_string_lossy()) } else { "Archive.7z".to_string() };
+                    let suffix = chosen.map_or(".7z", |format| format.suffix());
+                    let proposed = if paths.len() == 1 { format!("{}{suffix}", paths[0].file_name().unwrap_or_default().to_string_lossy()) } else { format!("Archive{suffix}") };
                     if let Some(name) = windows_actions::prompt(hwnd, app.theme, "Create .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz", OsStr::new(&proposed), false) {
                         match zfm::operations::validate_name(&name) {
                             Ok(()) => {
                                 let output = app.tabs.current().current().join(name);
-                                let password = if id == ARCHIVE_CREATE_ENCRYPTED {
-                                    if !output.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case("7z") || e.eq_ignore_ascii_case("zip")) {
-                                        show_error(hwnd, "Encrypted archives require a .7z or .zip filename."); return 0;
-                                    }
+                                if !zfm::archive_engine::supports_creation(&output, encrypted) || chosen.map_or(false, |format| !format.matches(&output)) {
+                                    show_error(hwnd, "The output filename does not match the chosen archive format."); return 0;
+                                }
+                                let password = if encrypted {
                                     let first = match windows_actions::password_prompt(hwnd, app.theme, "Archive password") { Some(p) => p, None => return 0 };
                                     let second = match windows_actions::password_prompt(hwnd, app.theme, "Confirm archive password") { Some(p) => p, None => return 0 };
                                     if first != second { show_error(hwnd, "Passwords do not match."); return 0; }
@@ -3319,6 +3522,30 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             }
                             Err(e) => set_status(hwnd, app, Some(format!("Invalid output name: {e}"))),
                         }
+                    }
+                }
+                ARCHIVE_EXTRACT_HERE | ARCHIVE_EXTRACT_TO | ARCHIVE_EXTRACT_PASSWORD if code == 0 => {
+                    let archive = match selected_path(hwnd, app) { Some(path) if zfm::archive_actions::can_extract(&path) => path,
+                        _ => { set_status(hwnd, app, Some("Select one supported archive file.".into())); return 0; } };
+                    let default = archive.parent().unwrap_or_else(|| Path::new("."));
+                    let destination = if id == ARCHIVE_EXTRACT_HERE { default.to_path_buf() } else {
+                        match windows_actions::prompt(hwnd, app.theme, "Extract to existing folder", default.as_os_str(), false) {
+                            Some(value) => PathBuf::from(value), None => return 0,
+                        }
+                    };
+                    if !destination.is_absolute() || !destination.is_dir() {
+                        show_error(hwnd, "Choose an existing absolute destination folder."); return 0;
+                    }
+                    let password = if id == ARCHIVE_EXTRACT_PASSWORD {
+                        match windows_actions::password_prompt(hwnd, app.theme, "Archive password") {
+                            Some(value) if !value.is_empty() => Some(value),
+                            Some(_) => { show_error(hwnd, "Enter a password."); return 0; },
+                            None => return 0,
+                        }
+                    } else { None };
+                    let question = format!("Extract {} into {}?\n\nExisting files are not overwritten. Earlier files may remain after failure. Use a trusted destination and archive.", archive.display(), destination.display());
+                    if windows_actions::confirm(hwnd, app.theme, "Extract archive", &question) {
+                        start_operation(hwnd, app, Operation::ArchiveExtract(archive, destination, password));
                     }
                 }
                 ARCHIVE if code == 0 => {
@@ -3380,6 +3607,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             theme.list_brush as LResult
         }
         WM_DESTROY => {
+            KillTimer(hwnd, SCAN_TIMER);
             app.token.fetch_add(1, Ordering::Relaxed);
             set_data(hwnd, 0);
             PostQuitMessage(0);
@@ -3435,10 +3663,17 @@ pub fn run() -> Result<(), String> {
             tabs: Tabs::new(initial),
             filter: String::new(),
             show_hidden: saved_settings.show_hidden,
-            drives_expanded: true,
+            drives_expanded: saved_settings.windows_expand_drives,
+            preferences: saved_settings,
+            drives: windows_drives::Drives::new(),
+            sidebar_scroll: 0,
+            folder_scan: None,
+            next_folder_scan: Instant::now() + Duration::from_secs(3),
+            listing_pending: false,
+            refresh_error: false,
             sort_column: SortColumn::Name,
             sort_ascending: saved_settings.sort_ascending,
-            view_mode: ViewMode::Details,
+            view_mode: if saved_settings.windows_compact_view { ViewMode::Compact } else { ViewMode::Details },
             focused_edit: 0,
             hovered_child: ptr::null_mut(),
             hovered_row: None,
@@ -3454,13 +3689,15 @@ pub fn run() -> Result<(), String> {
             status: ptr::null_mut(),
             nav_buttons: [ptr::null_mut(); 6],
             extra_buttons: [ptr::null_mut(); 9],
-            sidebar_items: build_sidebar_items(true),
+            sidebar_items: Vec::new(),
             entries: Vec::new(),
             backdrop_w: 0,
             backdrop_h: 0,
             backdrop: Vec::new(),
         }));
 
+        (*app).drives.poll(saved_settings.windows_drive_labels);
+        (*app).sidebar_items = build_sidebar_items((*app).drives_expanded, &(*app).drives, saved_settings.windows_drive_labels);
         let window = CreateWindowExW(
             0,
             class.as_ptr(),

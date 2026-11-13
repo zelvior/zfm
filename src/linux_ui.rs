@@ -130,6 +130,8 @@ api! {
     gtk_menu_item_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_menu_shell_append: unsafe extern "C" fn(P, P),
     gtk_menu_item_set_submenu: unsafe extern "C" fn(P, P),
+    gtk_file_chooser_set_current_name: unsafe extern "C" fn(P, *const c_char),
+    gtk_file_chooser_set_current_folder: unsafe extern "C" fn(P, *const c_char) -> c_int,
     gtk_separator_menu_item_new: unsafe extern "C" fn() -> P,
     gtk_menu_popup_at_widget: unsafe extern "C" fn(P, P, c_int, c_int, P),
     gtk_menu_popup_at_pointer: unsafe extern "C" fn(P, P),
@@ -966,12 +968,30 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
             data,
         );
     }
-    if can_archive {
+    if can_archive && selected_rows(list).len() == 1 {
         menu_action(menu, "Open archive…", show_archive as P, data);
+        menu_action(menu, "Extract here…", archive_ui::extract_here as P, data);
+        menu_action(menu, "Extract to folder…", archive_ui::extract_to as P, data);
+        menu_action(menu, "Extract with password…", archive_ui::extract_password as P, data);
     }
     if can_copy {
-        menu_action(menu, "Create archive from selection…", archive_create_selection as P, data);
-        menu_action(menu, "Create encrypted archive from selection…", archive_create_encrypted_selection as P, data);
+        let submenu = (api().gtk_menu_new)();
+        for (title, callback, single) in [
+            (".7z…", archive_ui::create_7z as P, false), (".zip…", archive_ui::create_zip as P, false),
+            (".tar…", archive_ui::create_tar as P, false), (".tar.gz…", archive_ui::create_tar_gz as P, false),
+            (".tar.bz2…", archive_ui::create_tar_bz2 as P, false), (".tar.xz…", archive_ui::create_tar_xz as P, false),
+            (".gz…", archive_ui::create_gz as P, true), (".bz2…", archive_ui::create_bz2 as P, true),
+            (".xz…", archive_ui::create_xz as P, true),
+            ("Encrypted .7z…", archive_ui::create_encrypted_7z as P, false),
+            ("Encrypted .zip…", archive_ui::create_encrypted_zip as P, false),
+        ] {
+            if !single || (selected_rows(list).len() == 1 && entry.is_file) { menu_action(submenu, title, callback, data); }
+        }
+        menu_action(submenu, "Custom filename…", archive_create_selection as P, data);
+        let item = (api().gtk_menu_item_new_with_label)(c("Compress to").as_ptr());
+        (api().gtk_menu_item_set_submenu)(item, submenu);
+        (api().gtk_menu_shell_append)(menu, item);
+        menu_action(menu, "Create encrypted archive…", archive_create_encrypted_selection as P, data);
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
@@ -1049,8 +1069,13 @@ unsafe extern "C" fn show_settings(_: P, data: P) {
     } else { None };
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     if let Some((hidden, ascending)) = values {
-        let saved = zfm::settings::Settings { show_hidden: hidden != 0, sort_ascending: ascending };
-        if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, saved)) {
+        let result = zfm::settings::user_path().and_then(|path| {
+            let mut saved = zfm::settings::load(&path)?;
+            saved.show_hidden = hidden != 0;
+            saved.sort_ascending = ascending;
+            zfm::settings::save(&path, saved)
+        });
+        if let Err(error) = result {
             set_status(&*(data as *mut App), &format!("Settings not saved: {error}"));
             return;
         }
@@ -1775,6 +1800,7 @@ enum Operation {
     MoveTo(PathBuf, PathBuf),
     Trash(PathBuf),
     Delete(PathBuf),
+    ArchiveExtract(PathBuf, PathBuf, Option<String>),
 }
 struct OperationResult {
     app: usize,
@@ -1854,6 +1880,10 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             Operation::Delete(path) => {
                 operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
             }
+            Operation::ArchiveExtract(archive, destination, password) => {
+                zfm::archive_engine::extract_all_linux(&archive, &destination, &cancel, password.as_deref())
+                    .map(|count| format!("Extracted {count} files to {}", destination.display()))
+            }
         }
         .map_err(|e| e.to_string());
         let message = Box::new(OperationResult {
@@ -1885,7 +1915,7 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
     let app = &*(data as *mut App);
     if let Some(cancel) = &app.operation {
         cancel.store(true, Ordering::Relaxed);
-        set_status(app, "Cancellation requested (applies only to copying).");
+        set_status(app, "Cancellation requested (where supported).");
     } else {
         set_status(app, "No operation is running.");
     }

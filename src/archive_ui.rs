@@ -73,8 +73,7 @@ fn source_format(path: &std::path::Path) -> Option<SourceFormat> {
     }
 }
 pub(super) fn supports_archive(path: &std::path::Path) -> bool {
-    source_format(path).is_some() || path.extension().and_then(|v| v.to_str()).map_or(false, |ext|
-        ["rar", "iso", "cab", "arj", "lzh", "wim", "xz", "gz", "bz2"].iter().any(|v| ext.eq_ignore_ascii_case(v)))
+    zfm::archive_actions::can_extract(path)
 }
 pub(super) struct ArchiveManager {
     window: P,
@@ -500,6 +499,9 @@ unsafe extern "C" fn archive_cancel(_: P, data: P) {
     }
 }
 unsafe fn choose_archive_file(parent: P, title: &str, save: bool) -> Option<PathBuf> {
+    choose_archive_file_suggested(parent, title, save, None, None)
+}
+unsafe fn choose_archive_file_suggested(parent: P, title: &str, save: bool, directory: Option<&std::path::Path>, suggested: Option<&str>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let dialog = (api().gtk_file_chooser_native_new)(
         c(title).as_ptr(),
@@ -508,6 +510,10 @@ unsafe fn choose_archive_file(parent: P, title: &str, save: bool) -> Option<Path
         c(if save { "Save" } else { "Open" }).as_ptr(),
         c("Cancel").as_ptr(),
     );
+    if let Some(directory) = directory {
+        if let Ok(value) = CString::new(directory.as_os_str().as_bytes()) { (api().gtk_file_chooser_set_current_folder)(dialog, value.as_ptr()); }
+    }
+    if let Some(name) = suggested { (api().gtk_file_chooser_set_current_name)(dialog, c(name).as_ptr()); }
     let result = if (api().gtk_native_dialog_run)(dialog) == -3 {
         let filename = (api().gtk_file_chooser_get_filename)(dialog);
         if filename.is_null() {
@@ -526,17 +532,39 @@ unsafe fn choose_archive_file(parent: P, title: &str, save: bool) -> Option<Path
     result
 }
 /// Create a multi-file/folder archive from the file manager's current selection.
-pub(super) unsafe extern "C" fn archive_create_selection(_: P, data: P) { create_selection(data, false); }
-pub(super) unsafe extern "C" fn archive_create_encrypted_selection(_: P, data: P) { create_selection(data, true); }
-unsafe fn create_selection(data: P, encrypted: bool) {
+pub(super) unsafe extern "C" fn archive_create_selection(_: P, data: P) { create_selection(data, false, None); }
+pub(super) unsafe extern "C" fn archive_create_encrypted_selection(_: P, data: P) { create_selection(data, true, None); }
+macro_rules! format_action {
+    ($name:ident, $format:ident, $encrypted:expr) => {
+        pub(super) unsafe extern "C" fn $name(_: P, data: P) {
+            create_selection(data, $encrypted, Some(zfm::archive_actions::Format::$format));
+        }
+    };
+}
+format_action!(create_7z, SevenZip, false);
+format_action!(create_zip, Zip, false);
+format_action!(create_tar, Tar, false);
+format_action!(create_tar_gz, TarGzip, false);
+format_action!(create_tar_bz2, TarBzip2, false);
+format_action!(create_tar_xz, TarXz, false);
+format_action!(create_gz, Gzip, false);
+format_action!(create_bz2, Bzip2, false);
+format_action!(create_xz, Xz, false);
+format_action!(create_encrypted_7z, SevenZip, true);
+format_action!(create_encrypted_zip, Zip, true);
+unsafe fn create_selection(data: P, encrypted: bool, chosen: Option<zfm::archive_actions::Format>) {
     let app = &*(data as *mut App);
     let manager_ptr = app.archive_manager;
     let manager = &*(manager_ptr as *mut ArchiveManager);
     if manager.busy { set_status(app, "An archive operation is already running."); return; }
     let observed_job = manager.job;
     let window = app.window;
+    let alive = app.alive.clone();
     let rows = selected_rows(app.list);
     if rows.is_empty() || rows.len() > 1024 { set_status(app, "Select between 1 and 1024 files or folders."); return; }
+    if chosen.map_or(false, |f| f.single_file()) && (rows.len() != 1 || !app.entries.get((api().gtk_list_box_row_get_index)(rows[0]) as usize).map_or(false, |e| e.is_file)) {
+        set_status(app, "This compression format requires one regular file."); return;
+    }
     let mut sources = Vec::new();
     for row in rows {
         let index = (api().gtk_list_box_row_get_index)(row);
@@ -545,18 +573,26 @@ unsafe fn create_selection(data: P, encrypted: bool) {
             _ => { set_status(app, "Select regular files or folders only."); return; }
         }
     }
-    let output = match choose_archive_file(window, "Save archive (.7z, .zip, .tar, .tar.gz, .tar.bz2, .tar.xz, .gz, .bz2 or .xz)", true) {
+    let directory = app.tabs.current().current().to_path_buf();
+    let suggested = chosen.map(|format| {
+        let name = if sources.len() == 1 { sources[0].file_name().unwrap_or_default().to_string_lossy().into_owned() } else { "Archive".into() };
+        format!("{name}{}", format.suffix())
+    });
+    let output = match choose_archive_file_suggested(window, "Save archive (.7z, .zip, .tar, .tar.gz, .tar.bz2, .tar.xz, .gz, .bz2 or .xz)", true, Some(&directory), suggested.as_deref()) {
         Some(path) => path,
         None => return,
     };
-    if !zfm::archive_engine::supports_creation(&output, encrypted) {
-        set_status(app, if encrypted { "Choose an encrypted .7z or .zip output filename." } else { "Choose .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz." });
+    if !alive.load(Ordering::Relaxed) { return; }
+    if !zfm::archive_engine::supports_creation(&output, encrypted) || chosen.map_or(false, |format| !format.matches(&output)) {
+        set_status(&*(data as *mut App), if encrypted { "Choose an encrypted .7z or .zip output filename." } else { "Choose .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz." });
         return;
     }
     let password = if encrypted {
         let first = match password_prompt(window, "Create encrypted archive: password") { Some(p) => p, None => return };
+        if !alive.load(Ordering::Relaxed) { return; }
         let second = match password_prompt(window, "Confirm archive password") { Some(p) => p, None => return };
-        if first != second { set_status(app, "Passwords do not match."); return; }
+        if !alive.load(Ordering::Relaxed) { return; }
+        if first != second { set_status(&*(data as *mut App), "Passwords do not match."); return; }
         Some(first)
     } else { None };
     let manager = &mut *(manager_ptr as *mut ArchiveManager);
@@ -576,6 +612,32 @@ unsafe fn create_selection(data: P, encrypted: bool) {
         let message = Box::new(ArchiveMessage { manager, job, event: ArchiveEvent::Created(result) });
         unsafe { (api().g_idle_add)(archive_update, Box::into_raw(message) as P); }
     });
+}
+
+pub(super) unsafe extern "C" fn extract_here(_: P, data: P) { extract_selection(data, true, false); }
+pub(super) unsafe extern "C" fn extract_to(_: P, data: P) { extract_selection(data, false, false); }
+pub(super) unsafe extern "C" fn extract_password(_: P, data: P) { extract_selection(data, false, true); }
+unsafe fn extract_selection(data: P, here: bool, encrypted: bool) {
+    let archive = match selected_path(data) {
+        Some(path) if supports_archive(&path) => path,
+        _ => { set_status(&*(data as *mut App), "Select one supported archive file."); return; }
+    };
+    let window = (*(data as *mut App)).window;
+    let alive = (*(data as *mut App)).alive.clone();
+    let source_dir = archive.parent().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf();
+    let destination = if here { source_dir.clone() } else {
+        match choose_folder(window) { Some(path) => path, None => return }
+    };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let password = if encrypted {
+        match password_prompt(window, "Archive password") {
+            Some(value) if !value.is_empty() => Some(value),
+            Some(_) => { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), "Enter a password."); } return; },
+            None => return,
+        }
+    } else { None };
+    if !alive.load(Ordering::Relaxed) || !archive_confirm(window, &destination.to_string_lossy()) || !alive.load(Ordering::Relaxed) { return; }
+    start_operation(data, destination.clone(), Operation::ArchiveExtract(archive, destination, password));
 }
 
 unsafe extern "C" fn archive_create(_: P, data: P) {
@@ -881,6 +943,7 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
         .copied()
         .unwrap_or(ptr::null_mut());
     let mut to_load = false;
+    let mut engine_only = false;
     if !row.is_null() && !manager.busy {
         let index = (api().gtk_list_box_row_get_index)(row);
         if index >= 0 {
@@ -897,6 +960,7 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
                         );
                     }
                     to_load = true;
+                    engine_only = source_format(&entry.path).is_none();
                 }
             }
         }
@@ -905,14 +969,15 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
     let manager_ptr = app.archive_manager;
     (api().gtk_widget_show_all)(window);
     if to_load {
-        archive_load(ptr::null_mut(), manager_ptr);
+        if engine_only { archive_engine_list(ptr::null_mut(), manager_ptr); }
+        else { archive_load(ptr::null_mut(), manager_ptr); }
     }
 }
 pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     let window = (api().gtk_window_new)(0);
     (api().gtk_window_set_title)(window, c("ZFM — Archive manager").as_ptr());
     (api().gtk_window_set_transient_for)(window, parent);
-    (api().gtk_window_set_default_size)(window, 700, 520);
+    (api().gtk_window_set_default_size)(window, 850, 600);
     let layout = (api().gtk_box_new)(1, 6);
     (api().gtk_widget_set_margin_start)(layout, 12);
     (api().gtk_widget_set_margin_end)(layout, 12);
@@ -931,6 +996,8 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     (api().gtk_box_pack_start)(input_row, input, 1, 1, 0);
     let engine_row = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, engine_row, 0, 0, 0);
+    let extract_row = (api().gtk_box_new)(0, 4);
+    (api().gtk_box_pack_start)(layout, extract_row, 0, 0, 0);
     let dest_row = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, dest_row, 0, 0, 0);
     let destination = (api().gtk_entry_new)();
@@ -971,8 +1038,10 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     button(engine_row, "Engine test", archive_engine_test as P, manager);
     button(engine_row, "List with password…", archive_engine_list_password as P, manager);
     button(engine_row, "Test with password…", archive_engine_test_password as P, manager);
-    button(engine_row, "Engine extract all…", archive_engine_extract as P, manager);
-    button(engine_row, "Extract with password…", archive_engine_extract_password as P, manager);
+    button(extract_row, "Extract all with engine…", archive_engine_extract as P, manager);
+    button(extract_row, "Extract with password…", archive_engine_extract_password as P, manager);
+    button(extract_row, "Extract selected…", archive_extract_selected as P, manager);
+    button(extract_row, "Extract all (native)…", archive_extract_all as P, manager);
     button(dest_row, "Browse…", archive_destination as P, manager);
     button(actions, "Test archive", archive_test as P, manager);
     button(actions, "Select all", archive_select_all as P, manager);
@@ -983,13 +1052,6 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
         archive_create as P,
         manager,
     );
-    button(
-        actions,
-        "Extract selected…",
-        archive_extract_selected as P,
-        manager,
-    );
-    button(actions, "Extract all…", archive_extract_all as P, manager);
     button(actions, "Cancel", archive_cancel as P, manager);
     connect(window, "delete-event", converter_hide as P, manager);
     manager
