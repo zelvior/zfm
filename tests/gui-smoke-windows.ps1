@@ -168,6 +168,9 @@ try {
     $process.Refresh()
     if ($process.HasExited) { throw "ZFM exited while handling navigation commands (exit code $($process.ExitCode))." }
     Write-Host "Win32 window and basic controls detected: $title"
+} catch {
+    Write-Host "::error title=GUI smoke test::$($_.Exception.Message)"
+    throw
 } finally {
     if ($null -ne $process) {
         $process.Refresh()
