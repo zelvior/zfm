@@ -7,7 +7,7 @@ case "$TARGET" in x86_64-unknown-linux-gnu|i686-unknown-linux-gnu) ;; *) echo 'U
 export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture i386
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl build-essential gcc-multilib libc6-dev-i386 \
+apt-get install -y --no-install-recommends ca-certificates curl build-essential gcc-multilib g++-multilib libc6-dev-i386 \
     libarchive13 libarchive13:i386 libglib2.0-0 libglib2.0-0:i386 \
     libgtk-3-0 libgtk-3-0:i386 python3 xvfb xauth xdotool xdg-utils
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh
@@ -27,7 +27,12 @@ xvfb-run -a bash tests/gui-smoke-linux.sh "$binary"
 mkdir -p "build-output/$TARGET"
 cp "$binary" "build-output/$TARGET/zfm"
 bash tests/package-deb.sh
-bash scripts/package-deb.sh "$binary" "$TARGET" "$TAG" "build-output/$TARGET/zfm.deb"
+engine="build-output/$TARGET/zfm-archive-engine"
+bash scripts/build-archive-engine.sh "$TARGET" "$engine"
+new_glibc=$(objdump -T "$engine" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | awk -F '[_.]' '$2 > 2 || ($2 == 2 && $3 > 27)')
+if [ -n "$new_glibc" ]; then echo "Unsupported engine glibc requirements: $new_glibc" >&2; exit 1; fi
+python3 scripts/prepare-pdfium.py "$TARGET" "build-output/$TARGET/pdfium"
+bash scripts/package-deb.sh "$binary" "$TARGET" "$TAG" "build-output/$TARGET/zfm.deb" "$engine" "build-output/$TARGET/pdfium/libpdfium.so" "build-output/$TARGET/pdfium/pdfium-notices.txt"
 # Exercise the real package's installation, launch, and uninstallation in the
 # disposable container. Multiarch runtimes are installed above for i686.
 dpkg -i "build-output/$TARGET/zfm.deb"

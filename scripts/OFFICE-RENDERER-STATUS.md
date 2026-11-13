@@ -1,0 +1,7 @@
+# Experimental Office layout bridge
+
+`office-renderer.mjs` and `src/office_render.rs` are an **unpackaged prototype**. Normal packages do not contain the required runtime, so the shipped Office preview remains text-only for DOCX, PPTX, XLSX and ODT. Legacy Office, ODS and ODP fail without the runtime.
+
+The prototype expects a trusted `office-runtime` directory beside the executable (or `/usr/lib/zfm/office-runtime` on Linux) containing a compatible `node` (`node.exe` on Windows), the bridge script, and `node_modules` with `@deepseek-ai/libreoffice-kit` and `@deepseek-ai/libreoffice-kit-wasm` 0.2.3 and their dependencies. It deliberately doesn't search PATH or select a native engine. The WASM package requires Node 22.19 or later, shared memory and substantial memory and disk space. Platform and font availability affect layout. Node/Linux x86 and Windows 7 compatibility, licensing/source distribution and reproducible offline packaging remain unresolved. Do not distribute this prototype as a finished bundled feature without addressing these and verifying all supported platforms.
+
+Conversion happens in a child process, not a security sandbox. Documents are copied to temporary storage and normally removed; forced termination or errors may leave copies. PDFium still renders the resulting PDF in-process. Use only trusted files. Linux x64 has been exercised with a small DOCX; GUI and Windows paths have not been validated.

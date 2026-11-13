@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Modified: cover the compact layout, tabs, settings and read-only preview.
+# Modified: isolate persistent settings and cover layout, tabs, settings and preview.
 param([Parameter(Mandatory=$true)][string]$Executable)
 $ErrorActionPreference = 'Stop'
 if (-not ('ZfmSmoke' -as [type])) {
@@ -38,6 +38,10 @@ public static class ZfmSmoke {
 $work = Join-Path ([IO.Path]::GetTempPath()) ('zfm-gui-smoke-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 $process = $null
+$originalAppData = $env:APPDATA
+$configRoot = Join-Path ([IO.Path]::GetTempPath()) ('zfm-config-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $configRoot | Out-Null
+$env:APPDATA = $configRoot
 try {
     Set-Content -LiteralPath (Join-Path $work 'example.txt') -Value 'GUI smoke fixture'
     Set-Content -LiteralPath (Join-Path $work 'second.txt') -Value 'Second fixture'
@@ -151,7 +155,7 @@ try {
     # Clear the selection after the preview.
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
-    # Settings is a modal session-only dialog; cancel must not apply changes.
+    # Settings is a modal dialog; cancel must not apply changes.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings.' }
     $settings = [IntPtr]::Zero
     for ($i = 0; $i -lt 100; $i++) {
@@ -161,7 +165,10 @@ try {
     }
     if ($settings -eq [IntPtr]::Zero) { throw 'Settings dialog did not appear.' }
     if ([ZfmSmoke]::GetDlgItem($settings, 1001) -eq [IntPtr]::Zero -or [ZfmSmoke]::GetDlgItem($settings, 1002) -eq [IntPtr]::Zero) { throw 'Settings controls are missing.' }
-    if (-not [ZfmSmoke]::PostMessageW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close settings.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not cancel settings.' }
+    $configFile = Join-Path $configRoot 'zfm\settings.conf'
+    if (Test-Path -LiteralPath $configFile) { throw 'Cancelling settings created a file.' }
     # Extended selection accepts more than one row and reports both.
     if (([ZfmSmoke]::GetWindowLongW($list, -16) -band 0x0800) -eq 0) { throw 'List does not support extended selection.' }
     foreach ($index in @(0, 1)) {
@@ -348,6 +355,45 @@ try {
         [IO.File]::ReadAllText((Join-Path $copiedFolder 'nested\file.txt')) -ne 'nested content' -or
         -not (Test-Path -LiteralPath $copiedCompanion) -or
         [IO.File]::ReadAllText($copiedCompanion) -ne 'companion content') { throw 'Multi-item copy was incomplete.' }
+    # Save a changed value after the other list tests, then verify it survives restart.
+    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings for saving.' }
+    $settings = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $settings = [ZfmSmoke]::FindWindowW('#32770', 'ZFM Settings')
+        if ($settings -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($settings -eq [IntPtr]::Zero) { throw 'Settings did not open for saving.' }
+    $hiddenSetting = [ZfmSmoke]::GetDlgItem($settings, 1001)
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($hiddenSetting, 0x00f1, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not change the setting.' }
+    if (-not [ZfmSmoke]::PostMessageW($settings, 0x111, [UIntPtr]1, [IntPtr]::Zero)) { throw 'Could not apply settings.' }
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $configFile); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $configFile) -or ([IO.File]::ReadAllText($configFile) -notmatch 'show_hidden=true')) { throw 'Settings were not saved.' }
+    # Relaunch with the same configuration directory and check the saved setting.
+    Stop-Process -Id $process.Id -Force
+    $process.WaitForExit()
+    $process = Start-Process -FilePath (Resolve-Path -LiteralPath $Executable).Path -ArgumentList ('"' + $work + '"') -PassThru
+    $window = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $process.Refresh()
+        if ($process.HasExited) { throw 'ZFM exited while restoring settings.' }
+        $window = $process.MainWindowHandle
+        if ($window -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($window -eq [IntPtr]::Zero -or -not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Cannot reopen settings after restart.' }
+    $settings = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $settings = [ZfmSmoke]::FindWindowW('#32770', 'ZFM Settings')
+        if ($settings -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($settings -eq [IntPtr]::Zero) { throw 'Settings did not reopen after restart.' }
+    $result = [UIntPtr]::Zero
+    $hiddenSetting = [ZfmSmoke]::GetDlgItem($settings, 1001)
+    if ([ZfmSmoke]::SendMessageTimeoutW($hiddenSetting, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 1) { throw 'Hidden-file setting was not restored.' }
+    [void][ZfmSmoke]::PostMessageW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)
     Write-Host "Win32 window and basic controls detected: $title"
 } catch {
     Write-Host "::error title=GUI smoke test::$($_.Exception.Message)"
@@ -357,5 +403,6 @@ try {
         $process.Refresh()
         if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit() }
     }
-    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    $env:APPDATA = $originalAppData
+    Remove-Item -LiteralPath $work, $configRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

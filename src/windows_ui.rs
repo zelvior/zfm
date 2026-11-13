@@ -1,4 +1,4 @@
-// Modified: integrate the native read-only preview and settings dialog.
+// Modified: integrate preview, persistent settings and the archive browser.
 // Modified: compact reference-inspired file-manager layout and visuals.
 //! Native Win32 dark-slate file manager interface.
 //!
@@ -26,6 +26,8 @@ mod windows_actions;
 mod windows_viewer;
 #[path = "windows_settings.rs"]
 mod windows_settings;
+#[path = "windows_archive.rs"]
+mod windows_archive;
 use zfm::ui_theme::{
     self, ActionIcon, BoxRect, ItemIcon, Rgb, SortColumn, ViewMode, WindowMetrics,
 };
@@ -136,6 +138,9 @@ const PROMPT_FOLDER: usize = 140;
 const CONVERT: usize = 141;
 const PREVIEW: usize = 142;
 const SETTINGS: usize = 143;
+const ARCHIVE: usize = 144;
+const ARCHIVE_CREATE: usize = 145;
+const ARCHIVE_CREATE_ENCRYPTED: usize = 146;
 
 #[repr(C)]
 struct WndClass {
@@ -2103,6 +2108,7 @@ enum Operation {
     CopyItems(Vec<PathBuf>, PathBuf),
     Trash(PathBuf, usize),
     Convert(PathBuf, PathBuf, u8),
+    ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
 }
 
 unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
@@ -2138,6 +2144,9 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     .map(|result| result.message(paths.len())),
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
                     .map(|p| format!("Moved to {}", p.display())),
+                Operation::ArchiveCreate(inputs, output, password) =>
+                    zfm::archive_engine::create_items_password(&inputs, &output, &AtomicBool::new(false), password.as_deref())
+                        .map(|_| format!("Created {}", output.display())),
                 Operation::Convert(input, output, mode) => {
                     let cancel = AtomicBool::new(false);
                     let result = match mode {
@@ -2407,9 +2416,14 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
             AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
             if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
             }
+        }
+        if !selected_items.is_empty() && selected_items.len() <= 1024 && selected_items.iter().all(|i| app.entries[*i].is_file || app.entries[*i].is_dir) {
+            AppendMenuW(menu, 0, ARCHIVE_CREATE, text("Create archive from selection…").as_ptr());
+            AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive from selection…").as_ptr());
         }
         AppendMenuW(menu, 0x800, 0, ptr::null());
         for (id, title) in [
@@ -3045,6 +3059,11 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 SETTINGS if code == 0 => {
                     if let Some((hidden, ascending)) = windows_settings::show(hwnd, app.theme, app.show_hidden, app.sort_ascending) {
+                        let settings = zfm::settings::Settings { show_hidden: hidden, sort_ascending: ascending };
+                        if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, settings)) {
+                            show_error(hwnd, &format!("Settings were not saved or applied: {error}"));
+                            return 0;
+                        }
                         app.show_hidden = hidden;
                         app.sort_ascending = ascending;
                         InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
@@ -3278,6 +3297,33 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 LIST if code == 1 => {
                     invalidate_status_bar(hwnd);
                 }
+                ARCHIVE_CREATE | ARCHIVE_CREATE_ENCRYPTED if code == 0 => {
+                    let selected = selected_indices(app);
+                    if selected.is_empty() || selected.len() > 1024 { set_status(hwnd, app, Some("Select between 1 and 1024 items.".into())); return 0; }
+                    let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+                    let proposed = if paths.len() == 1 { format!("{}.7z", paths[0].file_name().unwrap_or_default().to_string_lossy()) } else { "Archive.7z".to_string() };
+                    if let Some(name) = windows_actions::prompt(hwnd, app.theme, "Create .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz", OsStr::new(&proposed), false) {
+                        match zfm::operations::validate_name(&name) {
+                            Ok(()) => {
+                                let output = app.tabs.current().current().join(name);
+                                let password = if id == ARCHIVE_CREATE_ENCRYPTED {
+                                    if !output.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case("7z") || e.eq_ignore_ascii_case("zip")) {
+                                        show_error(hwnd, "Encrypted archives require a .7z or .zip filename."); return 0;
+                                    }
+                                    let first = match windows_actions::password_prompt(hwnd, app.theme, "Archive password") { Some(p) => p, None => return 0 };
+                                    let second = match windows_actions::password_prompt(hwnd, app.theme, "Confirm archive password") { Some(p) => p, None => return 0 };
+                                    if first != second { show_error(hwnd, "Passwords do not match."); return 0; }
+                                    Some(first)
+                                } else { None };
+                                start_operation(hwnd, app, Operation::ArchiveCreate(paths, output, password));
+                            }
+                            Err(e) => set_status(hwnd, app, Some(format!("Invalid output name: {e}"))),
+                        }
+                    }
+                }
+                ARCHIVE if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) { windows_archive::show(hwnd, app.theme, &path); }
+                }
                 PREVIEW if code == 0 => {
                     if let Some(path) = selected_path(hwnd, app) { windows_viewer::show(hwnd, app.theme, &path); }
                 }
@@ -3380,14 +3426,18 @@ pub fn run() -> Result<(), String> {
                 .join(initial)
         };
 
+        let (saved_settings, settings_warning) = match zfm::settings::user_path().and_then(|path| zfm::settings::load(&path)) {
+            Ok(settings) => (settings, None),
+            Err(error) => (zfm::settings::Settings::default(), Some(format!("Could not load settings; using defaults: {error}"))),
+        };
         let app = Box::into_raw(Box::new(App {
             theme: &theme,
             tabs: Tabs::new(initial),
             filter: String::new(),
-            show_hidden: false,
+            show_hidden: saved_settings.show_hidden,
             drives_expanded: true,
             sort_column: SortColumn::Name,
-            sort_ascending: true,
+            sort_ascending: saved_settings.sort_ascending,
             view_mode: ViewMode::Details,
             focused_edit: 0,
             hovered_child: ptr::null_mut(),
@@ -3429,6 +3479,7 @@ pub fn run() -> Result<(), String> {
             return Err("Could not create the native window".into());
         }
         ShowWindow(window, 5);
+        if let Some(warning) = settings_warning { show_error(window, &warning); }
         let mut msg: Msg = std::mem::zeroed();
         loop {
             let status = GetMessageW(&mut msg, ptr::null_mut(), 0, 0);

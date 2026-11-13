@@ -37,7 +37,8 @@ for block in blocks:
     require(name and version, 'unrecognized Cargo.lock package')
     require(not re.search(r'^source\s*=', block, re.M), 'external Cargo dependency: review third-party inventory and SBOM')
     locked.add((name.group(1), version.group(1)))
-packages = sbom['packages']
+packages = [p for p in sbom['packages'] if p['name'] != '7-Zip' and not p['name'].startswith('pypdfium2-wheel-')]
+require(any(p['name'] == '7-Zip' and p['SPDXID'] == 'SPDXRef-7Zip' for p in sbom['packages']), 'missing vendored archive engine in SBOM')
 require(locked == {(p['name'], p['versionInfo']) for p in packages}, 'Cargo.lock and source SBOM drifted')
 for path in ('Cargo.toml', 'installer/Cargo.toml'):
     manifest = read(path)

@@ -44,24 +44,79 @@ unsafe fn decode_image(bytes: &[u8]) -> Result<(P, i32, i32), String> {
     } else { Ok((image, info.width, info.height)) }
 }
 
+struct OfficePreviewResult { app: usize, alive: Arc<AtomicBool>, cancel: Arc<AtomicBool>, title: String, result: Result<zfm::office_render::Preview, String> }
+unsafe extern "C" fn office_preview_ready(data: P) -> c_int {
+    let result = Box::from_raw(data as *mut OfficePreviewResult);
+    if !result.alive.load(Ordering::Relaxed) { return 0; }
+    let app = &mut *(result.app as *mut App);
+    app.office_cancels.retain(|cancel| !Arc::ptr_eq(cancel, &result.cancel));
+    let content = match result.result {
+        Ok(zfm::office_render::Preview::LayoutPdf(bytes)) => {
+            show_visual(app, &result.title, Kind::Pdf, bytes);
+            return 0;
+        }
+        Ok(zfm::office_render::Preview::Text(content)) => content,
+        Err(error) => { set_status(app, &format!("Document preview failed: {error}")); return 0; }
+    };
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c(&format!("ZFM text-only preview — {}", result.title)).as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, app.window);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 900, 650);
+    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), scroll, 1, 1, 0);
+    let view = (api().gtk_text_view_new)();
+    (api().gtk_text_view_set_editable)(view, 0);
+    (api().gtk_text_view_set_cursor_visible)(view, 0);
+    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(&content).as_ptr(), -1);
+    (api().gtk_container_add)(scroll, view);
+    (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
+    (api().gtk_widget_show_all)(dialog);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    0
+}
+
 pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
-    let app = &*(data as *mut App);
+    let app = &mut *(data as *mut App);
     let rows = selected_rows(app.list);
     if rows.len() != 1 { set_status(app, "Select one file to preview."); return; }
     let index = (api().gtk_list_box_row_get_index)(rows[0]);
     let entry = match app.entries.get(index as usize) { Some(e) if e.is_file => e, _ => return };
     let kind = viewer::kind(&entry.path);
+    if kind == Kind::Office {
+        if app.office_cancels.len() >= 4 { set_status(app, "Too many document previews are already running."); return; }
+        set_status(app, "Preparing document preview…");
+        let path = entry.path.clone();
+        let title = entry.name.clone();
+        let alive = app.alive.clone();
+        let app_ptr = data as usize;
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.office_cancels.push(cancel.clone());
+        thread::spawn(move || {
+            let result = zfm::office_render::preview(&path, &cancel);
+            let message = Box::new(OfficePreviewResult { app: app_ptr, alive, cancel, title, result });
+            unsafe { (api().g_idle_add)(office_preview_ready, Box::into_raw(message) as P); }
+        });
+        return;
+    }
     if kind == Kind::Unsupported {
         set_status(app, "No built-in preview for this format. Use Open to choose the system's default app.");
         return;
     }
-    let limit = if kind == Kind::Text { viewer::MAX_TEXT_BYTES } else { viewer::MAX_IMAGE_BYTES };
+    let limit = match kind { Kind::Text => viewer::MAX_TEXT_BYTES, Kind::Image => viewer::MAX_IMAGE_BYTES, Kind::Pdf => zfm::pdf::MAX_PDF_BYTES, Kind::Office | Kind::Unsupported => unreachable!() };
     let bytes = match viewer::read_bounded(&entry.path, limit) {
         Ok(bytes) => bytes,
         Err(e) => { set_status(app, &format!("Preview failed: {e}")); return; }
     };
+    let title = entry.name.clone();
+    show_visual(app, &title, kind, bytes);
+}
+
+unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     let dialog = (api().gtk_dialog_new)();
-    (api().gtk_window_set_title)(dialog, c(&format!("ZFM Preview — {}", entry.name)).as_ptr());
+    (api().gtk_window_set_title)(dialog, c(&format!("ZFM Preview — {title}")).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
@@ -71,6 +126,9 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     (api().gtk_box_pack_start)(content, scroll, 1, 1, 0);
     let mut pixbuf = ptr::null_mut();
     let mut image_widget = ptr::null_mut();
+    let mut page_index = 0usize;
+    let mut page_count = 0usize;
+    let mut pdf_password: Option<String> = None;
     let info_label = label("");
     (api().gtk_label_set_xalign)(info_label, 0.0);
     (api().gtk_box_pack_start)(content, info_label, 0, 0, 6);
@@ -86,14 +144,36 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
         (api().gtk_container_add)(scroll, view);
         (api().gtk_label_set_text)(info_label, c(&format!("Read-only text · {} bytes", bytes.len())).as_ptr());
     } else {
-        let (image, width, height) = match decode_image(&bytes) {
+        let rendered;
+        let image_bytes = if kind == Kind::Pdf {
+            let mut result = zfm::pdf::render_page_password(&bytes, 0, None);
+            for _ in 0..3 {
+                if !matches!(&result, Err(error) if error == zfm::pdf::PASSWORD_REQUIRED) { break; }
+                let password = match super::archive_ui::password_prompt(app.window, "PDF password") {
+                    Some(value) => value,
+                    None => { (api().gtk_widget_destroy)(dialog); return; }
+                };
+                result = zfm::pdf::render_page_password(&bytes, 0, Some(&password));
+                pdf_password = Some(password);
+            }
+            match result {
+                Ok((page, count)) => { rendered = page; page_count = count; &rendered[..] }
+                Err(error) => { (api().gtk_widget_destroy)(dialog); set_status(app, &error); return; }
+            }
+        } else { &bytes[..] };
+        let (image, width, height) = match decode_image(image_bytes) {
             Ok(result) => result,
             Err(error) => { (api().gtk_widget_destroy)(dialog); set_status(app, &error); return; }
         };
         pixbuf = image;
         image_widget = (api().gtk_image_new_from_pixbuf)(pixbuf);
         (api().gtk_container_add)(scroll, image_widget);
-        (api().gtk_label_set_text)(info_label, c(&format!("{width} × {height} pixels · scaled preview")).as_ptr());
+        let info = if kind == Kind::Pdf { format!("Page 1 / {page_count} · PDF preview") } else { format!("{width} × {height} pixels · scaled preview") };
+        (api().gtk_label_set_text)(info_label, c(&info).as_ptr());
+        if kind == Kind::Pdf {
+            (api().gtk_dialog_add_button)(dialog, c("Previous page").as_ptr(), 13);
+            (api().gtk_dialog_add_button)(dialog, c("Next page").as_ptr(), 14);
+        }
         (api().gtk_dialog_add_button)(dialog, c("−").as_ptr(), 10);
         (api().gtk_dialog_add_button)(dialog, c("Fit").as_ptr(), 11);
         (api().gtk_dialog_add_button)(dialog, c("+").as_ptr(), 12);
@@ -103,11 +183,26 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     let mut zoom = 100i32;
     loop {
         let response = (api().gtk_dialog_run)(dialog);
-        if pixbuf.is_null() || ![10, 11, 12].contains(&response) {
+        if pixbuf.is_null() || ![10, 11, 12, 13, 14].contains(&response) {
             if response != -1 { (api().gtk_widget_destroy)(dialog); }
             break;
         }
-        zoom = match response { 10 => (zoom - 25).max(25), 11 => 100, _ => (zoom + 25).min(200) };
+        if kind == Kind::Pdf && (response == 13 || response == 14) {
+            let next = if response == 13 { page_index.saturating_sub(1) } else { (page_index + 1).min(page_count - 1) };
+            if next != page_index {
+                match zfm::pdf::render_page_password(&bytes, next, pdf_password.as_deref()).and_then(|(bmp, _)| decode_image(&bmp)) {
+                    Ok((new_pixbuf, _, _)) => {
+                        (api().g_object_unref)(pixbuf);
+                        pixbuf = new_pixbuf;
+                        page_index = next;
+                        (api().gtk_label_set_text)(info_label, c(&format!("Page {} / {page_count} · PDF preview", page_index + 1)).as_ptr());
+                    }
+                    Err(error) => (api().gtk_label_set_text)(info_label, c(&format!("Page failed: {error}")).as_ptr()),
+                }
+            }
+        } else {
+            zoom = match response { 10 => (zoom - 25).max(25), 11 => 100, 12 => (zoom + 25).min(200), _ => zoom };
+        }
         let width = ((api().gdk_pixbuf_get_width)(pixbuf) * zoom / 100).max(1);
         let height = ((api().gdk_pixbuf_get_height)(pixbuf) * zoom / 100).max(1);
         let scaled = (api().gdk_pixbuf_scale_simple)(pixbuf, width, height, 2);

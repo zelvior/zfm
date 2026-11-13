@@ -134,6 +134,12 @@ jobs:
           & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $name = "zfm-$env:TARGET"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
+          & ./scripts/build-archive-engine.ps1 -Target $env:TARGET -Output "dist/zfm-archive-engine.exe"
+          $env:ZFM_ENGINE_BINARY = (Resolve-Path "dist/zfm-archive-engine.exe").Path
+          python ./scripts/prepare-pdfium.py $env:TARGET "target/$env:TARGET/pdfium"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare bundled PDFium renderer.' }
+          $env:ZFM_PDFIUM_BINARY = (Resolve-Path "target/$env:TARGET/pdfium/pdfium.dll").Path
+          $env:ZFM_PDFIUM_NOTICES = (Resolve-Path "target/$env:TARGET/pdfium/pdfium-notices.txt").Path
           # The setup program embeds the release executable at build time.
           $env:ZFM_APP_BINARY = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
           $env:ZFM_VERSION = $env:TAG

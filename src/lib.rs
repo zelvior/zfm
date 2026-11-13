@@ -1,4 +1,4 @@
-// Modified: expose bounded built-in viewer input handling.
+// Modified: expose bounded viewer and persistent settings handling.
 //! Filesystem and navigation logic independent of the user interface.
 pub mod directory;
 pub mod navigation;
@@ -10,6 +10,8 @@ pub mod image_convert;
 pub mod operations;
 
 pub mod archive;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod archive_engine;
 
 pub mod trash;
 
@@ -28,3 +30,11 @@ pub mod json_csv;
 mod test_support;
 
 pub mod viewer;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod pdf;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod office;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod office_render;
+
+pub mod settings;

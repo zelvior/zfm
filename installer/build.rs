@@ -46,6 +46,49 @@ fn main() {
     }
     println!("cargo:rustc-env=ZFM_PAYLOAD_PATH={}", payload.display());
 
+    println!("cargo:rerun-if-env-changed=ZFM_ENGINE_BINARY");
+    let engine = out.join("zfm-archive-engine.bin");
+    match env::var_os("ZFM_ENGINE_BINARY") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            println!("cargo:rerun-if-changed={}", path.display());
+            fs::copy(&path, &engine).expect("could not copy the archive engine executable");
+        }
+        None if env::var_os("ZFM_APP_BINARY").is_some() => {
+            panic!("Set ZFM_ENGINE_BINARY when embedding a real ZFM application");
+        }
+        None => fs::write(&engine, b"Development placeholder, not an archive engine.\n")
+            .expect("could not write engine placeholder"),
+    }
+    println!("cargo:rustc-env=ZFM_ENGINE_PATH={}", engine.display());
+    for (env_name, output_name, key) in [
+        ("ZFM_PDFIUM_BINARY", "pdfium.bin", "ZFM_PDFIUM_PATH"),
+        ("ZFM_PDFIUM_NOTICES", "pdfium-notices.txt", "ZFM_PDFIUM_NOTICES_PATH"),
+    ] {
+        println!("cargo:rerun-if-env-changed={}", env_name);
+        let destination = out.join(output_name);
+        match env::var_os(env_name) {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                println!("cargo:rerun-if-changed={}", path.display());
+                fs::copy(path, &destination).expect("could not copy PDFium payload");
+            }
+            None if env::var_os("ZFM_APP_BINARY").is_some() => panic!("Set {} when embedding a real ZFM application", env_name),
+            None => fs::write(&destination, b"Development placeholder.\n").expect("could not write PDFium placeholder"),
+        }
+        println!("cargo:rustc-env={}={}", key, destination.display());
+    }
+    let source = root.join("vendor/7zip/7zip-d3296e39.tar.gz");
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rustc-env=ZFM_ENGINE_SOURCE_PATH={}", source.display());
+    for (name, key) in [("License.txt", "ZFM_7ZIP_NOTICE_PATH"),
+                        ("copying.txt", "ZFM_7ZIP_LGPL_PATH"),
+                        ("unRarLicense.txt", "ZFM_7ZIP_UNRAR_PATH")] {
+        let path = root.join("LICENSES/7zip").join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rustc-env={}={}", key, path.display());
+    }
+
     // The setup wizard embeds the same monochrome icon and logo as the
     // application so the installer window and its shortcuts look identical.
     let icon = root.join("packaging").join("zfm.ico");

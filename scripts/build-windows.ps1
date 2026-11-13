@@ -90,7 +90,14 @@ foreach ($Target in $Targets) {
     try {
         if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { throw "Executable not found: $Binary" }
         New-Item -ItemType Directory -Path $Destination | Out-Null
+        & (Join-Path $PSScriptRoot 'build-archive-engine.ps1') -Target $Target -Output (Join-Path $Destination 'zfm-archive-engine.exe')
+        & python (Join-Path $PSScriptRoot 'prepare-pdfium.py') $Target $Destination
+        if ($LASTEXITCODE -ne 0) { throw 'Could not prepare bundled PDF renderer; install Python 3 and retry.' }
         Copy-Item -LiteralPath $Binary -Destination (Join-Path $Destination 'zfm.exe')
+        Copy-Item -LiteralPath (Join-Path $Root 'vendor/7zip/7zip-d3296e39.tar.gz') -Destination (Join-Path $Destination '7zip-source.tar.gz')
+        Copy-Item -LiteralPath (Join-Path $Root 'LICENSES/7zip/License.txt') -Destination (Join-Path $Destination '7zip-notices.txt')
+        Copy-Item -LiteralPath (Join-Path $Root 'LICENSES/7zip/copying.txt') -Destination (Join-Path $Destination '7zip-lgpl.txt')
+        Copy-Item -LiteralPath (Join-Path $Root 'LICENSES/7zip/unRarLicense.txt') -Destination (Join-Path $Destination '7zip-unrar.txt')
         $Succeeded += (Join-Path $Destination 'zfm.exe')
         Write-Host "Created $(Join-Path $Destination 'zfm.exe')"
     } catch {

@@ -11,13 +11,15 @@ pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind { Text, Image, Unsupported }
+pub enum Kind { Text, Image, Pdf, Office, Unsupported }
 
 pub fn kind(path: &Path) -> Kind {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "txt" | "md" | "markdown" | "log" | "csv" | "tsv" | "json" | "xml" | "html" | "htm" | "css" | "js" | "ts" | "rs" | "py" | "c" | "h" | "cpp" | "toml" | "yaml" | "yml" | "ini" | "conf" | "sh" | "ps1" => Kind::Text,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" => Kind::Image,
+        "pdf" => Kind::Pdf,
+        "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "odt" | "odp" | "ods" => Kind::Office,
         _ => Kind::Unsupported,
     }
 }
@@ -133,7 +135,7 @@ mod tests {
     fn recognizes_only_supported_types() {
         assert_eq!(kind(Path::new("photo.JPEG")), Kind::Image);
         assert_eq!(kind(Path::new("notes.MD")), Kind::Text);
-        assert_eq!(kind(Path::new("letter.pdf")), Kind::Unsupported);
+        assert_eq!(kind(Path::new("letter.pdf")), Kind::Pdf);
     }
     #[test]
     fn decodes_text_without_silently_accepting_binary() {

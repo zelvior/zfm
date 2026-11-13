@@ -9,7 +9,7 @@
       "Tool: Python-3"
     ],
     "created": "2026-11-12T00:00:00Z",
-    "comment": "Source-workspace Cargo.lock inventory; not a binary SBOM. Compiler, runtime, system libraries and build dependencies are outside scope. No file-level analysis. Creation timestamp uses 00:00 UTC as a date-only marker."
+    "comment": "Source-workspace Cargo.lock, vendored 7-Zip source and PDFium wheel inventory; not a complete binary SBOM. Compiler, runtime, system libraries and build dependencies are outside scope. No file-level analysis."
   },
   "packages": [
     {
@@ -33,6 +33,91 @@
       "licenseDeclared": "Apache-2.0",
       "copyrightText": "NOASSERTION",
       "sourceInfo": "Local workspace package listed in Cargo.lock and Cargo.toml; no binary contents analyzed."
+    },
+    {
+      "name": "7-Zip",
+      "SPDXID": "SPDXRef-7Zip",
+      "versionInfo": "d3296e39e1f1f92c7b41c0c3848e65640428d42d",
+      "downloadLocation": "https://github.com/ip7z/7zip/archive/d3296e39e1f1f92c7b41c0c3848e65640428d42d.tar.gz",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "adef737a73a2668d26c0733e496e1600662af2a8779e084e6475a0162e012576"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "Copyright (C) 1999-2026 Igor Pavlov; additional third-party copyrights in upstream notices",
+      "sourceInfo": "Vendored unmodified upstream source archive; release builds compile the standalone console engine. LGPL-2.1-or-later, BSD and public-domain components and unRAR restriction; see LICENSES/7zip."
+    },
+    {
+      "name": "pypdfium2-wheel-linux-x64",
+      "SPDXID": "SPDXRef-PDFium-linux-x64",
+      "versionInfo": "5.15.2",
+      "downloadLocation": "https://pypi.org/project/pypdfium2/5.15.2/",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dc31aea5b0fb9fefc9b537a65f4113980b2c40798445736a7e6565bc85161e37"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "sourceInfo": "Vendored PyPI wheel with PDFium build 8149; only its PDFium binary and notices are shipped. See vendor/pdfium/README.md."
+    },
+    {
+      "name": "pypdfium2-wheel-linux-x86",
+      "SPDXID": "SPDXRef-PDFium-linux-x86",
+      "versionInfo": "5.15.2",
+      "downloadLocation": "https://pypi.org/project/pypdfium2/5.15.2/",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "397271721330866d1da291042b128595f44cb0314c4675bb439ebaf5c7349b8b"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "sourceInfo": "Vendored PyPI wheel with PDFium build 8149; only its PDFium binary and notices are shipped. See vendor/pdfium/README.md."
+    },
+    {
+      "name": "pypdfium2-wheel-windows-x64",
+      "SPDXID": "SPDXRef-PDFium-windows-x64",
+      "versionInfo": "5.15.2",
+      "downloadLocation": "https://pypi.org/project/pypdfium2/5.15.2/",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "74d1bace34fb01c660d0b64344d5a4b7d276942b7c6623c88ab59ea21c5acfbd"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "sourceInfo": "Vendored PyPI wheel with PDFium build 8149; only its PDFium binary and notices are shipped. See vendor/pdfium/README.md."
+    },
+    {
+      "name": "pypdfium2-wheel-windows-x86",
+      "SPDXID": "SPDXRef-PDFium-windows-x86",
+      "versionInfo": "5.15.2",
+      "downloadLocation": "https://pypi.org/project/pypdfium2/5.15.2/",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "4cfc5ae26b600f92c5be0a0dccb949c10bd8bd3c93e440b75a362f9c1453fd93"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "sourceInfo": "Vendored PyPI wheel with PDFium build 8149; only its PDFium binary and notices are shipped. See vendor/pdfium/README.md."
     }
   ],
   "relationships": [
@@ -44,6 +129,31 @@
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relatedSpdxElement": "SPDXRef-Installer",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-7Zip",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-PDFium-linux-x64",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-PDFium-linux-x86",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-PDFium-windows-x64",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-PDFium-windows-x86",
       "relationshipType": "DESCRIBES"
     }
   ]
