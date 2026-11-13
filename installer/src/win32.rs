@@ -126,6 +126,9 @@ const IID_IPERSIST_FILE: Guid = Guid {
     data3: 0,
     data4: [0xc0, 0, 0, 0, 0, 0, 0, 0x46],
 };
+const COINIT_APARTMENTTHREADED: u32 = 0x2;
+const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
 
 /// HKEY_CURRENT_USER. The installer only writes per-user settings.
 pub const HKEY_CURRENT_USER: Hkey = 0x8000_0001usize as Hkey;
@@ -437,6 +440,7 @@ pub fn programs_folder() -> Option<PathBuf> {
 }
 
 pub fn browse_for_folder(owner: Hwnd, title: &str) -> Option<PathBuf> {
+    let _com = ComGuard::new().ok()?;
     let title = text(title);
     let mut display = [0u16; 260];
     let mut path = [0u16; 260];
@@ -623,6 +627,50 @@ pub fn delete_on_reboot(path: &Path) {
     }
 }
 
+/// Per-thread COM apartment guard.
+///
+/// Shell links (`CLSID_ShellLink`) and the modern folder picker require COM to
+/// be initialized on the calling thread; initializing COM on the wizard UI
+/// thread does not cover the background installation worker thread, which
+/// otherwise fails with `CO_E_NOTINITIALIZED` (`0x800401f0` / `-2147221008`).
+pub struct ComGuard {
+    uninitialize: bool,
+}
+
+impl ComGuard {
+    pub fn new() -> Result<Self, i32> {
+        let status = unsafe {
+            CoInitializeEx(
+                ptr::null_mut(),
+                COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+            )
+        };
+        if status >= 0 {
+            Ok(Self { uninitialize: true })
+        } else if status == RPC_E_CHANGED_MODE {
+            Ok(Self {
+                uninitialize: false,
+            })
+        } else {
+            Err(status)
+        }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.uninitialize {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+pub fn format_hresult(code: i32) -> String {
+    format!("0x{:08x}", code as u32)
+}
+
 /// Create a Windows shell shortcut. Returns an error instead of falling back to
 /// a plain file, so a broken Start Menu entry is reported by setup.
 pub fn create_shortcut(
@@ -632,6 +680,13 @@ pub fn create_shortcut(
     description: &str,
     working_directory: &Path,
 ) -> Result<(), String> {
+    let _com = ComGuard::new().map_err(|code| {
+        format!(
+            "Could not initialize COM for the shortcut {} (error {}).",
+            link.display(),
+            format_hresult(code)
+        )
+    })?;
     unsafe {
         let mut shell_link: *mut c_void = ptr::null_mut();
         let created = CoCreateInstance(
@@ -643,8 +698,9 @@ pub fn create_shortcut(
         );
         if created != 0 || shell_link.is_null() {
             return Err(format!(
-                "Could not create the shortcut {} (error {created}).",
-                link.display()
+                "Could not create the shortcut {} (error {}).",
+                link.display(),
+                format_hresult(created)
             ));
         }
         // The object starts with a pointer to its vtable; index that table.
@@ -679,8 +735,9 @@ pub fn create_shortcut(
         if queried != 0 || persist.is_null() {
             release(shell_link);
             return Err(format!(
-                "Could not save the shortcut {} (error {queried}).",
-                link.display()
+                "Could not save the shortcut {} (error {}).",
+                link.display(),
+                format_hresult(queried)
             ));
         }
         let persist_table = *(persist as *const *const *const c_void);
@@ -694,10 +751,89 @@ pub fn create_shortcut(
         release(shell_link);
         if saved != 0 {
             return Err(format!(
-                "Could not save the shortcut {} (error {saved}).",
-                link.display()
+                "Could not save the shortcut {} (error {}).",
+                link.display(),
+                format_hresult(saved)
             ));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zfm-win32-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn creates_shortcuts_on_a_fresh_worker_thread() {
+        let dir = scratch();
+        let target = dir.join("zfm.exe");
+        let icon = dir.join("zfm.ico");
+        fs::write(&target, b"placeholder").unwrap();
+        fs::write(&icon, crate::payload::ICON).unwrap();
+
+        let work = dir.clone();
+        let result = thread::spawn(move || {
+            let first = work.join("ZFM File Manager.lnk");
+            let second = work.join("Uninstall ZFM.lnk");
+            create_shortcut(
+                &first,
+                &work.join("zfm.exe"),
+                &work.join("zfm.ico"),
+                "Browse and manage files",
+                &work,
+            )?;
+            create_shortcut(
+                &second,
+                &work.join("zfm.exe"),
+                &work.join("zfm.ico"),
+                "Remove ZFM File Manager",
+                &work,
+            )?;
+            Ok::<_, String>((first.is_file(), second.is_file()))
+        })
+        .join()
+        .unwrap();
+
+        let (first_exists, second_exists) = result.expect("worker thread shortcut creation");
+        assert!(first_exists);
+        assert!(second_exists);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_com_guards_keep_thread_usable() {
+        let dir = scratch();
+        let target = dir.join("zfm.exe");
+        let icon = dir.join("zfm.ico");
+        fs::write(&target, b"placeholder").unwrap();
+        fs::write(&icon, crate::payload::ICON).unwrap();
+
+        let _outer = ComGuard::new().expect("outer COM guard");
+        let link = dir.join("Nested.lnk");
+        create_shortcut(&link, &target, &icon, "Nested COM check", &dir)
+            .expect("shortcut inside outer COM guard");
+        let second = dir.join("AfterInnerDrop.lnk");
+        create_shortcut(&second, &target, &icon, "Second shortcut", &dir)
+            .expect("outer COM guard remains active after inner guard drops");
+        assert!(link.is_file());
+        assert!(second.is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

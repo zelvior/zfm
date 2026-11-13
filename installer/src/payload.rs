@@ -113,6 +113,35 @@ pub fn remove_files_except(dir: &Path, skip: Option<&str>) -> Vec<String> {
     problems
 }
 
+fn is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+/// Recognize a folder whose managed files came from an earlier ZFM setup run
+/// that failed before recording its registry entry (for example when shortcut
+/// creation failed after the payload was already copied).
+///
+/// Unrelated folders are still rejected: every payload file must be a regular
+/// file (never a symlink) and both `zfm.ico` and `LICENSE.txt` must match the
+/// embedded ZFM assets byte-for-byte.
+pub fn is_previous_install(dir: &Path) -> bool {
+    if !payload_files()
+        .iter()
+        .all(|(name, _)| is_regular_file(&dir.join(*name)))
+    {
+        return false;
+    }
+    if let Ok(metadata) = fs::symlink_metadata(dir.join("Uninstall.exe")) {
+        if !metadata.file_type().is_file() {
+            return false;
+        }
+    }
+    fs::read(dir.join("zfm.ico")).ok().as_deref() == Some(ICON)
+        && fs::read(dir.join("LICENSE.txt")).ok().as_deref() == Some(LICENSE.as_bytes())
+}
+
 /// Remove the installation folder when nothing else lives in it. A folder that
 /// still contains user files is deliberately left in place.
 pub fn remove_folder_if_empty(dir: &Path) {

@@ -38,11 +38,14 @@ const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const ES_READONLY: u32 = 0x0800;
+const SS_EDITCONTROL: u32 = 0x0000_2000;
 const BS_OWNERDRAW: u32 = 0x0000_000b;
 const BS_AUTOCHECKBOX: u32 = 0x0000_0003;
 const BM_GETCHECK: u32 = 0x00f0;
 const SW_SHOWNORMAL: i32 = 1;
 
+const IDOK: usize = 1;
+const IDCANCEL: usize = 2;
 const BACK: usize = 101;
 const NEXT: usize = 102;
 const CANCEL: usize = 103;
@@ -50,6 +53,9 @@ const BROWSE: usize = 104;
 const PATH_EDIT: usize = 105;
 const LICENSE_EDIT: usize = 106;
 const LAUNCH: usize = 107;
+const STATUS: usize = 108;
+const HEADING: usize = 109;
+const BODY: usize = 110;
 
 const APP_KEY: &str = "Software\\ZFM";
 const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZFM";
@@ -229,6 +235,12 @@ fn registered_directory() -> Option<PathBuf> {
 }
 
 fn create_shortcuts(dir: &Path) -> Result<(), String> {
+    let _com = win32::ComGuard::new().map_err(|code| {
+        format!(
+            "Could not initialize COM for Start Menu shortcuts (error {}).",
+            win32::format_hresult(code)
+        )
+    })?;
     let programs = win32::programs_folder()
         .ok_or_else(|| "Could not find the Start Menu programs folder.".to_string())?;
     let folder = programs.join("ZFM");
@@ -324,15 +336,36 @@ where
     F: FnMut(i32, &str),
 {
     report(5, "Checking the folder…");
-    plan::may_install(dir, registered_directory().as_deref())?;
-    report(20, "Copying the application…");
-    payload::install_files(dir)?;
-    report(55, "Installing the uninstaller…");
-    install_uninstaller(dir, exe)?;
-    report(70, "Creating Start Menu shortcuts…");
-    create_shortcuts(dir)?;
-    report(90, "Registering the application…");
-    register(dir)?;
+    let registered = registered_directory();
+    let upgrading = registered
+        .as_deref()
+        .map(|existing| plan::same_directory(existing, dir))
+        .unwrap_or(false)
+        || payload::is_previous_install(dir);
+    plan::may_install(dir, registered.as_deref())?;
+
+    let outcome = (|| -> Result<(), String> {
+        report(20, "Copying the application…");
+        payload::install_files(dir)?;
+        report(55, "Installing the uninstaller…");
+        install_uninstaller(dir, exe)?;
+        report(70, "Creating Start Menu shortcuts…");
+        create_shortcuts(dir)?;
+        report(90, "Registering the application…");
+        register(dir)?;
+        Ok(())
+    })();
+
+    if outcome.is_err() && !upgrading {
+        if registered.is_none() {
+            let _ = remove_shortcuts();
+            let _ = remove_registry();
+        }
+        let _ = payload::remove_files(dir);
+        payload::remove_folder_if_empty(dir);
+    }
+
+    outcome?;
     report(100, "Finishing…");
     Ok(())
 }
@@ -498,9 +531,9 @@ unsafe fn child(parent: Hwnd, class: &str, value: &str, style: u32, id: usize) -
 unsafe fn create_controls(hwnd: Hwnd, wizard: &mut Wizard) -> bool {
     let body_font = wizard.palette.body_font;
     let title_font = wizard.palette.title_font;
-    let heading = child(hwnd, "STATIC", "", 0, 0);
-    let body = child(hwnd, "STATIC", "", 0, 0);
-    let status_control = child(hwnd, "STATIC", "", 0, 0);
+    let heading = child(hwnd, "STATIC", "", 0, HEADING);
+    let body = child(hwnd, "STATIC", "", SS_EDITCONTROL, BODY);
+    let status_control = child(hwnd, "STATIC", "", SS_EDITCONTROL, STATUS);
     let path_edit = child(
         hwnd,
         "EDIT",
@@ -589,20 +622,23 @@ unsafe fn layout(hwnd: Hwnd, wizard: &Wizard) {
     win32::GetClientRect(hwnd, &mut client);
     let width = client.right.max(480);
     let height = client.bottom.max(360);
-    place(wizard.heading, 92, 26, width - 116, 34);
-    place(wizard.body, 24, 100, width - 48, 58);
-    let content = 168;
-    place(wizard.path_edit, 24, content + 10, width - 168, 30);
-    place(wizard.browse, width - 132, content + 10, 108, 30);
-    place(wizard.license, 24, content, width - 48, height - content - 96);
-    let status_top = if wizard.page == Page::Folder {
-        content + 52
-    } else {
-        content + 12
-    };
-    place(wizard.status_control, 24, status_top, width - 48, 34);
-    place(wizard.launch, 24, content + 64, 320, 24);
     let footer = height - 68;
+    place(wizard.heading, 92, 25, width - 116, 38);
+    place(wizard.body, 24, 100, width - 48, 68);
+    let content = 176;
+    place(wizard.path_edit, 24, content + 6, width - 168, 30);
+    place(wizard.browse, width - 132, content + 6, 108, 30);
+    place(wizard.license, 24, content, width - 48, footer - content - 16);
+    let (status_top, status_height) = match wizard.page {
+        Page::Folder => {
+            let top = content + 48;
+            (top, (footer - 12 - top).max(48))
+        }
+        Page::Finish => (content + 8, 48),
+        _ => (content + 8, 28),
+    };
+    place(wizard.status_control, 24, status_top, width - 48, status_height);
+    place(wizard.launch, 24, content + 68, width - 48, 26);
     place(wizard.cancel, width - 116, footer + 12, 92, 32);
     place(wizard.next, width - 236, footer + 12, 108, 32);
     place(wizard.back, width - 340, footer + 12, 92, 32);
@@ -646,6 +682,13 @@ unsafe fn draw_progress(dc: Hdc, wizard: &Wizard, x: i32, y: i32, width: i32, he
         bottom: y + height,
     };
     win32::FrameRect(dc, &outer, wizard.palette.border);
+    let background = Rect {
+        left: x + 1,
+        top: y + 1,
+        right: x + width - 1,
+        bottom: y + height - 1,
+    };
+    win32::FillRect(dc, &background, wizard.palette.background);
     let percent = wizard.percent.clamp(0, 100);
     let filled = (width - 4) * percent / 100;
     if filled > 0 {
@@ -687,7 +730,7 @@ unsafe fn paint(hwnd: Hwnd, wizard: &Wizard) {
     };
     win32::FillRect(dc, &footer, wizard.palette.border);
     if wizard.page == Page::Installing {
-        draw_progress(dc, wizard, 24, 226, width - 48, 18);
+        draw_progress(dc, wizard, 24, 224, width - 48, 18);
     }
     win32::EndPaint(hwnd, &paint);
 }
@@ -828,6 +871,9 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
     };
     let window = hwnd as usize;
     thread::spawn(move || {
+        // COM initialization is per-thread; the UI thread's apartment does not
+        // cover this worker, which creates the Start Menu shell links.
+        let _com = win32::ComGuard::new().ok();
         let result = perform_install(&dir, &exe, |percent, text| {
             let message = Box::into_raw(Box::new(Progress {
                 percent,
@@ -850,10 +896,11 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard) {
 
 unsafe fn finish(hwnd: Hwnd, wizard: &mut Wizard) {
     if win32::SendMessageW(wizard.launch, BM_GETCHECK, 0, 0) == 1 {
-        let exe = PathBuf::from(&wizard.dir).join("zfm.exe");
+        let dir = PathBuf::from(&wizard.dir);
+        let exe = dir.join("zfm.exe");
         // Start the application detached from setup; the standard library does
         // the CreateProcessW plumbing correctly.
-        let _ = std::process::Command::new(&exe).spawn();
+        let _ = std::process::Command::new(&exe).current_dir(&dir).spawn();
     }
     win32::DestroyWindow(hwnd);
 }
@@ -864,18 +911,25 @@ unsafe fn advance(hwnd: Hwnd, wizard: &mut Wizard) {
             wizard.page = Page::Folder;
             render(hwnd, wizard);
         }
-        Page::Folder => match plan::validate_directory(&win32::window_text(wizard.path_edit)) {
-            Ok(path) => {
-                wizard.dir = path_text(&path);
-                wizard.status.clear();
-                wizard.page = Page::License;
-                render(hwnd, wizard);
+        Page::Folder => {
+            let typed = win32::window_text(wizard.path_edit);
+            match plan::validate_directory(&typed).and_then(|path| {
+                plan::may_install(&path, registered_directory().as_deref())?;
+                Ok(path)
+            }) {
+                Ok(path) => {
+                    wizard.dir = path_text(&path);
+                    wizard.status.clear();
+                    wizard.page = Page::License;
+                    render(hwnd, wizard);
+                }
+                Err(error) => {
+                    wizard.dir = typed;
+                    wizard.status = error;
+                    render(hwnd, wizard);
+                }
             }
-            Err(error) => {
-                wizard.status = error;
-                render(hwnd, wizard);
-            }
-        },
+        }
         Page::License => begin_install(hwnd, wizard),
         Page::Finish => finish(hwnd, wizard),
         Page::Installing => {}
@@ -885,6 +939,8 @@ unsafe fn advance(hwnd: Hwnd, wizard: &mut Wizard) {
 unsafe fn go_back(hwnd: Hwnd, wizard: &mut Wizard) {
     match wizard.page {
         Page::Folder => {
+            wizard.dir = win32::window_text(wizard.path_edit);
+            wizard.status.clear();
             wizard.page = Page::Welcome;
             render(hwnd, wizard);
         }
@@ -896,6 +952,15 @@ unsafe fn go_back(hwnd: Hwnd, wizard: &mut Wizard) {
     }
 }
 
+unsafe fn browse_directory(hwnd: Hwnd, wizard: &mut Wizard) {
+    if let Some(folder) = win32::browse_for_folder(hwnd, "Select the ZFM installation folder") {
+        wizard.dir = path_text(&folder);
+        wizard.status.clear();
+        win32::set_text(wizard.path_edit, &wizard.dir);
+        win32::set_text(wizard.status_control, "");
+    }
+}
+
 unsafe fn command(hwnd: Hwnd, wizard: &mut Wizard, wparam: WParam) -> Option<String> {
     let id = wparam & 0xffff;
     let code = (wparam >> 16) & 0xffff;
@@ -904,19 +969,32 @@ unsafe fn command(hwnd: Hwnd, wizard: &mut Wizard, wparam: WParam) -> Option<Str
     }
     match id {
         NEXT => advance(hwnd, wizard),
+        IDOK => {
+            if !wizard.busy && wizard.page != Page::Installing {
+                let focus = win32::GetFocus();
+                if focus == wizard.back {
+                    go_back(hwnd, wizard);
+                } else if focus == wizard.cancel {
+                    win32::DestroyWindow(hwnd);
+                } else if focus == wizard.browse && wizard.page == Page::Folder {
+                    browse_directory(hwnd, wizard);
+                } else {
+                    advance(hwnd, wizard);
+                }
+            }
+        }
         BACK => go_back(hwnd, wizard),
         CANCEL => {
             if !wizard.busy {
                 win32::DestroyWindow(hwnd);
             }
         }
-        BROWSE => {
-            if let Some(folder) = win32::browse_for_folder(hwnd, "Select the ZFM installation folder")
-            {
-                wizard.dir = path_text(&folder);
-                win32::set_text(wizard.path_edit, &wizard.dir);
+        IDCANCEL => {
+            if !wizard.busy && !matches!(wizard.page, Page::Installing | Page::Finish) {
+                win32::DestroyWindow(hwnd);
             }
         }
+        BROWSE => browse_directory(hwnd, wizard),
         _ => {}
     }
     None
@@ -1057,9 +1135,7 @@ fn install_silently(exe: &Path, options: &Options) -> i32 {
         Some(dir) => dir,
         None => return 1,
     };
-    unsafe {
-        win32::CoInitializeEx(ptr::null_mut(), 2);
-    }
+    let _com = win32::ComGuard::new().ok();
     match perform_install(&dir, exe, |_, _| {}) {
         Ok(()) => 0,
         Err(_) => 1,
@@ -1078,8 +1154,8 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
             );
             return 1;
         }
-        // Start Menu shortcuts are shell objects created through COM.
-        win32::CoInitializeEx(ptr::null_mut(), 2);
+        // Keep a COM apartment on the UI thread for the folder picker.
+        let _com = win32::ComGuard::new().ok();
         let palette = match Palette::new() {
             Some(palette) => palette,
             None => {
