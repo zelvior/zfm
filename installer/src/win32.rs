@@ -75,6 +75,27 @@ pub struct PaintStruct {
 }
 
 #[repr(C)]
+pub struct BitmapInfoHeader {
+    pub size: u32,
+    pub width: i32,
+    pub height: i32,
+    pub planes: u16,
+    pub bit_count: u16,
+    pub compression: u32,
+    pub size_image: u32,
+    pub x_pels_per_meter: i32,
+    pub y_pels_per_meter: i32,
+    pub clr_used: u32,
+    pub clr_important: u32,
+}
+
+#[repr(C)]
+pub struct BitmapInfo {
+    pub header: BitmapInfoHeader,
+    pub colors: [u32; 1],
+}
+
+#[repr(C)]
 pub struct WndClass {
     pub style: u32,
     pub proc: Option<unsafe extern "system" fn(Hwnd, u32, WParam, LParam) -> LResult>,
@@ -155,8 +176,11 @@ pub const NULL_BRUSH: i32 = 5;
 pub const NULL_PEN: i32 = 8;
 pub const DT_CENTER: u32 = 0x0000_0001;
 pub const DT_VCENTER: u32 = 0x0000_0004;
+pub const DT_WORDBREAK: u32 = 0x0000_0010;
 pub const DT_SINGLELINE: u32 = 0x0000_0020;
 pub const DT_NOPREFIX: u32 = 0x0000_0800;
+pub const DT_EDITCONTROL: u32 = 0x0000_2000;
+const SRCCOPY: u32 = 0x00cc_0020;
 
 #[link(name = "user32")]
 extern "system" {
@@ -190,6 +214,8 @@ extern "system" {
     pub fn GetWindowTextW(hwnd: Hwnd, buffer: *mut u16, max: i32) -> i32;
     pub fn MoveWindow(hwnd: Hwnd, x: i32, y: i32, width: i32, height: i32, repaint: i32) -> i32;
     pub fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    pub fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    pub fn ScreenToClient(hwnd: Hwnd, point: *mut Point) -> i32;
     pub fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, kind: u32) -> i32;
     pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
     pub fn GetFocus() -> Hwnd;
@@ -207,6 +233,7 @@ extern "system" {
         format: u32,
     ) -> i32;
     pub fn LoadCursorW(instance: Hinstance, name: *const u16) -> Handle;
+    pub fn SetCursor(cursor: Handle) -> Handle;
     pub fn IsDialogMessageW(hwnd: Hwnd, message: *mut Msg) -> i32;
     pub fn CreateIconFromResourceEx(
         bits: *mut u8,
@@ -223,6 +250,27 @@ extern "system" {
 #[link(name = "gdi32")]
 extern "system" {
     pub fn CreateSolidBrush(color: u32) -> Hbrush;
+    pub fn CreateCompatibleDC(dc: Hdc) -> Hdc;
+    pub fn DeleteDC(dc: Hdc) -> i32;
+    pub fn CreateDIBSection(
+        dc: Hdc,
+        info: *const BitmapInfo,
+        usage: u32,
+        bits: *mut *mut c_void,
+        section: Handle,
+        offset: u32,
+    ) -> Handle;
+    pub fn BitBlt(
+        dest: Hdc,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        src: Hdc,
+        src_x: i32,
+        src_y: i32,
+        rop: u32,
+    ) -> i32;
     pub fn CreateFontW(
         height: i32,
         width: i32,
@@ -262,6 +310,8 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     pub fn GetModuleHandleW(name: *const u16) -> Hinstance;
+    pub fn LoadLibraryW(name: *const u16) -> Hinstance;
+    pub fn GetProcAddress(module: Hinstance, name: *const u8) -> *mut c_void;
     pub fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
     pub fn GetTempPathW(size: u32, buffer: *mut u16) -> u32;
     pub fn GetModuleFileNameW(module: Hinstance, buffer: *mut u16, size: u32) -> u32;
@@ -490,6 +540,146 @@ pub fn set_icon(hwnd: Hwnd, icon: Hicon) {
     unsafe {
         SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon as LParam);
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon as LParam);
+    }
+}
+
+pub fn child_origin(parent: Hwnd, child: Hwnd) -> (i32, i32) {
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe {
+        if GetWindowRect(child, &mut rect) == 0 {
+            return (0, 0);
+        }
+        let mut pt = Point {
+            x: rect.left,
+            y: rect.top,
+        };
+        if ScreenToClient(parent, &mut pt) == 0 {
+            return (0, 0);
+        }
+        (pt.x, pt.y)
+    }
+}
+
+/// Blit a top-down 32-bit `0x00RRGGBB` pixel buffer onto `dest_dc`, running
+/// `overlay` on the memory DC beforehand so ClearType text composites cleanly
+/// onto the anti-aliased pixels without flicker.
+pub fn blit_pixels<F>(
+    dest_dc: Hdc,
+    dst_x: i32,
+    dst_y: i32,
+    width: i32,
+    height: i32,
+    pixels: &[u32],
+    overlay: F,
+) where
+    F: FnOnce(Hdc),
+{
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let count = (width * height) as usize;
+    if pixels.len() < count {
+        return;
+    }
+    unsafe {
+        let mem_dc = CreateCompatibleDC(dest_dc);
+        if mem_dc.is_null() {
+            return;
+        }
+        let info = BitmapInfo {
+            header: BitmapInfoHeader {
+                size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+                width,
+                height: -height,
+                planes: 1,
+                bit_count: 32,
+                compression: 0,
+                size_image: 0,
+                x_pels_per_meter: 0,
+                y_pels_per_meter: 0,
+                clr_used: 0,
+                clr_important: 0,
+            },
+            colors: [0],
+        };
+        let mut bits: *mut c_void = ptr::null_mut();
+        let dib = CreateDIBSection(mem_dc, &info, 0, &mut bits, ptr::null_mut(), 0);
+        if !dib.is_null() && !bits.is_null() {
+            ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, count);
+            let old = SelectObject(mem_dc, dib);
+            overlay(mem_dc);
+            BitBlt(dest_dc, dst_x, dst_y, width, height, mem_dc, 0, 0, SRCCOPY);
+            SelectObject(mem_dc, old);
+            DeleteObject(dib);
+        }
+        DeleteDC(mem_dc);
+    }
+}
+
+/// Best-effort Windows 11 DWM rounded corner and slate-blue caption tinting;
+/// dynamically loaded so Windows 7 SP1 continues to run without `dwmapi`
+/// symbols it does not export.
+pub fn apply_window_chrome(
+    hwnd: Hwnd,
+    caption_colorref: u32,
+    border_colorref: u32,
+    text_colorref: u32,
+) {
+    unsafe {
+        let module = LoadLibraryW(text("dwmapi.dll").as_ptr());
+        if module.is_null() {
+            return;
+        }
+        let proc = GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr());
+        if proc.is_null() {
+            return;
+        }
+        let set_attr: unsafe extern "system" fn(Hwnd, u32, *const c_void, u32) -> i32 =
+            std::mem::transmute(proc);
+        let round: u32 = 2; // DWMWCP_ROUND
+        let size = std::mem::size_of::<u32>() as u32;
+        let _ = set_attr(hwnd, 33, &round as *const u32 as *const c_void, size);
+        let _ = set_attr(
+            hwnd,
+            34,
+            &border_colorref as *const u32 as *const c_void,
+            size,
+        );
+        let _ = set_attr(
+            hwnd,
+            35,
+            &caption_colorref as *const u32 as *const c_void,
+            size,
+        );
+        let _ = set_attr(
+            hwnd,
+            36,
+            &text_colorref as *const u32 as *const c_void,
+            size,
+        );
+    }
+}
+
+/// Apply the modern Explorer scrollbar theme to a scrollable control when
+/// `uxtheme.dll` is present.
+pub fn apply_explorer_scrollbar(hwnd: Hwnd) {
+    unsafe {
+        let module = LoadLibraryW(text("uxtheme.dll").as_ptr());
+        if module.is_null() {
+            return;
+        }
+        let proc = GetProcAddress(module, b"SetWindowTheme\0".as_ptr());
+        if proc.is_null() {
+            return;
+        }
+        let set_theme: unsafe extern "system" fn(Hwnd, *const u16, *const u16) -> i32 =
+            std::mem::transmute(proc);
+        let _ = set_theme(hwnd, text("Explorer").as_ptr(), ptr::null());
     }
 }
 
