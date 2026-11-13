@@ -221,6 +221,7 @@ unsafe fn label(text: &str) -> P {
     (api().gtk_label_new)(c(text).as_ptr())
 }
 unsafe fn set_status(app: &App, text: &str) {
+    if std::env::var_os("ZFM_SMOKE_DEBUG").is_some() { eprintln!("STATUS: {text}"); }
     (api().gtk_label_set_text)(app.status, c(text).as_ptr());
 }
 unsafe fn connect(widget: P, signal: &str, callback: P, data: P) {

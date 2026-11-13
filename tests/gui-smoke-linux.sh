@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 printf 'GUI smoke fixture\n' > "$work/example.txt"
-GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
+ZFM_SMOKE_DEBUG=1 GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
 pid=$!
 window=''
 for _ in $(seq 1 100); do
@@ -68,6 +68,7 @@ for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during folder copy:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
+if [ ! -f "$work/folder-test/source copy/nested/file.txt" ]; then cat "$work/stderr" >&2; find "$work/folder-test" >&2; exit 1; fi
 cmp "$work/folder-test/source/nested/file.txt" "$work/folder-test/source copy/nested/file.txt"
 [ -d "$work/folder-test/source copy/nested/empty" ]
 echo "GTK navigation and name dialog smoke tests passed (window $window)."
