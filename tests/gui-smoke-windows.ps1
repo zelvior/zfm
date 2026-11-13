@@ -381,6 +381,105 @@ try {
         [IO.File]::ReadAllText((Join-Path $copiedFolder 'nested\file.txt')) -ne 'nested content' -or
         -not (Test-Path -LiteralPath $copiedCompanion) -or
         [IO.File]::ReadAllText($copiedCompanion) -ne 'companion content') { throw 'Multi-item copy was incomplete.' }
+    # Exercise the direct Copy to / Move to commands and their destination prompts.
+    $destination = Join-Path $configRoot 'destination'
+    New-Item -ItemType Directory -Path $destination | Out-Null
+    $folderIndex = -1; $companionIndex = -1
+    for ($i = 0; $i -lt 100; $i++) {
+        $folderIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-fixture').ToInt64()
+        $companionIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-companion.txt').ToInt64()
+        $copyIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-fixture copy').ToInt64()
+        if ($folderIndex -ge 0 -and $companionIndex -ge 0 -and $copyIndex -ge 0) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($folderIndex -lt 0 -or $companionIndex -lt 0 -or $copyIndex -lt 0) { throw 'List did not refresh after clipboard copy.' }
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$folderIndex, 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$companionIndex, 2, 3000, [ref]$result)
+    function Submit-Destination([int]$command, [string]$title, [string]$destination) {
+        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$command, [IntPtr]::Zero)) { throw "Could not request $title." }
+        $dialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', $title)
+            if ($dialog -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($dialog -eq [IntPtr]::Zero) { throw "$title dialog did not appear." }
+        $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+        if ($edit -eq [IntPtr]::Zero -or [ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, $destination) -eq [IntPtr]::Zero) { throw "Could not set $title destination." }
+        if (-not [ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)) { throw "Could not submit $title." }
+    }
+    Submit-Destination 164 'Copy to existing folder' $destination
+    for ($i = 0; $i -lt 100; $i++) {
+        if ((Test-Path -LiteralPath (Join-Path $destination 'folder-fixture\nested\file.txt')) -and (Test-Path -LiteralPath (Join-Path $destination 'folder-companion.txt'))) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ([IO.File]::ReadAllText((Join-Path $destination 'folder-fixture\nested\file.txt')) -ne 'nested content' -or
+        [IO.File]::ReadAllText((Join-Path $destination 'folder-companion.txt')) -ne 'companion content') { throw 'Direct multi-item copy failed.' }
+    # Wait for completion and the refreshed list before selecting the move source.
+    $companionIndex = -1
+    for ($i = 0; $i -lt 100; $i++) {
+        $status = New-Object System.Text.StringBuilder 512
+        [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+        if ($status.ToString() -match 'Copied 2 items') {
+            $companionIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'folder-companion.txt').ToInt64()
+            if ($companionIndex -ge 0) { break }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($companionIndex -lt 0) { throw 'Direct copy did not finish.' }
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$companionIndex, 2, 3000, [ref]$result)
+    $moveDestination = Join-Path $configRoot 'move-destination'
+    New-Item -ItemType Directory -Path $moveDestination | Out-Null
+    Submit-Destination 165 'Move to existing folder' $moveDestination
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $moveDestination 'folder-companion.txt')); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath (Join-Path $moveDestination 'folder-companion.txt')) -or (Test-Path -LiteralPath (Join-Path $work 'folder-companion.txt'))) { throw 'Direct move failed.' }
+
+    # Test actual archive commands with the engine placed beside the binary by CI.
+    $engine = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Executable).Path) 'zfm-archive-engine.exe'
+    if (Test-Path -LiteralPath $engine) {
+        $index = -1
+        for ($i = 0; $i -lt 100; $i++) {
+            $status = New-Object System.Text.StringBuilder 512
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+            if ($status.ToString() -match 'Moved to') {
+                $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'example.txt').ToInt64()
+                if ($index -ge 0) { break }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($index -lt 0) { throw 'Move did not finish before archive test.' }
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$index, 2, 3000, [ref]$result)
+        Submit-Destination 151 'Create .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz' 'gui-test.zip'
+        $archive = Join-Path $work 'gui-test.zip'
+        for ($i = 0; $i -lt 200 -and -not (Test-Path -LiteralPath $archive); $i++) { Start-Sleep -Milliseconds 100 }
+        if (-not (Test-Path -LiteralPath $archive)) { throw 'Archive creation failed.' }
+        $archiveIndex = -1
+        for ($i = 0; $i -lt 100; $i++) {
+            $archiveIndex = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, 'gui-test.zip').ToInt64()
+            if ($archiveIndex -ge 0) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($archiveIndex -lt 0) { throw 'Created archive was not listed.' }
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$archiveIndex, 2, 3000, [ref]$result)
+        $extraction = Join-Path $configRoot 'extraction'
+        New-Item -ItemType Directory -Path $extraction | Out-Null
+        Submit-Destination 162 'Extract to existing folder' $extraction
+        $confirm = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $confirm = [ZfmSmoke]::FindWindowW('#32770', 'Extract archive')
+            if ($confirm -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($confirm -eq [IntPtr]::Zero -or -not [ZfmSmoke]::PostMessageW($confirm, 0x111, [UIntPtr]1, [IntPtr]::Zero)) { throw 'Extract confirmation failed.' }
+        $extracted = Join-Path $extraction 'example.txt'
+        for ($i = 0; $i -lt 200 -and -not (Test-Path -LiteralPath $extracted); $i++) { Start-Sleep -Milliseconds 100 }
+        if (-not (Test-Path -LiteralPath $extracted) -or [IO.File]::ReadAllText($extracted) -ne [IO.File]::ReadAllText((Join-Path $work 'example.txt'))) { throw 'Archive extraction failed.' }
+    } else { Write-Host 'Archive GUI smoke skipped: engine not present beside executable.' }
+
     # Save a changed value after the other list tests, then verify it survives restart.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings for saving.' }
     $settings = [IntPtr]::Zero

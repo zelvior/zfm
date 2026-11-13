@@ -155,6 +155,9 @@ const ARCHIVE_ENCRYPTED_ZIP: usize = 160;
 const ARCHIVE_EXTRACT_HERE: usize = 161;
 const ARCHIVE_EXTRACT_TO: usize = 162;
 const ARCHIVE_EXTRACT_PASSWORD: usize = 163;
+const COPY_TO: usize = 164;
+const MOVE_TO: usize = 165;
+const CANCEL_OPERATION: usize = 166;
 
 #[repr(C)]
 struct WndClass {
@@ -755,6 +758,7 @@ struct App {
     hot_zone: HotZone,
     tracking_mouse: bool,
     operation_busy: bool,
+    operation_cancel: Option<Arc<AtomicBool>>,
     notice: Option<String>,
     token: Arc<AtomicU64>,
     address: H,
@@ -2239,7 +2243,9 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
         return;
     }
     app.operation_busy = true;
-    set_status(hwnd, app, Some("Working…".into()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.operation_cancel = Some(cancel.clone());
+    set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
     thread::spawn(move || {
         let result =
@@ -2255,21 +2261,20 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::Trash(path, owner) => zfm::trash::trash_with_owner(&path, owner)
                     .map(|_| format!("Moved {} to Recycle Bin", path.display())),
                 Operation::Copy(path, dir, name) => {
-                    zfm::operations::copy_item(&path, &dir, &name, &AtomicBool::new(false), |_| {})
+                    zfm::operations::copy_item(&path, &dir, &name, &cancel, |_| {})
                         .map(|p| format!("Copied to {}", p.display()))
                 }
-                Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &AtomicBool::new(false))
+                Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
                     .map(|p| format!("Moved to {}", p.display())),
                 Operation::ArchiveCreate(inputs, output, password) =>
-                    zfm::archive_engine::create_items_password(&inputs, &output, &AtomicBool::new(false), password.as_deref())
+                    zfm::archive_engine::create_items_password(&inputs, &output, &cancel, password.as_deref())
                         .map(|_| format!("Created {}", output.display())),
                 Operation::ArchiveExtract(archive, destination, password) =>
-                    zfm::archive_engine::extract_all_password(&archive, &destination, &AtomicBool::new(false), password.as_deref())
+                    zfm::archive_engine::extract_all_password(&archive, &destination, &cancel, password.as_deref())
                         .map(|count| format!("Extracted {count} files to {}", destination.display())),
                 Operation::Convert(input, output, mode) => {
-                    let cancel = AtomicBool::new(false);
                     let result = match mode {
                         0 => zfm::converter::csv_to_json(&input, &output, &cancel, |_| {}),
                         1 => zfm::json_csv::json_to_csv(&input, &output, &cancel, |_| {}),
@@ -2577,6 +2582,8 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             (COPY_PATH, "Copy path"),
             (PASTE, "Paste"),
             (DUPLICATE, "Duplicate…"),
+            (COPY_TO, "Copy to folder…"),
+            (MOVE_TO, "Move to folder…"),
             (PROMPT_RENAME, "Rename…"),
             (TRASH, "Move to Recycle Bin"),
             (DELETE, "Delete permanently…"),
@@ -2613,6 +2620,10 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             AppendMenuW(view, 0, 206, text("Compact").as_ptr());
             AppendMenuW(menu, 0x10, view as usize, text("View").as_ptr());
         }
+    }
+    if app.operation_busy {
+        AppendMenuW(menu, 0x800, 0, ptr::null());
+        AppendMenuW(menu, 0, CANCEL_OPERATION, text("Cancel current operation").as_ptr());
     }
     let id = TrackPopupMenu(
         menu,
@@ -3153,13 +3164,16 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         WM_OPERATION_RESULT => {
             let message = Box::from_raw(lp as *mut OperationMessage);
             app.operation_busy = false;
+            app.operation_cancel = None;
             match message.result {
                 Ok(status) => {
                     set_status(hwnd, app, Some(status));
                     load(hwnd, app, Destination::Refresh, true);
                 }
                 Err(error) => {
-                    set_status(hwnd, app, Some(format!("File operation failed: {error}")))
+                    set_status(hwnd, app, Some(format!("File operation failed: {error}")));
+                    // Extraction or a cancelled batch can leave earlier outputs.
+                    load(hwnd, app, Destination::Refresh, true);
                 }
             }
             0
@@ -3370,6 +3384,34 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             }
                         }
                     }
+                }
+                CANCEL_OPERATION if code == 0 => {
+                    if let Some(cancel) = &app.operation_cancel {
+                        cancel.store(true, Ordering::Relaxed);
+                        set_status(hwnd, app, Some("Cancellation requested where supported; earlier results may remain.".into()));
+                    } else { set_status(hwnd, app, Some("No operation is running.".into())); }
+                }
+                COPY_TO | MOVE_TO if code == 0 => {
+                    let selected = selected_indices(app);
+                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS
+                        || (id == MOVE_TO && selected.len() != 1) {
+                        set_status(hwnd, app, Some(if id == MOVE_TO { "Move supports exactly one item." } else { "Select between 1 and 1024 files or folders to copy." }.into()));
+                        return 0;
+                    }
+                    if id == COPY_TO && selected.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
+                        set_status(hwnd, app, Some("Copy supports regular files and folders only.".into())); return 0;
+                    }
+                    let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+                    let current = app.tabs.current().current().to_path_buf();
+                    let title = if id == COPY_TO { "Copy to existing folder" } else { "Move to existing folder" };
+                    let destination = match windows_actions::prompt(hwnd, app.theme, title, current.as_os_str(), false) {
+                        Some(value) => PathBuf::from(value), None => return 0,
+                    };
+                    if !destination.is_absolute() || !destination.is_dir() {
+                        show_error(hwnd, "Choose an existing absolute destination folder."); return 0;
+                    }
+                    if id == COPY_TO { start_operation(hwnd, app, Operation::CopyItems(paths, destination)); }
+                    else { start_operation(hwnd, app, Operation::Move(paths[0].clone(), destination)); }
                 }
                 DUPLICATE if code == 0 => {
                     if let Some(path) = selected_path(hwnd, app) {
@@ -3607,6 +3649,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             theme.list_brush as LResult
         }
         WM_DESTROY => {
+            if let Some(cancel) = &app.operation_cancel { cancel.store(true, Ordering::Relaxed); }
             KillTimer(hwnd, SCAN_TIMER);
             app.token.fetch_add(1, Ordering::Relaxed);
             set_data(hwnd, 0);
@@ -3680,6 +3723,7 @@ pub fn run() -> Result<(), String> {
             hot_zone: HotZone::None,
             tracking_mouse: false,
             operation_busy: false,
+            operation_cancel: None,
             notice: None,
             token: Arc::new(AtomicU64::new(0)),
             address: ptr::null_mut(),

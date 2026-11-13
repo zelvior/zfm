@@ -131,10 +131,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo +1.77.2 build --release --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $name = "zfm-$env:TARGET"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           & ./scripts/build-archive-engine.ps1 -Target $env:TARGET -Output "dist/zfm-archive-engine.exe"
+          Copy-Item -LiteralPath "dist/zfm-archive-engine.exe" -Destination "target/$env:TARGET/release/zfm-archive-engine.exe"
+          & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $env:ZFM_ENGINE_BINARY = (Resolve-Path "dist/zfm-archive-engine.exe").Path
           python ./scripts/prepare-pdfium.py $env:TARGET "target/$env:TARGET/pdfium"
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare bundled PDFium renderer.' }

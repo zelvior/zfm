@@ -42,7 +42,7 @@ is never presented as conversion.
 The core is tested on Linux and in Windows CI for both supported MSVC
 architectures. Linux has progress and cancellation. The Windows context menu
 is a first increment: output is limited to a filename in the input folder and
-there is no progress indicator or cancellation control. Other formats are not
+there is no progress indicator; cancellation is available through the file-list context menu. Other formats are not
 supported or advertised: PNG/JPEG/GIF/TIFF/WebP; Markdown/XML/PDF;
 WAV/MP3/FLAC/OGG/AAC; MP4/MKV/AVI/WebM/MOV. FFmpeg integration is not yet
 implemented. Other BMP and ICO variants are not supported; use an image editor to convert them to an opaque 24-bit BMP first. Image input is limited to 1 MiB. No universal bidirectional support is implied.
