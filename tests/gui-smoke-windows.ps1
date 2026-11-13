@@ -26,7 +26,7 @@ public static class ZfmSmoke {
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
-    public static extern bool SetWindowTextW(IntPtr window, string text);
+    public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, string text);
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
 }
@@ -162,7 +162,7 @@ try {
     }
     if ($dialog -eq [IntPtr]::Zero) { throw 'New file dialog did not appear.' }
     $dialogEdit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
-    if ($dialogEdit -eq [IntPtr]::Zero -or -not [ZfmSmoke]::SetWindowTextW($dialogEdit, 'created.txt')) { throw 'Could not set the dialog name.' }
+    if ($dialogEdit -eq [IntPtr]::Zero -or [ZfmSmoke]::SendMessageW($dialogEdit, 0x000c, [UIntPtr]::Zero, 'created.txt') -eq [IntPtr]::Zero) { throw 'Could not set the dialog name.' }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'New file dialog did not submit.' }
     for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $work 'created.txt')); $i++) { Start-Sleep -Milliseconds 100 }
