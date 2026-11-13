@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const MAX_BYTES: usize = 64 * 1024;
 #[derive(Debug, PartialEq, Eq)]
 pub struct FileClipboard {
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub cut: bool,
 }
 fn invalid(message: &str) -> io::Error {
@@ -35,11 +35,32 @@ fn uri(path: &Path) -> io::Result<String> {
     }
     Ok(result)
 }
-pub fn encode_gnome(path: &Path, cut: bool) -> io::Result<Vec<u8>> {
-    Ok(format!("{}\n{}\n", if cut { "cut" } else { "copy" }, uri(path)?).into_bytes())
+pub fn encode_gnome(paths: &[PathBuf], cut: bool) -> io::Result<Vec<u8>> {
+    if cut && paths.len() != 1 {
+        return Err(invalid("Cut and paste supports one item only"));
+    }
+    encode(paths, if cut { "cut\n" } else { "copy\n" }, "\n")
 }
-pub fn encode_uri_list(path: &Path) -> io::Result<Vec<u8>> {
-    Ok(format!("{}\r\n", uri(path)?).into_bytes())
+pub fn encode_uri_list(paths: &[PathBuf]) -> io::Result<Vec<u8>> {
+    encode(paths, "", "\r\n")
+}
+fn encode(paths: &[PathBuf], prefix: &str, separator: &str) -> io::Result<Vec<u8>> {
+    if paths.is_empty() || paths.len() > crate::operations::MAX_COPY_ITEMS {
+        return Err(invalid("Clipboard item count is invalid"));
+    }
+    let mut result = prefix.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        if !seen.insert(path) {
+            return Err(invalid("Duplicate clipboard paths"));
+        }
+        result.push_str(&uri(path)?);
+        result.push_str(separator);
+        if result.len() > MAX_BYTES {
+            return Err(invalid("Clipboard data is too large"));
+        }
+    }
+    Ok(result.into_bytes())
 }
 fn decode_uri(uri: &[u8]) -> io::Result<PathBuf> {
     let rest = uri
@@ -97,8 +118,8 @@ fn decode_uri(uri: &[u8]) -> io::Result<PathBuf> {
     }
     Ok(path)
 }
-/// Accept one local file at a time; reject multi-file clipboard payloads rather
-/// than silently operating on only part of them.
+/// Parse bounded local clipboard paths, rejecting invalid or repeated entries.
+/// Multiple cut items remain unsupported to avoid partial destructive moves.
 pub fn parse(data: &[u8], gnome: bool) -> io::Result<FileClipboard> {
     if data.len() > MAX_BYTES || data.contains(&0) {
         return Err(invalid("Clipboard data is invalid or too large"));
@@ -116,12 +137,25 @@ pub fn parse(data: &[u8], gnome: bool) -> io::Result<FileClipboard> {
     } else {
         false
     };
-    let mut uris = lines.filter(|line| !line.starts_with(b"#"));
-    let path = decode_uri(uris.next().ok_or_else(|| invalid("No file in clipboard"))?)?;
-    if uris.next().is_some() {
-        return Err(invalid("Only one clipboard item is supported"));
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in lines.filter(|line| !line.starts_with(b"#")) {
+        if paths.len() == crate::operations::MAX_COPY_ITEMS {
+            return Err(invalid("Too many clipboard items"));
+        }
+        let path = decode_uri(line)?;
+        if !seen.insert(path.clone()) {
+            return Err(invalid("Duplicate clipboard paths"));
+        }
+        paths.push(path);
     }
-    Ok(FileClipboard { path, cut })
+    if paths.is_empty() {
+        return Err(invalid("No file in clipboard"));
+    }
+    if cut && paths.len() != 1 {
+        return Err(invalid("Cut and paste supports one item only"));
+    }
+    Ok(FileClipboard { paths, cut })
 }
 #[cfg(test)]
 mod tests {
@@ -130,28 +164,61 @@ mod tests {
     fn roundtrips_unicode_spaces_and_non_utf8() {
         let p = PathBuf::from(OsString::from_vec(b"/tmp/a \xff%#.txt".to_vec()));
         assert_eq!(
-            parse(&encode_gnome(&p, true).unwrap(), true).unwrap(),
+            parse(&encode_gnome(&[p.clone()], true).unwrap(), true).unwrap(),
             FileClipboard {
-                path: p.clone(),
+                paths: vec![p.clone()],
                 cut: true
             }
         );
         assert_eq!(
-            parse(&encode_uri_list(&p).unwrap(), false).unwrap(),
+            parse(&encode_uri_list(&[p.clone()]).unwrap(), false).unwrap(),
             FileClipboard {
-                path: p,
+                paths: vec![p],
                 cut: false
             }
         );
     }
     #[test]
-    fn rejects_remote_invalid_and_multiple() {
+    fn multi_copy_roundtrip_and_invalid_lists() {
+        let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b ü")];
+        assert_eq!(
+            parse(&encode_gnome(&paths, false).unwrap(), true).unwrap(),
+            FileClipboard {
+                paths: paths.clone(),
+                cut: false
+            }
+        );
+        assert_eq!(
+            parse(&encode_uri_list(&paths).unwrap(), false).unwrap(),
+            FileClipboard {
+                paths: paths.clone(),
+                cut: false
+            }
+        );
+        assert!(parse(b"cut\nfile:///tmp/a\nfile:///tmp/b\n", true).is_err());
+        assert!(encode_gnome(&paths, true).is_err());
+        assert!(parse(b"copy\nfile:///tmp/a\nfile:///tmp/a\n", true).is_err());
+        assert!(parse(b"file:///tmp/a\nfile://remote/b\n", false).is_err());
+        assert!(encode_uri_list(&[paths[0].clone(), paths[0].clone()]).is_err());
+        assert!(encode_gnome(&[], false).is_err());
+        let many: Vec<PathBuf> = (0..=crate::operations::MAX_COPY_ITEMS)
+            .map(|i| PathBuf::from(format!("/tmp/{i}")))
+            .collect();
+        assert!(encode_uri_list(&many).is_err());
+        let payload = many
+            .iter()
+            .map(|p| format!("file://{}\n", p.display()))
+            .collect::<String>();
+        assert!(parse(payload.as_bytes(), false).is_err());
+        assert!(parse(&vec![b'a'; MAX_BYTES + 1], false).is_err());
+    }
+    #[test]
+    fn rejects_remote_and_invalid() {
         for input in [
             b"file://remote/tmp/x\n".as_slice(),
             b"file:///a%00b",
             b"file:///a%zz",
             b"file:///a?query",
-            b"file:///a\nfile:///b\n",
             b"http://example/a",
             b"file:///a/../b",
             b"file:///a%2fb",
@@ -160,8 +227,8 @@ mod tests {
         }
         assert!(parse(b"move\nfile:///tmp/x\n", true).is_err());
         assert_eq!(
-            parse(b"file://localhost/tmp/a\n", false).unwrap().path,
-            Path::new("/tmp/a")
+            parse(b"file://localhost/tmp/a\n", false).unwrap().paths,
+            vec![PathBuf::from("/tmp/a")]
         );
     }
 }

@@ -2097,6 +2097,7 @@ enum Operation {
     Rename(PathBuf, OsString),
     Copy(PathBuf, PathBuf, OsString),
     Move(PathBuf, PathBuf),
+    CopyItems(Vec<PathBuf>, PathBuf),
     Trash(PathBuf, usize),
     Convert(PathBuf, PathBuf, u8),
 }
@@ -2130,6 +2131,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     zfm::operations::copy_item(&path, &dir, &name, &AtomicBool::new(false), |_| {})
                         .map(|p| format!("Copied to {}", p.display()))
                 }
+                Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &AtomicBool::new(false))
+                    .map(|result| result.message(paths.len())),
                 Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
                     .map(|p| format!("Moved to {}", p.display())),
                 Operation::Convert(input, output, mode) => {
@@ -3041,19 +3044,20 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     load(hwnd, app, Destination::Refresh, false);
                 }
                 COPY | CUT if code == 0 => {
-                    if let Some(path) = selected_path(hwnd, app) {
-                        let indices = selected_indices(app);
-                        let copy_allowed = id == CUT || indices.first().and_then(|i| app.entries.get(*i))
-                            .map_or(false, |entry| entry.is_file || entry.is_dir);
-                        let message = if !copy_allowed {
-                            "Copy supports regular files and folders only."
-                        } else if windows_actions::copy_file(hwnd, &path, id == CUT) {
-                            "Item copied to clipboard."
-                        } else {
-                            "Could not write to clipboard."
-                        };
-                        set_status(hwnd, app, Some(message.into()));
-                    }
+                    let indices = selected_indices(app);
+                    let message = if indices.is_empty() || indices.len() > zfm::operations::MAX_COPY_ITEMS {
+                        "Select between 1 and 1024 items.".to_string()
+                    } else if id == CUT && indices.len() != 1 {
+                        "Cut supports exactly one item.".to_string()
+                    } else if id == COPY && indices.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
+                        "Copy supports regular files and folders only.".to_string()
+                    } else {
+                        let paths: Vec<PathBuf> = indices.iter().map(|i| app.entries[*i].path.clone()).collect();
+                        if windows_actions::copy_files(hwnd, &paths, id == CUT) {
+                            format!("{} item(s) placed on clipboard.", paths.len())
+                        } else { "Could not write to clipboard.".to_string() }
+                    };
+                    set_status(hwnd, app, Some(message));
                 }
                 COPY_PATH if code == 0 => {
                     let indices = selected_indices(app);
@@ -3076,18 +3080,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         ),
                     );
                 }
-                PASTE if code == 0 => match windows_actions::read_file(hwnd) {
-                    Ok((path, cut)) => {
+                PASTE if code == 0 => match windows_actions::read_files(hwnd) {
+                    Ok((paths, cut)) => {
                         let dir = app.tabs.current().current().to_path_buf();
                         if cut {
-                            start_operation(hwnd, app, Operation::Move(path, dir));
+                            start_operation(hwnd, app, Operation::Move(paths[0].clone(), dir));
                         } else {
-                            let name = if path.parent() == Some(dir.as_path()) {
-                                OsString::from(zfm::operations::suggest_copy_name(&dir, &path))
-                            } else {
-                                path.file_name().unwrap_or_default().to_os_string()
-                            };
-                            start_operation(hwnd, app, Operation::Copy(path, dir, name));
+                            start_operation(hwnd, app, Operation::CopyItems(paths, dir));
                         }
                     }
                     Err(message) => set_status(hwnd, app, Some(message.into())),

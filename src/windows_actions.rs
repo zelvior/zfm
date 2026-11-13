@@ -1,4 +1,4 @@
-//! Windows dialogs, shell properties and interoperable single-item clipboard.
+//! Windows dialogs, shell properties and interoperable file clipboard.
 use super::*;
 
 #[repr(C)]
@@ -73,34 +73,51 @@ pub(super) unsafe fn copy_text(hwnd: H, path: &Path) -> bool {
     ok
 }
 
-pub(super) unsafe fn copy_file(hwnd: H, path: &Path, cut: bool) -> bool {
-    let value = wide(path.as_os_str());
+pub(super) unsafe fn copy_files(hwnd: H, paths: &[PathBuf], cut: bool) -> bool {
+    if paths.is_empty()
+        || paths.len() > zfm::operations::MAX_COPY_ITEMS
+        || (cut && paths.len() != 1)
+    {
+        return false;
+    }
+    let mut values = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        if !path.is_absolute() || !seen.insert(path) {
+            return false;
+        }
+        let value = wide(path.as_os_str());
+        if value.len() > 32768 || values.len() + value.len() > 524_287 {
+            return false;
+        }
+        values.extend_from_slice(&value);
+    }
+    values.push(0); // second NUL terminates CF_HDROP's filename list
     let header = DropFiles {
         offset: std::mem::size_of::<DropFiles>() as u32,
         point: Point { x: 0, y: 0 },
         non_client: 0,
         wide: 1,
     };
-    let mut bytes = vec![0u8; std::mem::size_of::<DropFiles>() + (value.len() + 1) * 2];
+    let mut bytes = vec![0u8; std::mem::size_of::<DropFiles>() + values.len() * 2];
     ptr::copy_nonoverlapping(
         &header as *const _ as *const u8,
         bytes.as_mut_ptr(),
         std::mem::size_of::<DropFiles>(),
     );
     ptr::copy_nonoverlapping(
-        value.as_ptr() as *const u8,
+        values.as_ptr() as *const u8,
         bytes.as_mut_ptr().add(std::mem::size_of::<DropFiles>()),
-        value.len() * 2,
+        values.len() * 2,
     );
     let effect = if cut { 2u32 } else { 1u32 };
     let format = RegisterClipboardFormatW(text("Preferred DropEffect").as_ptr());
     if format == 0 || OpenClipboard(hwnd) == 0 {
         return false;
     }
-    let ok = EmptyClipboard() != 0 && set_format(15, &bytes);
-    // If the effect cannot be published, fail closed for cut rather than
-    // advertising a copy that would leave the user's source behind.
-    let ok = ok && set_format(format, &effect.to_ne_bytes());
+    let ok = EmptyClipboard() != 0
+        && set_format(15, &bytes)
+        && set_format(format, &effect.to_ne_bytes());
     if !ok {
         EmptyClipboard();
     }
@@ -108,47 +125,61 @@ pub(super) unsafe fn copy_file(hwnd: H, path: &Path, cut: bool) -> bool {
     ok
 }
 
-pub(super) unsafe fn read_file(hwnd: H) -> Result<(PathBuf, bool), &'static str> {
+pub(super) unsafe fn read_files(hwnd: H) -> Result<(Vec<PathBuf>, bool), &'static str> {
     if OpenClipboard(hwnd) == 0 {
         return Err("Cannot open clipboard.");
     }
-    let drop = GetClipboardData(15);
-    let result = if drop.is_null() {
-        Err("Clipboard does not contain a file.")
-    } else if DragQueryFileW(drop, u32::MAX, ptr::null_mut(), 0) != 1 {
-        Err("Paste supports exactly one local item.")
-    } else {
-        let len = DragQueryFileW(drop, 0, ptr::null_mut(), 0);
-        if len == 0 || len > 32767 {
-            Err("Invalid clipboard path.")
-        } else {
-            let mut buf = vec![0u16; len as usize + 1];
-            if DragQueryFileW(drop, 0, buf.as_mut_ptr(), len + 1) != len {
-                Err("Cannot read clipboard path.")
-            } else {
-                let path = PathBuf::from(OsString::from_wide(&buf[..len as usize]));
-                if !path.is_absolute() {
-                    Err("Clipboard path must be absolute.")
-                } else {
-                    let format = RegisterClipboardFormatW(text("Preferred DropEffect").as_ptr());
-                    let effect = if format == 0 {
-                        ptr::null_mut()
-                    } else {
-                        GetClipboardData(format)
-                    };
-                    let mut cut = false;
-                    if !effect.is_null() && GlobalSize(effect) >= 4 {
-                        let p = GlobalLock(effect);
-                        if !p.is_null() {
-                            cut = ptr::read_unaligned(p as *const u32) & 2 != 0;
-                            GlobalUnlock(effect);
-                        }
-                    }
-                    Ok((path, cut))
-                }
-            }
+    let result = (|| {
+        let drop = GetClipboardData(15);
+        if drop.is_null() {
+            return Err("Clipboard does not contain a file.");
         }
-    };
+        let count = DragQueryFileW(drop, u32::MAX, ptr::null_mut(), 0) as usize;
+        if count == 0 || count > zfm::operations::MAX_COPY_ITEMS {
+            return Err("Clipboard item count is invalid.");
+        }
+        let mut paths = Vec::with_capacity(count);
+        let mut seen = std::collections::HashSet::new();
+        let mut units = 0usize;
+        for index in 0..count {
+            let len = DragQueryFileW(drop, index as u32, ptr::null_mut(), 0);
+            units += len as usize + 1;
+            if len == 0 || len > 32767 || units > 524_287 {
+                return Err("Clipboard paths are invalid or too large.");
+            }
+            let mut buf = vec![0u16; len as usize + 1];
+            if DragQueryFileW(drop, index as u32, buf.as_mut_ptr(), len + 1) != len {
+                return Err("Cannot read clipboard path.");
+            }
+            let path = PathBuf::from(OsString::from_wide(&buf[..len as usize]));
+            if !path.is_absolute() || !seen.insert(path.clone()) {
+                return Err("Clipboard paths must be absolute and unique.");
+            }
+            paths.push(path);
+        }
+        let format = RegisterClipboardFormatW(text("Preferred DropEffect").as_ptr());
+        let effect = if format == 0 {
+            ptr::null_mut()
+        } else {
+            GetClipboardData(format)
+        };
+        let mut cut = false;
+        if !effect.is_null() {
+            if GlobalSize(effect) < 4 {
+                return Err("Invalid clipboard drop effect.");
+            }
+            let p = GlobalLock(effect);
+            if p.is_null() {
+                return Err("Cannot read clipboard drop effect.");
+            }
+            cut = ptr::read_unaligned(p as *const u32) & 2 != 0;
+            GlobalUnlock(effect);
+        }
+        if cut && count != 1 {
+            return Err("Cut and paste supports one item only.");
+        }
+        Ok((paths, cut))
+    })();
     CloseClipboard();
     result
 }
