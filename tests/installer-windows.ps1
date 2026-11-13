@@ -13,6 +13,30 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class ZfmSetupSmoke {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr FindResourceW(IntPtr module, IntPtr name, IntPtr type);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern uint SizeofResource(IntPtr module, IntPtr resource);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern IntPtr LockResource(IntPtr resource);
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeLibrary(IntPtr module);
+    public static byte[] Manifest(string path) {
+        IntPtr module = LoadLibraryExW(path, IntPtr.Zero, 2); // LOAD_LIBRARY_AS_DATAFILE
+        if (module == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            IntPtr resource = FindResourceW(module, new IntPtr(1), new IntPtr(24)); // RT_MANIFEST
+            if (resource == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            int size = checked((int)SizeofResource(module, resource));
+            IntPtr data = LockResource(LoadResource(module, resource));
+            if (size == 0 || data == IntPtr.Zero) throw new Exception("Empty manifest resource");
+            byte[] bytes = new byte[size]; Marshal.Copy(data, bytes, 0, size); return bytes;
+        } finally { FreeLibrary(module); }
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int left, top, right, bottom; }
     [DllImport("user32.dll", ExactSpelling=true)]
@@ -52,6 +76,28 @@ $appShortcut = Join-Path $menu 'ZFM File Manager.lnk'
 $uninstallShortcut = Join-Path $menu 'Uninstall ZFM.lnk'
 $appKey = 'HKCU:\Software\ZFM'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ZFM'
+
+function Assert-SetupMetadata {
+    param([string]$Path)
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    if ($info.CompanyName -ne 'Zelvior Labs' -or $info.FileDescription -ne 'ZFM Setup' -or $info.ProductName -ne 'ZFM - Zelvior File Manager') {
+        throw "Missing setup branding in ${Path}: $($info.CompanyName), $($info.FileDescription), $($info.ProductName)"
+    }
+    if ($env:ZFM_VERSION -and $info.ProductVersion -ne $env:ZFM_VERSION) {
+        throw "Incorrect ProductVersion '$($info.ProductVersion)' in $Path"
+    }
+    $bytes = [ZfmSetupSmoke]::Manifest($Path)
+    $reader = [IO.StreamReader]::new([IO.MemoryStream]::new($bytes), [Text.Encoding]::UTF8, $true)
+    try { [xml]$xml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    $level = $xml.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
+    if ($null -eq $level -or $level.GetAttribute('level') -ne 'asInvoker' -or $level.GetAttribute('uiAccess') -ne 'false') {
+        throw "Setup manifest in $Path does not request asInvoker."
+    }
+    $ids = @($xml.SelectNodes("//*[local-name()='supportedOS']") | ForEach-Object { $_.GetAttribute('Id').ToLowerInvariant() })
+    foreach ($id in @('{35138b9a-5d96-4fbd-8e2d-a2440225f93a}', '{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}')) {
+        if ($id -notin $ids) { throw "Setup manifest in $Path is missing supported OS $id." }
+    }
+}
 
 function Invoke-Setup {
     param(
@@ -343,6 +389,7 @@ function Invoke-RunningUpgrade {
 }
 
 try {
+    Assert-SetupMetadata $setup
     New-Item -ItemType Directory -Path $root -Force | Out-Null
 
     # 1. Setup refuses to replace files it does not own and writes nothing.
@@ -378,7 +425,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($entry.DisplayVersion)) {
         throw 'The Programs and Features entry has no version.'
     }
-    if ($entry.Publisher -ne 'ZFM contributors') {
+    if ($entry.Publisher -ne 'Zelvior Labs') {
         throw "Unexpected publisher '$($entry.Publisher)'."
     }
     if ($entry.InstallLocation -ne $first) {
@@ -412,6 +459,8 @@ try {
     if ($removeLink.TargetPath -ne $uninstaller) {
         throw "The uninstall shortcut points at '$($removeLink.TargetPath)'."
     }
+
+    Assert-SetupMetadata $uninstaller
 
     # 4. The installed application really starts.
     & ./tests/gui-smoke-windows.ps1 -Executable (Join-Path $first 'zfm.exe')

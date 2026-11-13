@@ -201,4 +201,4 @@ The ZFM mark is a black-and-white badge: a paper-white rounded square, a solid b
 
 The foundation and added actions need interactive GTK testing and compatibility verification. Recursive file operations, properties, recursive search, bookmarks, recent files, multiple selection, drag-and-drop, alternative views and advanced features are **not implemented**. Delete alone moves to trash when the file list has focus; it never silently performs permanent deletion. Future phases should implement and test core operations before adding advanced tools, and profile real workloads before making performance claims.
 
-Licensed under [Apache-2.0](LICENSE). Made by Zelvior.
+Licensed under [Apache-2.0](LICENSE). Created by Zelvior at Zelvior Labs.

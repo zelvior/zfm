@@ -5,13 +5,19 @@
 //! has not been built the payload is a placeholder, so `cargo test` and
 //! `cargo check` still work on any host.
 
+#[path = "resources/version.rs"]
+mod version_resource;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let root = manifest.parent().expect("installer lives in the repository").to_path_buf();
+    let root = manifest
+        .parent()
+        .expect("installer lives in the repository")
+        .to_path_buf();
     let out = PathBuf::from(env::var("OUT_DIR").expect("output directory"));
 
     println!("cargo:rerun-if-env-changed=ZFM_APP_BINARY");
@@ -71,5 +77,52 @@ fn main() {
 
     let version = env::var("ZFM_VERSION").unwrap_or_else(|_| "dev".to_string());
     println!("cargo:rustc-env=ZFM_VERSION={}", version);
+
+    let manifest = root.join("installer/resources/setup.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rerun-if-changed=resources/version.rs");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let target = env::var("TARGET").expect("target");
+        let is_msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+        let xml = fs::read(&manifest).expect("read setup manifest");
+        let res = out.join("setup.res");
+        fs::write(
+            &res,
+            version_resource::resources(&version, if is_msvc { None } else { Some(&xml) }),
+        )
+        .expect("write setup resources");
+        if is_msvc {
+            // Let LINK/mt merge the explicit manifest with the default CRT manifest.
+            println!("cargo:rustc-link-arg-bin=zfm-setup=/MANIFEST:EMBED");
+            println!(
+                "cargo:rustc-link-arg-bin=zfm-setup=/MANIFESTINPUT:{}",
+                manifest.display()
+            );
+            println!("cargo:rustc-link-arg-bin=zfm-setup={}", res.display());
+        } else if target.ends_with("-windows-gnu") {
+            // GNU ld cannot consume a .res file directly; convert using the
+            // matching MinGW resource compiler installed with the linker.
+            let windres = if target.starts_with("i686-") {
+                "i686-w64-mingw32-windres"
+            } else {
+                "x86_64-w64-mingw32-windres"
+            };
+            let object = out.join("setup-res.o");
+            let status = std::process::Command::new(windres)
+                .args(["-J", "res", "-O", "coff", "-i"])
+                .arg(&res)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .expect("install the matching MinGW windres to build Windows GNU setup");
+            assert!(
+                status.success(),
+                "windres could not compile setup resources"
+            );
+            println!("cargo:rustc-link-arg-bin=zfm-setup={}", object.display());
+        } else {
+            panic!("unsupported Windows installer target: {}", target);
+        }
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }

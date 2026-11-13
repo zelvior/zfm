@@ -80,6 +80,17 @@ jobs:
           & ./tests/gui-smoke-windows.ps1 -Executable "target/$env:TARGET/release/zfm.exe"
           $env:ZFM_APP_BINARY = (Resolve-Path "target/$env:TARGET/release/zfm.exe").Path
           $env:ZFM_VERSION = $env:TAG
-          cargo +1.77.2 build --release --locked --target $env:TARGET -p zfm-installer
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./tests/installer-windows.ps1 -Installer "target/$env:TARGET/release/zfm-setup.exe"
+          cmd /c "cargo +1.77.2 build --release --locked --target $env:TARGET -p zfm-installer > installer-build.log 2>&1"
+          $buildExit = $LASTEXITCODE
+          Get-Content installer-build.log
+          if ($buildExit -ne 0) {
+            $message = ((Get-Content installer-build.log -Raw) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A')
+            Write-Output "::error::Installer build failed: $message"
+            exit $buildExit
+          }
+          try { & ./tests/installer-windows.ps1 -Installer "target/$env:TARGET/release/zfm-setup.exe" }
+          catch {
+            $message = ($_ | Out-String) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error::Installer smoke test failed: $message"
+            throw
+          }
