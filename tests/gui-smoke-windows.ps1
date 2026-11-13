@@ -21,6 +21,12 @@ public static class ZfmSmoke {
     public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern bool SetWindowTextW(IntPtr window, string text);
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
 }
@@ -124,6 +130,33 @@ try {
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot read selection.' }
     if ($result.ToUInt64() -ne 0) { throw 'Blank-space click did not clear selection.' }
+    # Copy and paste the first item into the same directory, without overwriting.
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot select clipboard fixture.' }
+    foreach ($id in @(130, 132)) {
+        $result = [UIntPtr]::Zero
+        if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]$id, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw "Clipboard command $id did not return." }
+    }
+    $copy = Join-Path $work 'example copy.txt'
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $copy); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $copy)) { throw 'Same-folder paste did not create a copy.' }
+    if ((Get-Content -LiteralPath $copy -Raw) -ne (Get-Content -LiteralPath (Join-Path $work 'example.txt') -Raw)) { throw 'Pasted data differs.' }
+
+    # A posted command opens the real name dialog without blocking this process.
+    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]139, [IntPtr]::Zero)) { throw 'Could not request new file dialog.' }
+    $dialog = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $dialog = [ZfmSmoke]::FindWindowW('#32770', 'New file')
+        if ($dialog -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($dialog -eq [IntPtr]::Zero) { throw 'New file dialog did not appear.' }
+    $dialogEdit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+    if ($dialogEdit -eq [IntPtr]::Zero -or -not [ZfmSmoke]::SetWindowTextW($dialogEdit, 'created.txt')) { throw 'Could not set the dialog name.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'New file dialog did not submit.' }
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath (Join-Path $work 'created.txt')); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath (Join-Path $work 'created.txt'))) { throw 'New file dialog did not create the file.' }
     # Refresh, new tab, close tab: synchronous calls exercise the message loop.
     foreach ($id in @(104, 110, 111)) {
         $result = [UIntPtr]::Zero

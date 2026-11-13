@@ -27,6 +27,9 @@ if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
 sleep 1
+# Keyboard-triggered background menu should open and dismiss without a GTK critical.
+xdotool key --window "$window" shift+F10
+xdotool key Escape
 if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while handling navigation keys:' >&2; cat "$work/stderr" >&2; exit 1; fi
 # Verify that Ctrl+N opens a modal prompt and Enter actually creates a file.
 xdotool windowfocus --sync "$window"
