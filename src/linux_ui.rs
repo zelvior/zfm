@@ -57,6 +57,9 @@ api! {
     gtk_dialog_add_button: unsafe extern "C" fn(P, *const c_char, c_int) -> P,
     gtk_dialog_get_content_area: unsafe extern "C" fn(P) -> P,
     gtk_dialog_run: unsafe extern "C" fn(P) -> c_int,
+    gtk_dialog_set_default_response: unsafe extern "C" fn(P, c_int),
+    gtk_entry_set_activates_default: unsafe extern "C" fn(P, c_int),
+    gtk_editable_select_region: unsafe extern "C" fn(P, c_int, c_int),
     gtk_window_set_default_size: unsafe extern "C" fn(P, c_int, c_int),
     gtk_window_set_transient_for: unsafe extern "C" fn(P, P),
     gtk_file_chooser_native_new: unsafe extern "C" fn(*const c_char, P, c_int, *const c_char, *const c_char) -> P,
@@ -65,15 +68,20 @@ api! {
     gtk_progress_bar_new: unsafe extern "C" fn() -> P,
     gtk_progress_bar_set_fraction: unsafe extern "C" fn(P, f64),
     gtk_widget_hide: unsafe extern "C" fn(P),
-    gtk_list_box_get_selected_row: unsafe extern "C" fn(P) -> P,
     gtk_list_box_get_selected_rows: unsafe extern "C" fn(P) -> P,
+    gtk_list_box_get_row_at_y: unsafe extern "C" fn(P, c_int) -> P,
+    gtk_list_box_row_is_selected: unsafe extern "C" fn(P) -> c_int,
     gtk_list_box_set_selection_mode: unsafe extern "C" fn(P, c_int),
     gtk_list_box_select_all: unsafe extern "C" fn(P),
     gtk_list_box_unselect_all: unsafe extern "C" fn(P),
     g_list_free: unsafe extern "C" fn(P),
     gtk_box_new: unsafe extern "C" fn(c_int, c_int) -> P,
+    gtk_event_box_new: unsafe extern "C" fn() -> P,
+    gtk_get_event_widget: unsafe extern "C" fn(P) -> P,
     gtk_box_pack_start: unsafe extern "C" fn(P, P, c_int, c_int, c_uint),
     gtk_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
+    gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
+    gtk_toggle_button_set_active: unsafe extern "C" fn(P, c_int),
     gtk_check_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
@@ -95,9 +103,15 @@ api! {
     gtk_menu_new: unsafe extern "C" fn() -> P,
     gtk_menu_item_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_menu_shell_append: unsafe extern "C" fn(P, P),
+    gtk_menu_item_set_submenu: unsafe extern "C" fn(P, P),
+    gtk_separator_menu_item_new: unsafe extern "C" fn() -> P,
+    gtk_menu_popup_at_widget: unsafe extern "C" fn(P, P, c_int, c_int, P),
     gtk_menu_popup_at_pointer: unsafe extern "C" fn(P, P),
     gtk_widget_add_events: unsafe extern "C" fn(P, c_int),
     gdk_event_get_button: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
+    gdk_event_get_coords: unsafe extern "C" fn(P, *mut f64, *mut f64) -> c_int,
+    gdk_event_get_event_type: unsafe extern "C" fn(P) -> c_int,
+    gtk_clipboard_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
     gdk_atom_intern: unsafe extern "C" fn(*const c_char, c_int) -> P,
     gtk_clipboard_get: unsafe extern "C" fn(P) -> P,
     gtk_clipboard_set_with_data: unsafe extern "C" fn(P, P, c_uint, P, P, P) -> c_int,
@@ -115,7 +129,6 @@ api! {
     gtk_widget_destroy: unsafe extern "C" fn(P),
     gtk_widget_show_all: unsafe extern "C" fn(P),
     gtk_widget_grab_focus: unsafe extern "C" fn(P),
-    gtk_widget_set_sensitive: unsafe extern "C" fn(P, c_int),
     gtk_widget_set_tooltip_text: unsafe extern "C" fn(P, *const c_char),
     gdk_event_get_keyval: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
     gdk_event_get_state: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
@@ -172,6 +185,7 @@ struct App {
     search_case: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
+    columns: [P; 4],
 }
 struct ResultMessage {
     app: usize,
@@ -404,6 +418,16 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
         set_status(app, error);
     } else {
         let current = app.tabs.current().current().display().to_string();
+        let rows = selected_rows(app.list);
+        let selected_path = if rows.len() == 1 {
+            let index = (api().gtk_list_box_row_get_index)(rows[0]);
+            app.entries
+                .get(index as usize)
+                .map(|e| e.path.display().to_string())
+                .unwrap_or_else(|| current.clone())
+        } else {
+            current.clone()
+        };
         let notice = app
             .notice
             .as_ref()
@@ -412,12 +436,13 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
         set_status(
             app,
             &format!(
-                "{} items   |   {}{}{}   |   Path: {}",
+                "{} items   |   Selected: {}   |   {}{}{}   |   Path: {}",
                 app.entries.len(),
+                rows.len(),
                 current,
                 skipped,
                 notice,
-                current
+                selected_path
             ),
         );
     }
@@ -468,7 +493,10 @@ unsafe extern "C" fn up(_: P, p: P) {
     }
 }
 unsafe extern "C" fn go_root(_: P, p: P) {
-    navigate(&mut *(p as *mut App), Destination::Visit(PathBuf::from("/")));
+    navigate(
+        &mut *(p as *mut App),
+        Destination::Visit(PathBuf::from("/")),
+    );
 }
 unsafe extern "C" fn go_address(_: P, p: P) {
     let entry = (*(p as *mut App)).address;
@@ -481,6 +509,23 @@ unsafe fn apply_linux_sort(p: P, col: SortColumn) {
     } else {
         app.sort_column = col;
         app.sort_ascending = matches!(col, SortColumn::Name | SortColumn::Kind);
+    }
+    for (widget, column, label) in [
+        (app.columns[0], SortColumn::Name, "Name"),
+        (app.columns[1], SortColumn::Modified, "Date Modified"),
+        (app.columns[2], SortColumn::Kind, "Type"),
+        (app.columns[3], SortColumn::Size, "Size"),
+    ] {
+        let suffix = if app.sort_column == column {
+            if app.sort_ascending {
+                " ▲"
+            } else {
+                " ▼"
+            }
+        } else {
+            ""
+        };
+        (api().gtk_button_set_label)(widget, c(&format!("{label}{suffix}")).as_ptr());
     }
     navigate(app, Destination::Refresh);
 }
@@ -519,23 +564,243 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
     // Do not retain an App reference while callbacks run nested dialogs.
     let modifiers = state & (1 | 4 | 8 | 64);
     match (key, modifiers) {
-        (0xffc2, 0) => navigate(&mut *(p as *mut App), Destination::Refresh),
-        (0xff51, 8) => navigate(&mut *(p as *mut App), Destination::Back),
-        (0xff53, 8) => navigate(&mut *(p as *mut App), Destination::Forward),
+        (0xffc2, 0) | (0x72, 4) | (0x52, 4) => refresh(ptr::null_mut(), p),
+        (0xff51, 8) => back(ptr::null_mut(), p),
+        (0xff53, 8) => forward(ptr::null_mut(), p),
         (0xff52, 8) => up(ptr::null_mut(), p),
-        (0x6c, 4) | (0x4c, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).address),
-        (0x66, 4) | (0x46, 4) => (api().gtk_widget_grab_focus)((*(p as *mut App)).search_entry),
+        (0xff08, 0) if list_has_focus(p) => up(ptr::null_mut(), p),
+        (0x6c, 4) | (0x4c, 4) | (0x64, 8) | (0x44, 8) => focus_entry((*(p as *mut App)).address),
+        (0x66, 4) | (0x46, 4) => focus_entry((*(p as *mut App)).search_entry),
+        (0x63, 5) | (0x43, 5) => copy_path(ptr::null_mut(), p),
         (0x63, 4) | (0x43, 4) if list_has_focus(p) => copy_to_clipboard(ptr::null_mut(), p),
         (0x78, 4) | (0x58, 4) if list_has_focus(p) => cut_to_clipboard(ptr::null_mut(), p),
         (0x76, 4) | (0x56, 4) if list_has_focus(p) => paste_from_clipboard(ptr::null_mut(), p),
         (0x74, 4) | (0x54, 4) => new_tab(ptr::null_mut(), p),
         (0x77, 4) | (0x57, 4) => close_tab(ptr::null_mut(), p),
-        (0xffbf, 0) if list_has_focus(p) => rename(ptr::null_mut(), p), // F2
+        (0xff09, 4) | (0xff56, 4) => cycle_tab(p, false),
+        (0xfe20, 5) | (0xff09, 5) | (0xff55, 4) => cycle_tab(p, true),
+        (0x31..=0x39, 4) | (0x31..=0x39, 8) => {
+            if (*(p as *mut App)).tabs.select((key - 0x31) as usize) {
+                activate_tab(p);
+            }
+        }
+        (0x6e, 5) | (0x4e, 5) => new_folder(ptr::null_mut(), p),
+        (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
+        (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
+        (0x68, 4) | (0x48, 4) => {
+            let hidden = (*(p as *mut App)).hidden;
+            (api().gtk_toggle_button_set_active)(
+                hidden,
+                ((api().gtk_toggle_button_get_active)(hidden) == 0) as c_int,
+            );
+        }
+        (0xffbf, 0) if list_has_focus(p) => rename(ptr::null_mut(), p),
         (0xffff, 0) if list_has_focus(p) => move_to_trash(ptr::null_mut(), p),
-        (0xffff, 1) if list_has_focus(p) => delete_permanently(ptr::null_mut(), p), // Shift+Delete
+        (0xffff, 1) if list_has_focus(p) => delete_permanently(ptr::null_mut(), p),
+        (0xff0d, 8) if list_has_focus(p) => properties(ptr::null_mut(), p),
+        (0xffc7, 1) | (0xff67, 0) if list_has_focus(p) => {
+            let list = (*(p as *mut App)).list;
+            let row = selected_rows(list).first().copied();
+            if let Some(row) = row {
+                show_row_menu(row, ptr::null_mut(), p);
+            } else {
+                show_background_menu(list, ptr::null_mut(), p);
+            }
+        }
+        (0xff1b, 0) => {
+            let list = (*(p as *mut App)).list;
+            (api().gtk_list_box_unselect_all)(list);
+            (api().gtk_widget_grab_focus)(list);
+        }
         _ => return 0,
     }
     1
+}
+#[repr(C)]
+struct GList {
+    data: P,
+    next: *mut GList,
+    prev: *mut GList,
+}
+unsafe fn selected_rows(list: P) -> Vec<P> {
+    let head = (api().gtk_list_box_get_selected_rows)(list);
+    let mut node = head as *mut GList;
+    let mut rows = Vec::new();
+    while !node.is_null() {
+        rows.push((*node).data);
+        node = (*node).next;
+    }
+    (api().g_list_free)(head);
+    rows
+}
+unsafe extern "C" fn selection_changed(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    let path = if rows.len() == 1 {
+        let i = (api().gtk_list_box_row_get_index)(rows[0]);
+        app.entries
+            .get(i as usize)
+            .map(|e| e.path.as_path())
+            .unwrap_or(app.tabs.current().current())
+    } else {
+        app.tabs.current().current()
+    };
+    set_status(
+        app,
+        &format!(
+            "{} items   |   Selected: {}   |   Path: {}",
+            app.entries.len(),
+            rows.len(),
+            path.display()
+        ),
+    );
+}
+unsafe fn focus_entry(entry: P) {
+    (api().gtk_widget_grab_focus)(entry);
+    (api().gtk_editable_select_region)(entry, 0, -1);
+}
+unsafe fn cycle_tab(data: P, previous: bool) {
+    let app = &mut *(data as *mut App);
+    if if previous {
+        app.tabs.prev_tab()
+    } else {
+        app.tabs.next_tab()
+    } {
+        activate_tab(data);
+    }
+}
+unsafe extern "C" fn open_selected(_: P, data: P) {
+    let list = (*(data as *mut App)).list;
+    let rows = selected_rows(list);
+    if rows.len() == 1 {
+        row_activated(list, rows[0], data);
+    } else {
+        set_status(&*(data as *mut App), "Select one item to open.");
+    }
+}
+unsafe extern "C" fn copy_path(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    let path = if rows.len() == 1 {
+        let i = (api().gtk_list_box_row_get_index)(rows[0]);
+        app.entries
+            .get(i as usize)
+            .map(|e| e.path.as_path())
+            .unwrap_or(app.tabs.current().current())
+    } else {
+        app.tabs.current().current()
+    };
+    let clip = (api().gtk_clipboard_get)((api().gdk_atom_intern)(c("CLIPBOARD").as_ptr(), 0));
+    (api().gtk_clipboard_set_text)(clip, c(&path.to_string_lossy()).as_ptr(), -1);
+    set_status(app, "Path copied to clipboard.");
+}
+unsafe extern "C" fn properties(_: P, data: P) {
+    let path = match selected_path(data) {
+        Some(p) => p,
+        None => return,
+    };
+    let details = match std::fs::symlink_metadata(&path) {
+        Ok(m) => format!(
+            "{}\n\nType: {}\nSize: {} bytes",
+            path.display(),
+            if m.file_type().is_symlink() {
+                "Symbolic link"
+            } else if m.is_dir() {
+                "Folder"
+            } else {
+                "File"
+            },
+            m.len()
+        ),
+        Err(e) => format!("{}\n{}", path.display(), e),
+    };
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c("Properties").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, (*(data as *mut App)).window);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
+    (api().gtk_box_pack_start)(
+        (api().gtk_dialog_get_content_area)(dialog),
+        label(&details),
+        0,
+        0,
+        12,
+    );
+    (api().gtk_widget_show_all)(dialog);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 {
+        (api().gtk_widget_destroy)(dialog);
+    }
+}
+unsafe extern "C" fn list_button(list: P, event: P, data: P) -> c_int {
+    let mut button = 0;
+    if (api().gdk_event_get_button)(event, &mut button) == 0 {
+        return 0;
+    }
+    if button == 8 {
+        back(ptr::null_mut(), data);
+        return 1;
+    }
+    if button == 9 {
+        forward(ptr::null_mut(), data);
+        return 1;
+    }
+    let (mut x, mut y) = (0.0, 0.0);
+    if (api().gdk_event_get_coords)(event, &mut x, &mut y) == 0 {
+        return 0;
+    }
+    if !(api().gtk_list_box_get_row_at_y)(list, y as c_int).is_null() {
+        return 0;
+    }
+    if button == 1 || button == 3 {
+        (api().gtk_list_box_unselect_all)(list);
+        (api().gtk_widget_grab_focus)(list);
+        if button == 3 {
+            show_background_menu(list, event, data);
+        }
+        return 1;
+    }
+    0
+}
+unsafe fn show_background_menu(list: P, event: P, data: P) {
+    let menu = (api().gtk_menu_new)();
+    menu_action(menu, "New file…", new_file as P, data);
+    menu_action(menu, "New folder…", new_folder as P, data);
+    menu_action(menu, "Paste", paste_from_clipboard as P, data);
+    menu_action(menu, "Refresh", refresh as P, data);
+    menu_action(
+        menu,
+        "Show / hide hidden files",
+        toggle_hidden_menu as P,
+        data,
+    );
+    let item = (api().gtk_menu_item_new_with_label)(c("Sort by").as_ptr());
+    let submenu = (api().gtk_menu_new)();
+    for (name, cb) in [
+        ("Name", sort_by_name as P),
+        ("Date Modified", sort_by_modified as P),
+        ("Type", sort_by_type as P),
+        ("Size", sort_by_size as P),
+    ] {
+        menu_action(submenu, name, cb, data);
+    }
+    (api().gtk_menu_item_set_submenu)(item, submenu);
+    (api().gtk_menu_shell_append)(menu, item);
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    if event.is_null() {
+        (api().gtk_menu_popup_at_widget)(menu, list, 6, 2, ptr::null_mut());
+    } else {
+        (api().gtk_menu_popup_at_pointer)(menu, event);
+    }
+}
+unsafe extern "C" fn toggle_hidden_menu(_: P, data: P) {
+    let hidden = (*(data as *mut App)).hidden;
+    (api().gtk_toggle_button_set_active)(
+        hidden,
+        ((api().gtk_toggle_button_get_active)(hidden) == 0) as c_int,
+    );
 }
 unsafe fn list_has_focus(data: P) -> bool {
     let window = (*(data as *mut App)).window;
@@ -586,17 +851,49 @@ unsafe extern "C" fn row_activated(_: P, row: P, p: P) {
 }
 unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
     let mut mouse_button = 0;
-    if (api().gdk_event_get_button)(event, &mut mouse_button) == 0 || mouse_button != 3 {
+    if (api().gdk_event_get_button)(event, &mut mouse_button) == 0 {
         return 0;
     }
+    let mut state = 0;
+    (api().gdk_event_get_state)(event, &mut state);
+    if mouse_button == 1 && state & 8 != 0 && (api().gdk_event_get_event_type)(event) == 5 {
+        let list = (*(data as *mut App)).list;
+        (api().gtk_list_box_unselect_all)(list);
+        (api().gtk_list_box_select_row)(list, row);
+        properties(ptr::null_mut(), data);
+        return 1;
+    }
+    if mouse_button == 2
+        || (mouse_button == 1 && state & 4 != 0 && (api().gdk_event_get_event_type)(event) == 5)
+    {
+        let app = &mut *(data as *mut App);
+        let index = (api().gtk_list_box_row_get_index)(row);
+        if let Some(path) = app
+            .entries
+            .get(index as usize)
+            .filter(|e| e.is_dir)
+            .map(|e| e.path.clone())
+        {
+            app.tabs.add(path);
+            activate_tab(data);
+            return 1;
+        }
+    }
+    if mouse_button != 3 {
+        return 0;
+    }
+    show_row_menu(row, event, data);
+    1
+}
+unsafe fn show_row_menu(row: P, event: P, data: P) {
     let app = &*(data as *mut App);
     let index = (api().gtk_list_box_row_get_index)(row);
     if index < 0 {
-        return 0;
+        return;
     }
     let entry = match app.entries.get(index as usize) {
         Some(entry) => entry,
-        None => return 0,
+        None => return,
     };
     let is_directory = entry.is_dir;
     let can_duplicate = entry.is_file;
@@ -610,8 +907,13 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
-    (api().gtk_list_box_select_row)(list, row);
+    if (api().gtk_list_box_row_is_selected)(row) == 0 {
+        (api().gtk_list_box_unselect_all)(list);
+        (api().gtk_list_box_select_row)(list, row);
+    }
+    (api().gtk_widget_grab_focus)(list);
     let menu = (api().gtk_menu_new)();
+    menu_action(menu, "Open", open_selected as P, data);
     if is_directory {
         menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
     }
@@ -634,6 +936,7 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
+    menu_action(menu, "Copy path", copy_path as P, data);
     menu_action(
         menu,
         "Paste into current folder",
@@ -648,10 +951,15 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
     }
     menu_action(menu, "Move to trash", move_to_trash as P, data);
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
+    (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
+    menu_action(menu, "Properties", properties as P, data);
     connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
     (api().gtk_widget_show_all)(menu);
-    (api().gtk_menu_popup_at_pointer)(menu, event);
-    1
+    if event.is_null() {
+        (api().gtk_menu_popup_at_widget)(menu, row, 6, 2, ptr::null_mut());
+    } else {
+        (api().gtk_menu_popup_at_pointer)(menu, event);
+    }
 }
 unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     let item = (api().gtk_menu_item_new_with_label)(c(text).as_ptr());
@@ -666,6 +974,35 @@ unsafe extern "C" fn shortcut(_: P, p: P) {
     let shortcut = &*(p as *const Shortcut);
     let app = &mut *(shortcut.app as *mut App);
     navigate(app, Destination::Visit(shortcut.path.clone()));
+}
+unsafe extern "C" fn sidebar_new_tab(_: P, p: P) {
+    let shortcut = &*(p as *const Shortcut);
+    let app_ptr = shortcut.app as P;
+    let path = shortcut.path.clone();
+    (*(app_ptr as *mut App)).tabs.add(path);
+    activate_tab(app_ptr);
+}
+unsafe extern "C" fn sidebar_button(_: P, event: P, data: P) -> c_int {
+    let mut button = 0;
+    if (api().gdk_event_get_button)(event, &mut button) == 0 {
+        return 0;
+    }
+    let mut state = 0;
+    (api().gdk_event_get_state)(event, &mut state);
+    if button == 2 || (button == 1 && state & 4 != 0) {
+        sidebar_new_tab(ptr::null_mut(), data);
+        return 1;
+    }
+    if button != 3 {
+        return 0;
+    }
+    let menu = (api().gtk_menu_new)();
+    menu_action(menu, "Open", shortcut as P, data);
+    menu_action(menu, "Open in new tab", sidebar_new_tab as P, data);
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    (api().gtk_menu_popup_at_pointer)(menu, event);
+    1
 }
 
 pub fn run() -> Result<(), String> {
@@ -739,6 +1076,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_box_pack_start)(right_pane, scroll, 1, 1, 0);
         let list = (api().gtk_list_box_new)();
         (api().gtk_list_box_set_activate_on_single_click)(list, 0);
+        (api().gtk_list_box_set_selection_mode)(list, 3); // GTK_SELECTION_MULTIPLE
         (api().gtk_container_add)(scroll, list);
 
         let status_box = (api().gtk_box_new)(0, 0);
@@ -784,6 +1122,7 @@ pub fn run() -> Result<(), String> {
             search_case: false,
             sort_column: SortColumn::Name,
             sort_ascending: true,
+            columns: [ptr::null_mut(); 4],
         }));
         let p = app as P;
 
@@ -794,7 +1133,16 @@ pub fn run() -> Result<(), String> {
         add_class(new_tab_btn, "zfm-tab-active");
         let close_tab_btn = button(tabs_row, "× Close tab", close_tab as P, p);
         add_class(close_tab_btn, "zfm-tab-btn");
-        (api().gtk_box_pack_start)(tabs_row, tab_strip, 1, 1, 0);
+        let tab_background = (api().gtk_event_box_new)();
+        (api().gtk_container_add)(tab_background, tab_strip);
+        (api().gtk_box_pack_start)(tabs_row, tab_background, 1, 1, 0);
+        (api().gtk_widget_add_events)(tab_background, 1 << 8);
+        connect(
+            tab_background,
+            "button-press-event",
+            tab_background_button as P,
+            p,
+        );
         rebuild_tabs(&*app);
 
         // Filter row
@@ -841,14 +1189,18 @@ pub fn run() -> Result<(), String> {
         // Sortable column header bar
         let col_name = button(col_bar, "Name ▲", sort_by_name as P, p);
         (api().gtk_widget_set_hexpand)(col_name, 1);
-        let col_mod = button(col_bar, "Date Modified ↓", sort_by_modified as P, p);
+        let col_mod = button(col_bar, "Date Modified", sort_by_modified as P, p);
         (api().gtk_widget_set_size_request)(col_mod, 175, -1);
         let col_type = button(col_bar, "Type", sort_by_type as P, p);
         (api().gtk_widget_set_size_request)(col_type, 135, -1);
         let col_size = button(col_bar, "Size", sort_by_size as P, p);
         (api().gtk_widget_set_size_request)(col_size, 86, -1);
 
+        (*app).columns = [col_name, col_mod, col_type, col_size];
         connect(list, "row-activated", row_activated as P, p);
+        connect(list, "selected-rows-changed", selection_changed as P, p);
+        (api().gtk_widget_add_events)(list, 1 << 8);
+        connect(list, "button-press-event", list_button as P, p);
         connect(window, "destroy", quit as P, p);
         connect(window, "key-press-event", key_press as P, p);
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -866,6 +1218,8 @@ pub fn run() -> Result<(), String> {
                     path,
                 })) as P;
                 let b = button(sidebar, name, shortcut as P, data);
+                (api().gtk_widget_add_events)(b, 1 << 8);
+                connect(b, "button-press-event", sidebar_button as P, data);
                 let child_lbl = (api().gtk_bin_get_child)(b);
                 if !child_lbl.is_null() {
                     (api().gtk_label_set_xalign)(child_lbl, 0.0);
@@ -1104,7 +1458,10 @@ unsafe extern "C" fn converter_open_folder(_: P, data: P) {
 unsafe extern "C" fn show_converter(_: P, data: P) {
     let app = &mut *(data as *mut App);
     let converter = &mut *(app.converter as *mut Converter);
-    let row = (api().gtk_list_box_get_selected_row)(app.list);
+    let row = selected_rows(app.list)
+        .first()
+        .copied()
+        .unwrap_or(ptr::null_mut());
     if !row.is_null() && !converter.running {
         let i = (api().gtk_list_box_row_get_index)(row);
         if i >= 0 {
@@ -1241,9 +1598,19 @@ unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -
     } else {
         ptr::null_mut()
     };
+    (api().gtk_dialog_set_default_response)(dialog, -3);
     (api().gtk_widget_show_all)(dialog);
     if !entry.is_null() {
+        (api().gtk_entry_set_activates_default)(entry, 1);
         (api().gtk_widget_grab_focus)(entry);
+        if title == "Rename" {
+            let name = initial.unwrap_or("");
+            let stem = std::path::Path::new(name)
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or(name);
+            (api().gtk_editable_select_region)(entry, 0, stem.chars().count() as c_int);
+        }
     }
     let response = (api().gtk_dialog_run)(dialog);
     let result = if response == -3 {
@@ -1272,7 +1639,12 @@ fn initial_copy_name(path: &std::path::Path) -> String {
 }
 unsafe fn selected_path(data: P) -> Option<PathBuf> {
     let app = &*(data as *mut App);
-    let row = (api().gtk_list_box_get_selected_row)(app.list);
+    let rows = selected_rows(app.list);
+    if rows.len() > 1 {
+        set_status(app, "This action supports one selected item at a time.");
+        return None;
+    }
+    let row = rows.first().copied().unwrap_or(ptr::null_mut());
     if row.is_null() {
         set_status(app, "Select an item first.");
         return None;
@@ -1568,6 +1940,93 @@ unsafe extern "C" fn tab_clicked(_: P, data: P) {
         activate_tab(app_ptr);
     }
 }
+unsafe extern "C" fn tab_menu_new(_: P, data: P) {
+    new_tab(ptr::null_mut(), (*(data as *const TabButtonData)).app as P);
+}
+unsafe extern "C" fn tab_menu_duplicate(_: P, data: P) {
+    let tab = &*(data as *const TabButtonData);
+    let app_ptr = tab.app as P;
+    let path = (*(app_ptr as *mut App))
+        .tabs
+        .history(tab.index)
+        .map(|h| h.current().to_path_buf());
+    if let Some(path) = path {
+        (*(app_ptr as *mut App)).tabs.add(path);
+        activate_tab(app_ptr);
+    }
+}
+unsafe extern "C" fn tab_menu_close(_: P, data: P) {
+    let tab = &*(data as *const TabButtonData);
+    let app_ptr = tab.app as P;
+    let index = tab.index;
+    if (*(app_ptr as *mut App)).tabs.close_at(index) {
+        activate_tab(app_ptr);
+    } else {
+        set_status(&*(app_ptr as *mut App), "The last tab cannot be closed.");
+    }
+}
+unsafe extern "C" fn tab_menu_close_others(_: P, data: P) {
+    let tab = &*(data as *const TabButtonData);
+    let app_ptr = tab.app as P;
+    let index = tab.index;
+    if (*(app_ptr as *mut App)).tabs.close_others(index) {
+        activate_tab(app_ptr);
+    }
+}
+unsafe extern "C" fn tab_button(_: P, event: P, data: P) -> c_int {
+    let mut mouse = 0;
+    if (api().gdk_event_get_button)(event, &mut mouse) == 0 {
+        return 0;
+    }
+    if mouse == 2 {
+        tab_menu_close(ptr::null_mut(), data);
+        return 1;
+    }
+    if mouse != 3 {
+        return 0;
+    }
+    let tab = &*(data as *const TabButtonData);
+    let (app, index) = (tab.app, tab.index);
+    let menu = (api().gtk_menu_new)();
+    for (name, cb) in [
+        ("New tab", tab_menu_new as P),
+        ("Duplicate tab", tab_menu_duplicate as P),
+        ("Close tab", tab_menu_close as P),
+        ("Close other tabs", tab_menu_close_others as P),
+    ] {
+        let item = (api().gtk_menu_item_new_with_label)(c(name).as_ptr());
+        (api().gtk_menu_shell_append)(menu, item);
+        let action = Box::into_raw(Box::new(TabButtonData { app, index })) as P;
+        (api().g_signal_connect_data)(
+            item,
+            c("activate").as_ptr(),
+            cb,
+            action,
+            free_tab_data as P,
+            0,
+        );
+    }
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    (api().gtk_menu_popup_at_pointer)(menu, event);
+    1
+}
+unsafe extern "C" fn tab_background_button(widget: P, event: P, data: P) -> c_int {
+    let event_widget = (api().gtk_get_event_widget)(event);
+    let strip = (*(data as *mut App)).tab_strip;
+    if event_widget != widget && event_widget != strip {
+        return 0;
+    }
+    let mut button = 0;
+    if (api().gdk_event_get_button)(event, &mut button) != 0
+        && button == 1
+        && (api().gdk_event_get_event_type)(event) == 5
+    {
+        new_tab(ptr::null_mut(), data);
+        return 1;
+    }
+    0
+}
 unsafe fn rebuild_tabs(app: &App) {
     let data = app as *const App as usize;
     let strip = app.tab_strip;
@@ -1585,7 +2044,9 @@ unsafe fn rebuild_tabs(app: &App) {
         let widget = (api().gtk_button_new_with_label)(c(&format!("📁 {name}")).as_ptr());
         add_class(widget, "zfm-tab-btn");
         (api().gtk_widget_set_tooltip_text)(widget, c(&path.to_string_lossy()).as_ptr());
-        (api().gtk_widget_set_sensitive)(widget, (index != app.tabs.active()) as c_int);
+        if index == app.tabs.active() {
+            add_class(widget, "zfm-tab-active");
+        }
         let callback_data = Box::into_raw(Box::new(TabButtonData { app: data, index })) as P;
         (api().g_signal_connect_data)(
             widget,
@@ -1595,6 +2056,8 @@ unsafe fn rebuild_tabs(app: &App) {
             free_tab_data as P,
             0,
         );
+        (api().gtk_widget_add_events)(widget, 1 << 8);
+        connect(widget, "button-press-event", tab_button as P, callback_data);
         (api().gtk_box_pack_start)(strip, widget, 0, 0, 0);
         (api().gtk_widget_show_all)(widget);
     }

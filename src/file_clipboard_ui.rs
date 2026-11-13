@@ -49,7 +49,10 @@ unsafe fn set_file(data: P, cut: bool) {
     };
     if !cut {
         let app = &*(data as *mut App);
-        let row = (api().gtk_list_box_get_selected_row)(app.list);
+        let row = selected_rows(app.list)
+            .first()
+            .copied()
+            .unwrap_or(ptr::null_mut());
         let index = if row.is_null() {
             -1
         } else {
@@ -175,7 +178,12 @@ unsafe extern "C" fn received(clip: P, selection: P, data: P) {
     let operation = if item.cut {
         Operation::MoveTo(item.path, request.destination.clone())
     } else {
-        Operation::CopyTo(item.path, request.destination.clone())
+        if item.path.parent() == Some(request.destination.as_path()) {
+            let name = zfm::operations::suggest_copy_name(&request.destination, &item.path);
+            Operation::Duplicate(item.path, name)
+        } else {
+            Operation::CopyTo(item.path, request.destination.clone())
+        }
     };
     start_operation(request.app as P, request.destination, operation);
 }

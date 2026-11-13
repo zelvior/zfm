@@ -20,7 +20,7 @@ jobs:
     name: Linux
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust
         run: |
           rustup toolchain install 1.77.2 --profile minimal
@@ -31,6 +31,11 @@ jobs:
           cargo +1.77.2 test --locked -p zfm-installer
       - name: Build
         run: cargo +1.77.2 build --release --locked
+      - name: GTK interaction smoke test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0 xvfb xdotool
+          xvfb-run -a ./tests/gui-smoke-linux.sh "$PWD/target/release/zfm"
 
   windows:
     name: Windows ${{ matrix.target }}
@@ -43,7 +48,7 @@ jobs:
       # Windows 7 SP1 has no UCRT update, so link the C runtime statically.
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust target
         shell: pwsh
         env:

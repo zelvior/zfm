@@ -723,7 +723,10 @@ unsafe fn archive_confirm(parent: P, destination: &str) -> bool {
 pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
     let app = &*(data as *mut App);
     let manager = &*(app.archive_manager as *mut ArchiveManager);
-    let row = (api().gtk_list_box_get_selected_row)(app.list);
+    let row = selected_rows(app.list)
+        .first()
+        .copied()
+        .unwrap_or(ptr::null_mut());
     let mut to_load = false;
     if !row.is_null() && !manager.busy {
         let index = (api().gtk_list_box_row_get_index)(row);

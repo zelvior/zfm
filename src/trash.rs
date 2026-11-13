@@ -99,13 +99,171 @@ mod linux {
 #[cfg(target_os = "linux")]
 pub use linux::trash;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn trash(_: &std::path::Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "Trash is not implemented on this platform",
     ))
 }
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::ffi::c_void;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
+    use std::ptr;
+
+    // shellapi.h packs SHFILEOPSTRUCT to one-byte alignment on 32-bit Windows.
+    #[cfg_attr(target_pointer_width = "32", repr(C, packed))]
+    #[cfg_attr(target_pointer_width = "64", repr(C))]
+    struct FileOperation {
+        hwnd: *mut c_void,
+        function: u32,
+        from: *const u16,
+        to: *const u16,
+        flags: u16,
+        aborted: i32,
+        mappings: *mut c_void,
+        title: *const u16,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHFileOperationW(op: *mut FileOperation) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDriveTypeW(root: *const u16) -> u32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32;
+        fn CoUninitialize();
+    }
+
+    /// Move to the Recycle Bin. Requires an owner because the shell must be able
+    /// to warn the user if the item cannot be recycled; never suppress warnings.
+    pub fn trash_with_owner(path: &Path, owner: usize) -> io::Result<()> {
+        if owner == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Recycle Bin requires a window to show warnings",
+            ));
+        }
+        use std::os::windows::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Recycle Bin does not accept reparse points in ZFM",
+            ));
+        }
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        // Only drive-letter paths on fixed drives; reject UNC, device namespaces,
+        // removable drives and other media rather than risking silent deletion.
+        let mut parts = absolute.components();
+        let prefix = match parts.next() {
+            Some(Component::Prefix(p)) => match p.kind() {
+                std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => letter,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Recycle Bin requires a local fixed drive",
+                    ))
+                }
+            },
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Recycle Bin requires an absolute drive path",
+                ))
+            }
+        };
+        if !matches!(parts.next(), Some(Component::RootDir)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid drive path",
+            ));
+        }
+        let root = [prefix as u16, b':' as u16, b'\\' as u16, 0];
+        if unsafe { GetDriveTypeW(root.as_ptr()) } != 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Recycle Bin is only supported on fixed drives",
+            ));
+        }
+        // SHFileOperation does not support the verbatim \\?\ prefix.
+        let mut normal = PathBuf::from(format!("{}:\\", prefix as char));
+        for part in parts {
+            normal.push(part.as_os_str());
+        }
+        let mut from: Vec<u16> = normal.as_os_str().encode_wide().collect();
+        if from.contains(&0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"));
+        }
+        from.extend([0, 0]);
+        let mut op = FileOperation {
+            hwnd: owner as *mut c_void,
+            function: 3,
+            from: from.as_ptr(),
+            to: ptr::null(),
+            flags: 0x0040 | 0x4000,
+            aborted: 0,
+            mappings: ptr::null_mut(),
+            title: ptr::null(),
+        };
+        // Shell file operations should run in a COM single-threaded apartment.
+        let hr = unsafe { CoInitializeEx(ptr::null_mut(), 0x2 | 0x4) };
+        if hr < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Could not initialize the Windows shell ({hr:#x})"),
+            ));
+        }
+        let result = unsafe { SHFileOperationW(&mut op) };
+        unsafe {
+            CoUninitialize();
+        }
+        if op.aborted != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Recycle Bin operation cancelled",
+            ));
+        }
+        if result != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Recycle Bin operation failed: {result:#x}"),
+            ));
+        }
+        Ok(())
+    }
+    pub fn trash(path: &Path) -> io::Result<()> {
+        trash_with_owner(path, 0)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn shell_structure_abi_and_owner_requirement() {
+            #[cfg(target_pointer_width = "32")]
+            assert_eq!(std::mem::size_of::<FileOperation>(), 30);
+            #[cfg(target_pointer_width = "64")]
+            assert_eq!(std::mem::size_of::<FileOperation>(), 56);
+            assert_eq!(
+                trash(Path::new("missing")).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+    }
+}
+#[cfg(target_os = "windows")]
+pub use windows::{trash, trash_with_owner};
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {

@@ -109,13 +109,47 @@ impl Tabs {
         }
     }
     pub fn close(&mut self) -> bool {
-        if self.histories.len() == 1 {
+        let active = self.active;
+        self.close_at(active)
+    }
+    pub fn close_at(&mut self, index: usize) -> bool {
+        if self.histories.len() <= 1 || index >= self.histories.len() {
             return false;
         }
-        self.histories.remove(self.active);
-        if self.active >= self.histories.len() {
+        self.histories.remove(index);
+        if index < self.active {
+            self.active -= 1;
+        } else if self.active >= self.histories.len() {
             self.active = self.histories.len() - 1;
         }
+        true
+    }
+    pub fn close_others(&mut self, keep_index: usize) -> bool {
+        if self.histories.len() <= 1 || keep_index >= self.histories.len() {
+            return false;
+        }
+        let kept = self.histories.swap_remove(keep_index);
+        self.histories.clear();
+        self.histories.push(kept);
+        self.active = 0;
+        true
+    }
+    pub fn next_tab(&mut self) -> bool {
+        if self.histories.len() <= 1 {
+            return false;
+        }
+        self.active = (self.active + 1) % self.histories.len();
+        true
+    }
+    pub fn prev_tab(&mut self) -> bool {
+        if self.histories.len() <= 1 {
+            return false;
+        }
+        self.active = if self.active == 0 {
+            self.histories.len() - 1
+        } else {
+            self.active - 1
+        };
         true
     }
 }
@@ -137,5 +171,27 @@ mod tab_tests {
         assert_eq!(tabs.current().current(), Path::new("/a"));
         assert!(!tabs.close());
         assert!(!tabs.select(3));
+    }
+    #[test]
+    fn tabs_cycle_close_at_and_close_others() {
+        let mut tabs = Tabs::new("/1".into());
+        assert!(!tabs.next_tab());
+        assert!(!tabs.prev_tab());
+        tabs.add("/2".into());
+        tabs.add("/3".into());
+        assert_eq!(tabs.active(), 2);
+        assert!(tabs.next_tab());
+        assert_eq!(tabs.active(), 0);
+        assert!(tabs.prev_tab());
+        assert_eq!(tabs.active(), 2);
+        // Closing tab 0 shifts active index from 2 down to 1 ("/3").
+        assert!(tabs.close_at(0));
+        assert_eq!(tabs.active(), 1);
+        assert_eq!(tabs.current().current(), Path::new("/3"));
+        tabs.add("/4".into());
+        assert!(tabs.close_others(0));
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs.current().current(), Path::new("/2"));
+        assert!(!tabs.close_others(0));
     }
 }

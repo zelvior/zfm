@@ -185,9 +185,38 @@ pub fn duplicate_file<F: FnMut(u64)>(
     copy_file(source, parent, new_name, cancel, progress)
 }
 
+/// Suggest a non-colliding copy filename in `directory` based on `source`
+/// (for example `report copy.txt`, `report copy 2.txt`, …).
+pub fn suggest_copy_name(directory: &Path, source: &Path) -> String {
+    let file_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "copy".to_owned());
+    let (stem, ext) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 && dot + 1 < file_name.len() => {
+            (&file_name[..dot], Some(&file_name[dot + 1..]))
+        }
+        _ => (file_name.as_str(), None),
+    };
+    for attempt in 1..=999u32 {
+        let candidate = match (attempt, ext) {
+            (1, Some(e)) => format!("{stem} copy.{e}"),
+            (1, None) => format!("{stem} copy"),
+            (n, Some(e)) => format!("{stem} copy {n}.{e}"),
+            (n, None) => format!("{stem} copy {n}"),
+        };
+        if fs::symlink_metadata(directory.join(&candidate)).is_err() {
+            return candidate;
+        }
+    }
+    match ext {
+        Some(e) => format!("{stem} copy.{e}"),
+        None => format!("{stem} copy"),
+    }
+}
+
 /// Open a source file for a copy without following a final-component symlink
-/// and without blocking on FIFOs. Only Linux implements the safe copy path, so
-/// every other target fails closed before any destination is created.
+/// and without blocking on FIFOs or device handles.
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
@@ -200,9 +229,42 @@ fn open_copy_source(source: &Path) -> io::Result<File> {
     options.open(source)
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(target_os = "windows")]
+fn open_copy_source(source: &Path) -> io::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileType(handle: *mut std::ffi::c_void) -> u32;
+    }
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_TYPE_DISK: u32 = 0x0001;
+
+    let sym_meta = fs::symlink_metadata(source)?;
+    if (sym_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !sym_meta.is_file() {
+        return Err(invalid("Only regular files can be copied"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(source)?;
+    if unsafe { GetFileType(file.as_raw_handle() as *mut std::ffi::c_void) } != FILE_TYPE_DISK {
+        return Err(invalid("Only regular disk files can be copied"));
+    }
+    let meta = file.metadata()?;
+    if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !meta.is_file() {
+        return Err(invalid("Only regular files can be copied"));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    )
 )))]
 fn open_copy_source(_source: &Path) -> io::Result<File> {
     Err(io::Error::new(
@@ -276,8 +338,16 @@ pub fn copy_file<F: FnMut(u64)>(
         return Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"));
     }
     drop(output);
-    // Atomic, no-replace publication; failure on filesystems without hard links.
-    fs::hard_link(&temp.0, &destination)?;
+    #[cfg(target_os = "windows")]
+    {
+        // MoveFileExW(flags=0) atomically publishes without replacing existing targets.
+        rename_no_replace(&temp.0, &destination)?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Atomic, no-replace publication; failure on filesystems without hard links.
+        fs::hard_link(&temp.0, &destination)?;
+    }
     Ok(destination)
 }
 
@@ -413,7 +483,7 @@ mod tests {
         remove_one(&dir.join("child")).unwrap();
         remove_one(&dir).unwrap();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn copy_and_move_to_other_folder_without_overwrite() {
         let t = Temp::new();
@@ -460,7 +530,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"keep");
         assert_eq!(fs::read(&source).unwrap(), b"original data");
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn copy_streams_larger_files_and_reports_progress() {
         let t = Temp::new();
@@ -484,5 +554,17 @@ mod tests {
         .unwrap();
         assert_eq!(last, 160 * chunk.len() as u64);
         assert_eq!(fs::metadata(output).unwrap().len(), last);
+    }
+    #[test]
+    fn suggest_copy_name_avoids_existing_names() {
+        let t = Temp::new();
+        let src = t.0.join("report.csv");
+        fs::write(&src, b"a").unwrap();
+        assert_eq!(suggest_copy_name(&t.0, &src), "report copy.csv");
+        fs::write(t.0.join("report copy.csv"), b"b").unwrap();
+        assert_eq!(suggest_copy_name(&t.0, &src), "report copy 2.csv");
+        let hidden = t.0.join(".bashrc");
+        fs::write(&hidden, b"c").unwrap();
+        assert_eq!(suggest_copy_name(&t.0, &hidden), ".bashrc copy");
     }
 }
