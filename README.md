@@ -26,7 +26,7 @@ Sidebar locations currently use conventional subdirectories of `$HOME`, **not** 
 
 ## Built-in preview and removal
 
-Right-click one regular file and choose **Preview in ZFM…**. The read-only viewer accepts UTF-8 or BOM-marked UTF-16 text (up to 4 MiB) for TXT, Markdown, LOG, CSV, TSV, JSON, XML, HTML, CSS, JS, TS, Rust, Python, C/C++, TOML, YAML, INI, CONF, SH and PS1 extensions. HTML and Markdown are displayed as source, not rendered. PNG, JPEG, GIF and BMP files up to 16 MiB and 40 million pixels can be previewed using the system image decoder; image zoom is limited and animated images show a static frame. Decoder availability and supported subformats vary by system. GTK scales images on load; Windows uses a conservative header check before decoding. These checks are not a decoder sandbox: avoid previewing untrusted files. Reading and decoding currently happen on the GUI thread and may temporarily block it. Final-component links and special files are rejected; path components are not protected against hostile concurrent changes.
+Right-click one regular file and choose **Preview in ZFM…**, or focus the list and press Ctrl+P. The read-only viewer accepts UTF-8 or BOM-marked UTF-16 text (up to 4 MiB) for TXT, Markdown, LOG, CSV, TSV, JSON, XML, HTML, CSS, JS, TS, Rust, Python, C/C++, TOML, YAML, INI, CONF, SH and PS1 extensions. HTML and Markdown are displayed as source, not rendered. PNG, JPEG, GIF and BMP files up to 16 MiB and 40 million pixels can be previewed using the system image decoder; image zoom is limited and animated images show a static frame. Decoder availability and supported subformats vary by system. GTK scales images on load; Windows uses a conservative header check before decoding. These checks are not a decoder sandbox: avoid previewing untrusted files. Reading and decoding currently happen on the GUI thread and may temporarily block it. Final-component links and special files are rejected; path components are not protected against hostile concurrent changes.
 
 This is **not** a universal document viewer: PDF, Office documents, ebooks and other formats are not rendered. Use **Open** to launch the OS default application for unsupported files (or if a preview fails); opening continues to use the external application, not the built-in viewer.
 
@@ -54,7 +54,7 @@ Click a row to select it; Ctrl/Shift-click selects multiple rows and clicking em
 | Ctrl+Shift+C | Copy selected or current path as text |
 | Ctrl+D / Ctrl+N / Ctrl+Shift+N | Duplicate / new file / new folder |
 | Ctrl+H / Alt+Enter / Escape | Toggle hidden / properties / clear selection and focus list |
-| Ctrl+, | Open session settings |
+| Ctrl+, / Ctrl+P | Open session settings / preview one selected file |
 
 ## File-operation limits
 

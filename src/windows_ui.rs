@@ -3492,6 +3492,7 @@ pub fn run() -> Result<(), String> {
                     0x52 if ctrl && !alt => Some(REFRESH),
                     0x48 if ctrl && !alt => Some(HIDDEN),
                     0xbc if ctrl && !alt => Some(SETTINGS),
+                    0x50 if ctrl && !alt && focus == (*app).list => Some(PREVIEW),
                     0x08 if focus == (*app).list && !ctrl && !alt => Some(UP),
                     0x54 if ctrl && !alt => Some(NEW_TAB),
                     0x57 if ctrl && !alt => Some(CLOSE_TAB),

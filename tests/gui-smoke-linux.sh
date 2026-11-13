@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Modified: cover the compact layout, tabs and settings dialog.
+# Modified: cover the compact layout, tabs, settings and text preview.
 # Run under xvfb-run with GTK and xdotool installed, using the released binary.
 set -euo pipefail
 if [ "$#" -ne 1 ]; then echo 'Usage: gui-smoke-linux.sh /path/to/zfm' >&2; exit 2; fi
@@ -39,6 +39,21 @@ done
 if [ -z "$settings" ]; then echo 'Settings dialog did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$settings"
 xdotool key --window "$settings" Escape
+xdotool windowfocus --sync "$window"
+# Preview the only fixture from the file list.
+# Wait for the asynchronous directory load before selecting it.
+sleep 1
+xdotool key --window "$window" Escape ctrl+a ctrl+p
+preview=''
+for _ in $(seq 1 100); do
+    preview=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Preview — example.txt$' 2>/dev/null | head -n 1 || true)
+    [ -z "$preview" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
+xdotool windowfocus --sync "$preview"
+xdotool key --window "$preview" Escape
 xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600

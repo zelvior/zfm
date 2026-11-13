@@ -618,6 +618,7 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
         (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
         (0x2c, 4) => show_settings(ptr::null_mut(), p),
+        (0x70, 4) | (0x50, 4) if list_has_focus(p) => preview_selected(ptr::null_mut(), p),
         (0x68, 4) | (0x48, 4) => {
             let hidden = (*(p as *mut App)).hidden;
             (api().gtk_toggle_button_set_active)(
