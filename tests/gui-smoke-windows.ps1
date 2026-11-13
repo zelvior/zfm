@@ -166,7 +166,12 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($dialog -eq [IntPtr]::Zero) { throw 'New file dialog did not appear.' }
-    $dialogEdit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+    $dialogEdit = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $dialogEdit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+        if ($dialogEdit -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
     if ($dialogEdit -eq [IntPtr]::Zero -or [ZfmSmoke]::SendMessageW($dialogEdit, 0x000c, [UIntPtr]::Zero, 'created.txt') -eq [IntPtr]::Zero) { throw 'Could not set the dialog name.' }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'New file dialog did not submit.' }
@@ -224,8 +229,13 @@ try {
             Start-Sleep -Milliseconds 100
         }
         if ($dialog -eq [IntPtr]::Zero) { throw "Converter dialog $dialogTitle did not appear." }
-        $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
-        [void][ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, $outputName)
+        $edit = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+            if ($edit -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($edit -eq [IntPtr]::Zero -or [ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, $outputName) -eq [IntPtr]::Zero) { throw "Could not set converter output name." }
         [void][ZfmSmoke]::SendMessageTimeoutW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result)
         $destination = Join-Path $work $outputName
         for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $destination); $i++) { Start-Sleep -Milliseconds 100 }
