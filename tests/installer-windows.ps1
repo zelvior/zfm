@@ -295,6 +295,53 @@ function Invoke-InteractiveSetup {
     }
 }
 
+# Exercise a real running, different-version executable. The additional read
+# handle deterministically denies replacement even on hosts that allow renaming
+# a mapped executable; it is released before consenting to close the app.
+function Invoke-RunningUpgrade {
+    param([string]$Executable, [string]$TargetFolder, [System.Diagnostics.Process]$App, [bool]$Consent)
+    $lockedFile = [IO.File]::Open((Join-Path $TargetFolder 'zfm.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $process = Start-Process -FilePath $Executable -PassThru
+    try {
+        Wait-Until { $process.Refresh(); $process.MainWindowHandle -ne [IntPtr]::Zero -or $process.HasExited } 'upgrade wizard'
+        if ($process.HasExited) { throw 'Upgrade wizard exited before opening.' }
+        $window = $process.MainWindowHandle
+        Send-WizardCommand $window 102
+        Set-WizardText ([ZfmSetupSmoke]::GetDlgItem($window, 105)) $TargetFolder
+        Send-WizardCommand $window 102
+        Send-WizardCommand $window 102
+        Wait-Until { -not [ZfmSetupSmoke]::IsWindowEnabled($window) -or $process.HasExited } 'the running-app prompt'
+        if ($process.HasExited) { throw 'Upgrade wizard exited before asking permission.' }
+        $dialog = [ZfmSetupSmoke]::FindWindowW('#32770', 'ZFM Setup')
+        if ($dialog -eq [IntPtr]::Zero) { throw 'Running-app prompt not found.' }
+        $buttonId = if ($Consent) { 6 } else { 7 } # IDYES / IDNO
+        $button = [ZfmSetupSmoke]::GetDlgItem($dialog, $buttonId)
+        if ($button -eq [IntPtr]::Zero) { throw 'Expected permission prompt instead of a generic retry.' }
+        $lockedFile.Dispose()
+        $lockedFile = $null
+        if (-not [ZfmSetupSmoke]::PostMessageW($button, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not answer running-app prompt.' }
+        if (-not $Consent) {
+            Wait-Until { [ZfmSetupSmoke]::IsWindowEnabled($window) } 'wizard to return after declining'
+            $App.Refresh()
+            if ($App.HasExited) { throw 'Setup closed ZFM despite the user declining.' }
+            Send-WizardCommand $window 103
+        } else {
+            $next = [ZfmSetupSmoke]::GetDlgItem($window, 102)
+            $launch = [ZfmSetupSmoke]::GetDlgItem($window, 107)
+            Wait-Until { $process.Refresh(); $process.HasExited -or ([ZfmSetupSmoke]::IsWindowVisible($launch) -and (Get-WizardText $next) -eq 'Finish') } 'the upgraded installation'
+            if ($process.HasExited) { throw 'Upgrade exited without reaching Finish.' }
+            $App.Refresh()
+            if (-not $App.HasExited) { throw 'Setup did not close the selected ZFM instance.' }
+            Send-WizardCommand $window 102
+        }
+        if (-not $process.WaitForExit(30000)) { throw 'Upgrade wizard did not close.' }
+    } finally {
+        if ($null -ne $lockedFile) { $lockedFile.Dispose() }
+        $process.Refresh()
+        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force; $process.WaitForExit() }
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $root -Force | Out-Null
 
@@ -388,6 +435,35 @@ try {
         $runningApp.Refresh()
         if (-not $runningApp.HasExited) { Stop-Process -Id $runningApp.Id -Force; $runningApp.WaitForExit() }
     }
+    # A changed, running executable requires consent. Another copy in a
+    # different directory must never be closed by the installer.
+    $targetApp = Join-Path $first 'zfm.exe'
+    $originalHash = (Get-FileHash -LiteralPath $targetApp -Algorithm SHA256).Hash
+    $stream = [IO.File]::Open($targetApp, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.WriteByte(42) } finally { $stream.Dispose() }
+    New-Item -ItemType Directory -Path $second -Force | Out-Null
+    $otherApp = Join-Path $second 'zfm.exe'
+    Copy-Item -LiteralPath $targetApp -Destination $otherApp
+    $runningApp = Start-Process -FilePath $targetApp -ArgumentList ('"' + $first + '"') -PassThru
+    $otherProcess = Start-Process -FilePath $otherApp -ArgumentList ('"' + $second + '"') -PassThru
+    try {
+        Wait-Until { $runningApp.Refresh(); $otherProcess.Refresh(); ($runningApp.MainWindowHandle -ne [IntPtr]::Zero -and $otherProcess.MainWindowHandle -ne [IntPtr]::Zero) -or $runningApp.HasExited -or $otherProcess.HasExited } 'both application windows'
+        if ($runningApp.HasExited -or $otherProcess.HasExited) { throw 'Test application exited before upgrade.' }
+        Invoke-RunningUpgrade -Executable $setup -TargetFolder $first -App $runningApp -Consent $false
+        $otherProcess.Refresh()
+        if ($otherProcess.HasExited) { throw 'Setup closed a different ZFM installation.' }
+        Invoke-RunningUpgrade -Executable $setup -TargetFolder $first -App $runningApp -Consent $true
+        $otherProcess.Refresh()
+        if ($otherProcess.HasExited) { throw 'Setup closed a different ZFM installation.' }
+        if ((Get-FileHash -LiteralPath $targetApp -Algorithm SHA256).Hash -ne $originalHash) { throw 'Running-app upgrade did not install the bundled binary.' }
+    } finally {
+        foreach ($p in @($runningApp, $otherProcess)) {
+            $p.Refresh()
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
+        }
+        Remove-Item -LiteralPath $second -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     # A changed, locked executable must remain intact until the user releases
     # it and explicitly clicks Retry; setup then completes normally.
     $originalHash = (Get-FileHash -LiteralPath (Join-Path $first 'zfm.exe') -Algorithm SHA256).Hash

@@ -12,6 +12,8 @@ mod payload;
 mod plan;
 
 #[cfg(windows)]
+mod running_app;
+#[cfg(windows)]
 mod win32;
 #[cfg(windows)]
 mod windows;

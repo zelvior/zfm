@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The release `zfm.exe` for the architecture this installer was built for.
@@ -59,6 +59,7 @@ pub fn installed_size() -> u64 {
 pub struct InstallFileError {
     pub message: String,
     pub retryable: bool,
+    pub blocked_path: Option<PathBuf>,
 }
 
 impl InstallFileError {
@@ -75,6 +76,11 @@ impl InstallFileError {
         Self {
             message: format!("Could not {action} {}: {error}{advice}", path.display()),
             retryable,
+            blocked_path: if retryable && action == "install" {
+                Some(path.to_path_buf())
+            } else {
+                None
+            },
         }
     }
 }
@@ -238,7 +244,6 @@ pub fn remove_folder_if_empty(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
