@@ -129,6 +129,7 @@ api! {
     gtk_widget_destroy: unsafe extern "C" fn(P),
     gtk_widget_show_all: unsafe extern "C" fn(P),
     gtk_widget_grab_focus: unsafe extern "C" fn(P),
+    gtk_widget_set_can_focus: unsafe extern "C" fn(P, c_int),
     gtk_widget_set_tooltip_text: unsafe extern "C" fn(P, *const c_char),
     gdk_event_get_keyval: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
     gdk_event_get_state: unsafe extern "C" fn(P, *mut c_uint) -> c_int,
@@ -1084,6 +1085,7 @@ pub fn run() -> Result<(), String> {
         let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
         (api().gtk_box_pack_start)(right_pane, scroll, 1, 1, 0);
         let list = (api().gtk_list_box_new)();
+        (api().gtk_widget_set_can_focus)(list, 1);
         (api().gtk_list_box_set_activate_on_single_click)(list, 0);
         (api().gtk_list_box_set_selection_mode)(list, 3); // GTK_SELECTION_MULTIPLE
         (api().gtk_container_add)(scroll, list);
