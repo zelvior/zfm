@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Modified: cover the compact layout, tabs, settings and text preview.
+# Modified: isolate persistent settings and cover the compact layout, tabs and text preview.
 # Run under xvfb-run with GTK and xdotool installed, using the released binary.
 set -euo pipefail
 if [ "$#" -ne 1 ]; then echo 'Usage: gui-smoke-linux.sh /path/to/zfm' >&2; exit 2; fi
 binary=$1
 work=$(mktemp -d)
+config=$(mktemp -d)
 pid=''
 cleanup() {
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
-    rm -rf "$work"
+    rm -rf "$work" "$config"
 }
 trap cleanup EXIT
 printf 'GUI smoke fixture\n' > "$work/example.txt"
-GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
+XDG_CONFIG_HOME="$config" GDK_BACKEND=x11 G_DEBUG=fatal-criticals "$binary" "$work" >"$work/stdout" 2>"$work/stderr" &
 pid=$!
 window=''
 for _ in $(seq 1 100); do
@@ -27,7 +28,7 @@ if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&
 # Exercise the GTK event loop without requiring a window manager.
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
-# The session settings dialog opens and can be cancelled without changing the list.
+# The settings dialog opens and can be cancelled without changing the list.
 xdotool key --window "$window" ctrl+comma
 settings=''
 for _ in $(seq 1 100); do

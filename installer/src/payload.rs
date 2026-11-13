@@ -14,6 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The release `zfm.exe` for the architecture this installer was built for.
 pub const APP: &[u8] = include_bytes!(env!("ZFM_PAYLOAD_PATH"));
+/// Renamed standalone upstream archive engine and its corresponding source.
+pub const ENGINE: &[u8] = include_bytes!(env!("ZFM_ENGINE_PATH"));
+pub const ENGINE_SOURCE: &[u8] = include_bytes!(env!("ZFM_ENGINE_SOURCE_PATH"));
+/// Bundled PDFium renderer and notices accompanying its exact build.
+pub const PDFIUM: &[u8] = include_bytes!(env!("ZFM_PDFIUM_PATH"));
+pub const PDFIUM_NOTICES: &[u8] = include_bytes!(env!("ZFM_PDFIUM_NOTICES_PATH"));
 /// Multi-size monochrome application icon installed next to the executable.
 pub const ICON: &[u8] = include_bytes!(env!("ZFM_ICON_PATH"));
 /// PNG logo used for the installer window icon.
@@ -27,6 +33,12 @@ pub const README: &str = concat!(
     include_str!(env!("ZFM_RUST_MIT_PATH")),
     "\n\n--- Upstream Rust 1.77.2 LICENSE-APACHE ---\n",
     include_str!(env!("ZFM_RUST_APACHE_PATH")),
+    "\n\n--- 7-Zip license and notices ---\n",
+    include_str!(env!("ZFM_7ZIP_NOTICE_PATH")),
+    "\n\n--- GNU LGPL license ---\n",
+    include_str!(env!("ZFM_7ZIP_LGPL_PATH")),
+    "\n\n--- unRAR license ---\n",
+    include_str!(env!("ZFM_7ZIP_UNRAR_PATH")),
 );
 /// Release tag supplied to the build, or `dev` for a local build.
 pub const VERSION: &str = env!("ZFM_VERSION");
@@ -36,20 +48,28 @@ pub const PUBLISHER: &str = "Zelvior Labs";
 
 /// Every file the installer creates. The uninstaller removes exactly these and
 /// never touches anything else in the selected folder.
-pub const MANAGED_FILES: [&str; 5] = [
+pub const MANAGED_FILES: [&str; 9] = [
     "zfm.exe",
     "zfm.ico",
     "LICENSE.txt",
     "README.txt",
     "Uninstall.exe",
+    "zfm-archive-engine.exe",
+    "7zip-source.tar.gz",
+    "pdfium.dll",
+    "pdfium-notices.txt",
 ];
 
-fn payload_files() -> [(&'static str, &'static [u8]); 4] {
+fn payload_files() -> [(&'static str, &'static [u8]); 8] {
     [
         ("zfm.exe", APP),
         ("zfm.ico", ICON),
         ("LICENSE.txt", LICENSE.as_bytes()),
         ("README.txt", README.as_bytes()),
+        ("zfm-archive-engine.exe", ENGINE),
+        ("7zip-source.tar.gz", ENGINE_SOURCE),
+        ("pdfium.dll", PDFIUM),
+        ("pdfium-notices.txt", PDFIUM_NOTICES),
     ]
 }
 
@@ -224,7 +244,7 @@ fn is_regular_file(path: &Path) -> bool {
 /// file (never a symlink) and both `zfm.ico` and `LICENSE.txt` must match the
 /// embedded ZFM assets byte-for-byte.
 pub fn is_previous_install(dir: &Path) -> bool {
-    if !payload_files()
+    if !payload_files()[..4]
         .iter()
         .all(|(name, _)| is_regular_file(&dir.join(*name)))
     {
@@ -358,7 +378,7 @@ mod tests {
     fn installed_size_counts_the_payload() {
         assert_eq!(
             installed_size(),
-            APP.len() as u64 + ICON.len() as u64 + LICENSE.len() as u64 + README.len() as u64
+            APP.len() as u64 + ICON.len() as u64 + LICENSE.len() as u64 + README.len() as u64 + ENGINE.len() as u64 + ENGINE_SOURCE.len() as u64 + PDFIUM.len() as u64 + PDFIUM_NOTICES.len() as u64
         );
     }
 }

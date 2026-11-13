@@ -1,4 +1,4 @@
-// Modified: add a bounded built-in preview, settings and package-managed removal UI.
+// Modified: persist settings and add preview and package-managed removal UI.
 // Modified: compact reference-inspired file-manager layout and visuals.
 //! Minimal GTK 3 adapter. GTK is loaded at runtime so the filesystem core can
 //! be built and tested without GTK headers. All widget calls stay on GTK's
@@ -18,7 +18,7 @@ use zfm::ui_theme::{self, ItemIcon, SortColumn};
 
 #[path = "archive_ui.rs"]
 mod archive_ui;
-use archive_ui::{create_archive_manager, show_archive, supports_archive, ArchiveManager};
+use archive_ui::{archive_create_selection, archive_create_encrypted_selection, create_archive_manager, show_archive, supports_archive, ArchiveManager};
 #[path = "file_clipboard_ui.rs"]
 mod file_clipboard_ui;
 use file_clipboard_ui::{copy_to_clipboard, cut_to_clipboard, paste_from_clipboard};
@@ -90,6 +90,7 @@ api! {
     gtk_check_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
+    gtk_entry_set_visibility: unsafe extern "C" fn(P, c_int),
     gtk_text_view_new: unsafe extern "C" fn() -> P,
     gtk_text_view_get_buffer: unsafe extern "C" fn(P) -> P,
     gtk_text_buffer_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
@@ -193,6 +194,7 @@ struct App {
     tab_strip: P,
     generation: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
+    office_cancels: Vec<Arc<AtomicBool>>,
     address: P,
     list: P,
     status: P,
@@ -486,6 +488,7 @@ unsafe extern "C" fn quit(_: P, data: P) {
     let app = &mut *(data as *mut App);
     app.generation.fetch_add(1, Ordering::Relaxed);
     app.alive.store(false, Ordering::Relaxed);
+    for cancel in &app.office_cancels { cancel.store(true, Ordering::Relaxed); }
     if let Some(cancel) = &app.operation {
         cancel.store(true, Ordering::Relaxed);
     }
@@ -967,6 +970,8 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         menu_action(menu, "Open archive…", show_archive as P, data);
     }
     if can_copy {
+        menu_action(menu, "Create archive from selection…", archive_create_selection as P, data);
+        menu_action(menu, "Create encrypted archive from selection…", archive_create_encrypted_selection as P, data);
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
@@ -1034,7 +1039,7 @@ unsafe extern "C" fn show_settings(_: P, data: P) {
     (api().gtk_toggle_button_set_active)(ascending, app.sort_ascending as c_int);
     (api().gtk_box_pack_start)(content, hidden, 0, 0, 8);
     (api().gtk_box_pack_start)(content, ascending, 0, 0, 8);
-    (api().gtk_box_pack_start)(content, label("Changes apply to this session only."), 0, 0, 8);
+    (api().gtk_box_pack_start)(content, label("Apply saves these settings for future sessions."), 0, 0, 8);
     (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
     (api().gtk_dialog_add_button)(dialog, c("Apply").as_ptr(), -5);
     (api().gtk_widget_show_all)(dialog);
@@ -1044,7 +1049,14 @@ unsafe extern "C" fn show_settings(_: P, data: P) {
     } else { None };
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     if let Some((hidden, ascending)) = values {
-        let app = &*(data as *mut App);
+        let saved = zfm::settings::Settings { show_hidden: hidden != 0, sort_ascending: ascending };
+        if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, saved)) {
+            set_status(&*(data as *mut App), &format!("Settings not saved: {error}"));
+            return;
+        }
+        let app = &mut *(data as *mut App);
+        app.notice = None;
+        set_status(app, "Settings saved.");
         let hidden_widget = app.hidden;
         let sort = app.sort_column;
         let change_sort = app.sort_ascending != ascending;
@@ -1173,11 +1185,16 @@ pub fn run() -> Result<(), String> {
                 .unwrap_or_else(|_| PathBuf::from("/"))
                 .join(initial)
         };
+        let (saved_settings, settings_warning) = match zfm::settings::user_path().and_then(|path| zfm::settings::load(&path)) {
+            Ok(settings) => (settings, None),
+            Err(error) => (zfm::settings::Settings::default(), Some(format!("Could not load settings; using defaults: {error}"))),
+        };
         let app = Box::into_raw(Box::new(App {
             tabs: Tabs::new(initial),
             tab_strip: ptr::null_mut(),
             generation: Arc::new(AtomicU64::new(0)),
             alive: Arc::new(AtomicBool::new(true)),
+            office_cancels: Vec::new(),
             address: ptr::null_mut(),
             list,
             status,
@@ -1187,7 +1204,7 @@ pub fn run() -> Result<(), String> {
             render_index: 0,
             skipped: 0,
             error: None,
-            notice: None,
+            notice: settings_warning,
             converter: ptr::null_mut(),
             archive_manager: ptr::null_mut(),
             window,
@@ -1198,7 +1215,7 @@ pub fn run() -> Result<(), String> {
             search_query: String::new(),
             search_case: false,
             sort_column: SortColumn::Name,
-            sort_ascending: true,
+            sort_ascending: saved_settings.sort_ascending,
             columns: [ptr::null_mut(); 4],
             sidebar_shortcuts: Vec::new(),
         }));
@@ -1217,6 +1234,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_box_pack_start)(tabs_row, case_toggle, 0, 0, 0);
         let hidden = (api().gtk_check_button_new_with_label)(c("Hidden").as_ptr());
         (*app).hidden = hidden;
+        (api().gtk_toggle_button_set_active)(hidden, saved_settings.show_hidden as c_int);
         (api().gtk_box_pack_start)(tabs_row, hidden, 0, 0, 0);
         connect(hidden, "toggled", refresh as P, p);
         (*app).tab_strip = tab_strip;
@@ -1257,7 +1275,7 @@ pub fn run() -> Result<(), String> {
         button(top, "Clear", search_clear as P, p);
 
         // Sortable column header bar
-        let col_name = button(col_bar, "Name ▲", sort_by_name as P, p);
+        let col_name = button(col_bar, if saved_settings.sort_ascending { "Name ▲" } else { "Name ▼" }, sort_by_name as P, p);
         (api().gtk_widget_set_hexpand)(col_name, 1);
         let col_mod = button(col_bar, "Date", sort_by_modified as P, p);
         (api().gtk_widget_set_size_request)(col_mod, 175, -1);

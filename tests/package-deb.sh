@@ -11,7 +11,7 @@ as --64 "$tmp/fixture.s" -o "$tmp/64.o"
 ld -m elf_x86_64 "$tmp/64.o" -o "$tmp/64"
 for spec in '32 i686-unknown-linux-gnu i386' '64 x86_64-unknown-linux-gnu amd64'; do
     read -r bits target arch <<< "$spec"
-    "$root/scripts/package-deb.sh" "$tmp/$bits" "$target" v1.2.3-rc_1 "$tmp/$arch.deb"
+    "$root/scripts/package-deb.sh" "$tmp/$bits" "$target" v1.2.3-rc_1 "$tmp/$arch.deb" "$tmp/$bits" "$tmp/$bits" "$root/LICENSE"
     [ "$(dpkg-deb -f "$tmp/$arch.deb" Architecture)" = "$arch" ]
     [ "$(dpkg-deb -f "$tmp/$arch.deb" Maintainer)" = "Zelvior Labs" ]
     [ "$(dpkg-deb -f "$tmp/$arch.deb" Version)" = '1.2.3~rc.1' ]
@@ -32,10 +32,10 @@ for name in ('COPYRIGHT', 'LICENSE-MIT', 'LICENSE-APACHE'):
     assert (root / 'LICENSES' / 'rust-1.77.2' / name).read_bytes() in readme, name
 PYTEST
 done
-if "$root/scripts/package-deb.sh" "$tmp/64" i686-unknown-linux-gnu v1.0 "$tmp/wrong.deb"; then
+if "$root/scripts/package-deb.sh" "$tmp/64" i686-unknown-linux-gnu v1.0 "$tmp/wrong.deb" "$tmp/64" "$tmp/64" "$root/LICENSE"; then
     echo 'Architecture mismatch was not rejected' >&2; exit 1
 fi
-if "$root/scripts/package-deb.sh" "$tmp/64" x86_64-unknown-linux-gnu 'v1 bad' "$tmp/bad.deb"; then
+if "$root/scripts/package-deb.sh" "$tmp/64" x86_64-unknown-linux-gnu 'v1 bad' "$tmp/bad.deb" "$tmp/64" "$tmp/64" "$root/LICENSE"; then
     echo 'Invalid tag was not rejected' >&2; exit 1
 fi
 echo 'Debian package tests passed.'

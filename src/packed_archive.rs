@@ -1,3 +1,4 @@
+// Modified: add bounded 7z reading and single-file creation via system libarchive.
 //! ZIP and compressed TAR reader using the system libarchive. Extraction is
 //! performed by ZFM through no-follow directory descriptors, never by libarchive.
 #![cfg(target_os = "linux")]
@@ -25,6 +26,7 @@ struct Api {
     read_new: unsafe extern "C" fn() -> P,
     write_new: unsafe extern "C" fn() -> P,
     write_format_zip: unsafe extern "C" fn(P) -> c_int,
+    write_format_7z: Option<unsafe extern "C" fn(P) -> c_int>,
     write_open_fd: unsafe extern "C" fn(P, c_int) -> c_int,
     write_header: unsafe extern "C" fn(P, P) -> c_int,
     write_data: unsafe extern "C" fn(P, P, usize) -> isize,
@@ -37,6 +39,7 @@ struct Api {
     entry_set_type: unsafe extern "C" fn(P, u32),
     entry_set_perm: unsafe extern "C" fn(P, u32),
     support_zip: unsafe extern "C" fn(P) -> c_int,
+    support_7z: Option<unsafe extern "C" fn(P) -> c_int>,
     support_tar: unsafe extern "C" fn(P) -> c_int,
     filter_none: unsafe extern "C" fn(P) -> c_int,
     filter_gzip: unsafe extern "C" fn(P) -> c_int,
@@ -81,6 +84,10 @@ fn load_api() -> Result<Api, String> {
                 "archive_write_set_format_zip",
                 unsafe extern "C" fn(P) -> c_int
             ),
+            write_format_7z: {
+                let address = dlsym(handle, b"archive_write_set_format_7zip\0".as_ptr() as *const c_char);
+                if address.is_null() { None } else { Some(std::mem::transmute::<P, unsafe extern "C" fn(P) -> c_int>(address)) }
+            },
             write_open_fd: symbol!(
                 "archive_write_open_fd",
                 unsafe extern "C" fn(P, c_int) -> c_int
@@ -105,6 +112,11 @@ fn load_api() -> Result<Api, String> {
                 "archive_read_support_format_zip",
                 unsafe extern "C" fn(P) -> c_int
             ),
+            // Optional so older libarchive versions can still open ZIP/TAR.
+            support_7z: {
+                let address = dlsym(handle, b"archive_read_support_format_7zip\0".as_ptr() as *const c_char);
+                if address.is_null() { None } else { Some(std::mem::transmute::<P, unsafe extern "C" fn(P) -> c_int>(address)) }
+            },
             support_tar: symbol!(
                 "archive_read_support_format_tar",
                 unsafe extern "C" fn(P) -> c_int
@@ -193,6 +205,7 @@ fn check(cancel: &AtomicBool) -> io::Result<()> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Format {
     Zip,
+    SevenZip,
     TarGzip,
     TarBzip2,
     TarXz,
@@ -201,6 +214,8 @@ pub fn format_for_path(path: &Path) -> Option<Format> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
     if name.ends_with(".zip") {
         Some(Format::Zip)
+    } else if name.ends_with(".7z") {
+        Some(Format::SevenZip)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         Some(Format::TarGzip)
     } else if name.ends_with(".tar.bz2") {
@@ -249,7 +264,7 @@ impl Reader {
             return Err(bad("Could not initialize archive reader"));
         }
         let expected_filter = match format {
-            Format::Zip => 0,
+            Format::Zip | Format::SevenZip => 0,
             Format::TarGzip => 1,
             Format::TarBzip2 => 2,
             Format::TarXz => 6,
@@ -264,7 +279,7 @@ impl Reader {
                 return Err(reader.error("Filter unavailable"));
             }
             let filter = match format {
-                Format::Zip => 0,
+                Format::Zip | Format::SevenZip => 0,
                 Format::TarGzip => (api.filter_gzip)(handle),
                 Format::TarBzip2 => (api.filter_bzip2)(handle),
                 Format::TarXz => (api.filter_xz)(handle),
@@ -272,10 +287,13 @@ impl Reader {
             if filter != 0 {
                 return Err(reader.error("Built-in compression filter unavailable"));
             }
-            let format_result = if format == Format::Zip {
-                (api.support_zip)(handle)
-            } else {
-                (api.support_tar)(handle)
+            let format_result = match format {
+                Format::Zip => (api.support_zip)(handle),
+                Format::SevenZip => match api.support_7z {
+                    Some(support) => support(handle),
+                    None => return Err(io::Error::new(io::ErrorKind::Unsupported, "This libarchive does not support 7z")),
+                },
+                _ => (api.support_tar)(handle),
             };
             if format_result != 0 {
                 return Err(reader.error("Archive format unavailable"));
@@ -688,6 +706,97 @@ for suffix,mode in [('tar.gz','w:gz'),('tar.bz2','w:bz2'),('tar.xz','w:xz')]:
         assert!(!dest.join("file.txt").exists());
     }
     #[test]
+    fn seven_zip_inspection_verification_and_safe_extraction() {
+        if let Err(error) = api() {
+            assert!(std::env::var_os("ZFM_REQUIRE_ARCHIVE_TESTS").is_none(), "libarchive is required: {error}");
+            eprintln!("Skipping 7z integration test: libarchive unavailable");
+            return;
+        }
+        let t = Temp::new();
+        let flag = AtomicBool::new(false);
+        for (name, bytes) in [
+            ("stored", &include_bytes!("../tests/fixtures/viewer-safe.7z")[..]),
+            ("compressed", &include_bytes!("../tests/fixtures/viewer-compressed.7z")[..]),
+        ] {
+            let archive = t.0.join(format!("{name}.7z"));
+            fs::write(&archive, bytes).unwrap();
+            assert_eq!(format_for_path(&archive), Some(Format::SevenZip));
+            let mut file = File::open(&archive).unwrap();
+            let entries = inspect(&mut file, Format::SevenZip, &flag).unwrap();
+            assert!(entries.iter().any(|entry| entry.path == "dir/one.txt" && entry.size == 19));
+            assert_eq!(verify(&mut file, Format::SevenZip, &flag, |_| {}).unwrap(), entries.len());
+            let dest = t.0.join(format!("dest-{name}"));
+            fs::create_dir(&dest).unwrap();
+            assert_eq!(extract(&mut file, Format::SevenZip, &dest, None, &flag, |_| {}).unwrap(), entries.len());
+            assert_eq!(fs::read(dest.join("dir/one.txt")).unwrap(), b"7z preview fixture\n");
+            assert_eq!(fs::read(dest.join("dir/two.txt")).unwrap(), b"second fixture\n");
+            assert!(extract(&mut file, Format::SevenZip, &dest, None, &flag, |_| {}).is_err());
+            let mut wrong_format = File::open(&archive).unwrap();
+            assert!(inspect(&mut wrong_format, Format::Zip, &flag).is_err());
+        }
+        let archive = t.0.join("stored.7z");
+        let selected = t.0.join("selected");
+        fs::create_dir(&selected).unwrap();
+        let mut file = File::open(&archive).unwrap();
+        assert_eq!(extract(&mut file, Format::SevenZip, &selected, Some(&["dir/two.txt".into()]), &flag, |_| {}).unwrap(), 1);
+        assert!(!selected.join("dir/one.txt").exists());
+        assert_eq!(fs::read(selected.join("dir/two.txt")).unwrap(), b"second fixture\n");
+        let outside = t.0.join("outside");
+        let hostile = t.0.join("hostile");
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(&hostile).unwrap();
+        std::os::unix::fs::symlink(&outside, hostile.join("dir")).unwrap();
+        assert!(extract(&mut file, Format::SevenZip, &hostile, None, &flag, |_| {}).is_err());
+        assert!(!outside.join("one.txt").exists());
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(inspect(&mut file, Format::SevenZip, &cancelled).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        let mut damaged = include_bytes!("../tests/fixtures/viewer-safe.7z").to_vec();
+        let pos = damaged.windows(b"7z preview fixture\n".len()).position(|w| w == b"7z preview fixture\n").unwrap();
+        damaged[pos] ^= 1;
+        let bad_crc = t.0.join("badcrc.7z");
+        fs::write(&bad_crc, damaged).unwrap();
+        assert!(verify(&mut File::open(bad_crc).unwrap(), Format::SevenZip, &flag, |_| {}).is_err());
+        let broken = t.0.join("broken.7z");
+        fs::write(&broken, &include_bytes!("../tests/fixtures/viewer-safe.7z")[..30]).unwrap();
+        assert!(inspect(&mut File::open(broken).unwrap(), Format::SevenZip, &flag).is_err());
+        let encrypted = t.0.join("encrypted.7z");
+        fs::write(&encrypted, include_bytes!("../tests/fixtures/viewer-encrypted.7z")).unwrap();
+        assert!(inspect(&mut File::open(encrypted).unwrap(), Format::SevenZip, &flag).is_err());
+        let traversal = t.0.join("traversal.7z");
+        fs::write(&traversal, include_bytes!("../tests/fixtures/viewer-traversal.7z")).unwrap();
+        assert!(inspect(&mut File::open(traversal).unwrap(), Format::SevenZip, &flag).is_err());
+        let linked = t.0.join("link.7z");
+        fs::write(&linked, include_bytes!("../tests/fixtures/viewer-link.7z")).unwrap();
+        assert!(inspect(&mut File::open(linked).unwrap(), Format::SevenZip, &flag).is_err());
+    }
+
+    #[test]
+    fn creates_seven_zip_without_overwrite_and_cleans_up_on_cancellation() {
+        if let Err(error) = api() {
+            assert!(std::env::var_os("ZFM_REQUIRE_ARCHIVE_TESTS").is_none(), "libarchive is required: {error}");
+            return;
+        }
+        let t = Temp::new();
+        let input = t.0.join("source.txt");
+        fs::write(&input, vec![42u8; 100_000]).unwrap();
+        let output = t.0.join("created.7z");
+        let flag = AtomicBool::new(false);
+        create_single_file_7z(&input, &output, &flag, |_| {}).unwrap();
+        let mut file = File::open(&output).unwrap();
+        assert_eq!(verify(&mut file, Format::SevenZip, &flag, |_| {}).unwrap(), 1);
+        let destination = t.0.join("out");
+        fs::create_dir(&destination).unwrap();
+        assert_eq!(extract(&mut file, Format::SevenZip, &destination, None, &flag, |_| {}).unwrap(), 1);
+        assert_eq!(fs::read(destination.join("source.txt")).unwrap(), vec![42u8; 100_000]);
+        assert!(create_single_file_7z(&input, &output, &flag, |_| {}).is_err());
+        let stopped = t.0.join("stopped.7z");
+        let cancel = AtomicBool::new(false);
+        assert!(create_single_file_7z(&input, &stopped, &cancel, |_| cancel.store(true, Ordering::Relaxed)).is_err());
+        assert!(!stopped.exists());
+        assert!(!fs::read_dir(&t.0).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".zfm-zip-")));
+    }
+
+    #[test]
     fn creates_zip_accepted_by_python_and_refuses_overwrite() {
         let t = Temp::new();
         if !fixtures(&t) {
@@ -774,10 +883,20 @@ for suffix,mode in [('tar.gz','w:gz'),('tar.bz2','w:bz2'),('tar.xz','w:xz')]:
 }
 
 /// Stream one regular file to a new ZIP, refusing to replace existing output.
+pub fn create_single_file<F: FnMut(u64)>(source: &Path, output: &Path, cancel: &AtomicBool, progress: F) -> io::Result<()> {
+    create_single_file_format(source, output, Format::Zip, cancel, progress)
+}
+
+/// Stream one regular file to a new 7z archive, refusing to replace existing output.
+pub fn create_single_file_7z<F: FnMut(u64)>(source: &Path, output: &Path, cancel: &AtomicBool, progress: F) -> io::Result<()> {
+    create_single_file_format(source, output, Format::SevenZip, cancel, progress)
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
-pub fn create_single_file<F: FnMut(u64)>(
+fn create_single_file_format<F: FnMut(u64)>(
     source: &Path,
     output: &Path,
+    format: Format,
     cancel: &AtomicBool,
     mut progress: F,
 ) -> io::Result<()> {
@@ -866,7 +985,7 @@ pub fn create_single_file<F: FnMut(u64)>(
     let api = api()?;
     let handle = unsafe { (api.write_new)() };
     if handle.is_null() {
-        return Err(bad("Cannot initialize ZIP writer"));
+        return Err(bad("Cannot initialize archive writer"));
     }
     let writer = Writer { api, handle };
     let error = |context: &str| {
@@ -880,14 +999,20 @@ pub fn create_single_file<F: FnMut(u64)>(
         };
         bad(&format!("{context}: {detail}"))
     };
-    if unsafe { (api.write_format_zip)(handle) } != 0
-        || unsafe { (api.write_open_fd)(handle, out.as_raw_fd()) } != 0
-    {
-        return Err(error("Cannot create ZIP"));
+    let format_status = match format {
+        Format::Zip => unsafe { (api.write_format_zip)(handle) },
+        Format::SevenZip => match api.write_format_7z {
+            Some(construct) => unsafe { construct(handle) },
+            None => return Err(io::Error::new(io::ErrorKind::Unsupported, "This libarchive cannot create 7z")),
+        },
+        _ => return Err(io::Error::new(io::ErrorKind::Unsupported, "Unsupported archive creation format")),
+    };
+    if format_status != 0 || unsafe { (api.write_open_fd)(handle, out.as_raw_fd()) } != 0 {
+        return Err(error("Cannot create archive"));
     }
     let entry = unsafe { (api.entry_new)() };
     if entry.is_null() {
-        return Err(bad("Cannot create ZIP entry"));
+        return Err(bad("Cannot create archive entry"));
     }
     let header = Header { api, handle: entry };
     let name = std::ffi::CString::new(name).map_err(|_| bad("Invalid filename"))?;
@@ -898,7 +1023,7 @@ pub fn create_single_file<F: FnMut(u64)>(
         (api.entry_set_perm)(entry, 0o600);
     }
     if unsafe { (api.write_header)(handle, entry) } != 0 {
-        return Err(error("Cannot write ZIP header"));
+        return Err(error("Cannot write archive header"));
     }
     drop(header);
     let mut buf = [0u8; 64 * 1024];
@@ -914,7 +1039,7 @@ pub fn create_single_file<F: FnMut(u64)>(
             let count =
                 unsafe { (api.write_data)(handle, buf[written..n].as_ptr() as P, n - written) };
             if count <= 0 {
-                return Err(error("Cannot write ZIP data"));
+                return Err(error("Cannot write archive data"));
             }
             written += count as usize;
         }
@@ -928,7 +1053,7 @@ pub fn create_single_file<F: FnMut(u64)>(
     }
     check(cancel)?;
     if unsafe { (api.write_close)(handle) } != 0 {
-        return Err(error("Cannot finish ZIP"));
+        return Err(error("Cannot finish archive"));
     }
     drop(writer);
     drop(out);
@@ -937,14 +1062,15 @@ pub fn create_single_file<F: FnMut(u64)>(
     Ok(())
 }
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
-pub fn create_single_file<F: FnMut(u64)>(
+fn create_single_file_format<F: FnMut(u64)>(
     _: &Path,
     _: &Path,
+    _: Format,
     _: &AtomicBool,
     _: F,
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "Safe ZIP creation is not supported on this architecture",
+        "Safe archive creation is not supported on this architecture",
     ))
 }

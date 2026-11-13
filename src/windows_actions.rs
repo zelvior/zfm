@@ -188,6 +188,7 @@ struct Prompt {
     title: Vec<u16>,
     initial: OsString,
     select_stem: bool,
+    password: bool,
     edit: H,
     result: Option<OsString>,
     theme: *const Theme,
@@ -207,7 +208,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         let caption = CreateWindowExW(
             0,
             text("STATIC").as_ptr(),
-            text("Name:").as_ptr(),
+            text(if state.password { "Password:" } else { "Name:" }).as_ptr(),
             WS_CHILD | WS_VISIBLE,
             16,
             15,
@@ -222,7 +223,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0x200,
             text("EDIT").as_ptr(),
             wide(&state.initial).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | if state.password { 0x20 } else { 0 },
             16,
             40,
             width - 32,
@@ -313,11 +314,23 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
 }
 
 pub(super) unsafe fn prompt(
-    hwnd: H,
-    theme: *const Theme,
-    title: &str,
-    initial: &OsStr,
-    stem: bool,
+    hwnd: H, theme: *const Theme, title: &str, initial: &OsStr, stem: bool,
+) -> Option<OsString> {
+    prompt_inner(hwnd, theme, title, initial, stem, false)
+}
+
+pub(super) unsafe fn password_prompt(hwnd: H, theme: *const Theme, title: &str) -> Option<String> {
+    match prompt_inner(hwnd, theme, title, OsStr::new(""), false, true) {
+        Some(value) => match value.into_string() {
+            Ok(value) => Some(value),
+            Err(_) => { show_error(hwnd, "Password must be valid Unicode."); None }
+        },
+        None => None,
+    }
+}
+
+unsafe fn prompt_inner(
+    hwnd: H, theme: *const Theme, title: &str, initial: &OsStr, stem: bool, password: bool,
 ) -> Option<OsString> {
     // DLGTEMPLATE header followed by no menu, default class, empty title.
     // Dialog units approximate 400 x 125 pixels with the system font.
@@ -341,6 +354,7 @@ pub(super) unsafe fn prompt(
         title: text(title),
         initial: initial.to_os_string(),
         select_stem: stem,
+        password,
         edit: ptr::null_mut(),
         result: None,
         theme,

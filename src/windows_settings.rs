@@ -1,4 +1,5 @@
-//! Session-only file-list preferences in a native settings dialog.
+// Modified: settings now persist after Apply.
+//! File-list preferences in a native settings dialog.
 use super::*;
 
 struct SettingsDialog {
@@ -27,7 +28,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         };
         state.hidden_control = make("BUTTON", "Show hidden files", WS_TABSTOP | 3, 20, 20, 260, 25, 1001);
         state.ascending_control = make("BUTTON", "Sort ascending", WS_TABSTOP | 3, 20, 55, 260, 25, 1002);
-        let note = make("STATIC", "Changes apply to this session only.", 0, 20, 90, 300, 25, 1003);
+        let note = make("STATIC", "Apply saves settings for future sessions.", 0, 20, 90, 300, 25, 1003);
         let apply = make("BUTTON", "Apply", WS_TABSTOP | 1, 190, 125, 80, 28, 1);
         let cancel = make("BUTTON", "Cancel", WS_TABSTOP, 280, 125, 80, 28, 2);
         for control in [state.hidden_control, state.ascending_control, note, apply, cancel] {
