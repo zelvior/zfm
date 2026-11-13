@@ -9,7 +9,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::thread;
@@ -17,6 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use zfm::directory::{self, Entry, Listing};
 use zfm::navigation::{Destination, Tabs};
+
+#[path = "windows_actions.rs"]
+mod windows_actions;
 use zfm::ui_theme::{
     self, ActionIcon, BoxRect, ItemIcon, Rgb, SortColumn, ViewMode, WindowMetrics,
 };
@@ -44,6 +47,11 @@ const WM_CTLCOLORLISTBOX: u32 = 0x0134;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_XBUTTONDOWN: u32 = 0x020b;
+const WM_CONTEXTMENU: u32 = 0x007b;
 const WM_MOUSELEAVE: u32 = 0x02a3;
 const WM_RESULT: u32 = 0x8001;
 const WM_OPERATION_RESULT: u32 = 0x8002;
@@ -62,11 +70,17 @@ const EM_SETCUEBANNER: u32 = 0x1501;
 const LBS_NOTIFY: u32 = 0x0001;
 const LBS_OWNERDRAWFIXED: u32 = 0x0010;
 const LBS_HASSTRINGS: u32 = 0x0040;
+const LBS_EXTENDEDSEL: u32 = 0x0800;
 const LB_ADDSTRING: u32 = 0x0180;
 const LB_RESETCONTENT: u32 = 0x0184;
-const LB_SETCURSEL: u32 = 0x0186;
-const LB_GETCURSEL: u32 = 0x0188;
+const LB_SETSEL: u32 = 0x0185;
+const LB_GETSEL: u32 = 0x0187;
+const LB_GETSELCOUNT: u32 = 0x0190;
+const LB_GETSELITEMS: u32 = 0x0191;
+const LB_SETCARETINDEX: u32 = 0x019e;
 const LB_SETITEMHEIGHT: u32 = 0x01a0;
+const LB_GETITEMHEIGHT: u32 = 0x01a1;
+const LB_GETTOPINDEX: u32 = 0x018e;
 
 const BS_OWNERDRAW: u32 = 0x000b;
 const ODT_LISTBOX: u32 = 2;
@@ -102,6 +116,17 @@ const NEW_FOLDER: usize = 118;
 const DELETE: usize = 119;
 const RENAME: usize = 120;
 const ROOT: usize = 121;
+const COPY: usize = 130;
+const CUT: usize = 131;
+const PASTE: usize = 132;
+const COPY_PATH: usize = 133;
+const DUPLICATE: usize = 134;
+const TRASH: usize = 135;
+const PROPERTIES: usize = 136;
+const OPEN_TAB: usize = 137;
+const PROMPT_RENAME: usize = 138;
+const PROMPT_FILE: usize = 139;
+const PROMPT_FOLDER: usize = 140;
 
 #[repr(C)]
 struct WndClass {
@@ -248,6 +273,19 @@ extern "system" {
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
     fn GetWindowRect(hwnd: H, rect: *mut Rect) -> i32;
     fn ScreenToClient(hwnd: H, point: *mut Point) -> i32;
+    fn ClientToScreen(hwnd: H, point: *mut Point) -> i32;
+    fn CreatePopupMenu() -> H;
+    fn AppendMenuW(menu: H, flags: u32, id: usize, text: *const u16) -> i32;
+    fn TrackPopupMenu(
+        menu: H,
+        flags: u32,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        hwnd: H,
+        rect: *const Rect,
+    ) -> u32;
+    fn DestroyMenu(menu: H) -> i32;
     fn MoveWindow(hwnd: H, x: i32, y: i32, w: i32, h: i32, repaint: i32) -> i32;
     fn InvalidateRect(hwnd: H, rect: *const Rect, erase: i32) -> i32;
     fn BeginPaint(hwnd: H, paint: *mut PaintStruct) -> H;
@@ -264,6 +302,33 @@ extern "system" {
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
     fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
     fn TrackMouseEvent(event: *mut TrackMouseEvent) -> i32;
+    fn OpenClipboard(owner: H) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn SetClipboardData(format: u32, memory: H) -> H;
+    fn GetClipboardData(format: u32) -> H;
+    fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    fn DialogBoxIndirectParamW(
+        instance: H,
+        template: *const u16,
+        owner: H,
+        proc: Option<unsafe extern "system" fn(H, u32, WParam, LParam) -> isize>,
+        data: LParam,
+    ) -> isize;
+    fn EndDialog(dialog: H, result: isize) -> i32;
+}
+
+#[link(name = "comctl32")]
+extern "system" {
+    fn SetWindowSubclass(
+        hwnd: H,
+        callback: Option<
+            unsafe extern "system" fn(H, u32, WParam, LParam, usize, usize) -> LResult,
+        >,
+        id: usize,
+        data: usize,
+    ) -> i32;
+    fn DefSubclassProc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> LResult;
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -287,6 +352,11 @@ extern "system" {
     fn GetProcAddress(module: H, name: *const u8) -> P;
     fn GetLogicalDrives() -> u32;
     fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> i32;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> H;
+    fn GlobalLock(memory: H) -> P;
+    fn GlobalUnlock(memory: H) -> i32;
+    fn GlobalFree(memory: H) -> H;
+    fn GlobalSize(memory: H) -> usize;
 }
 
 #[link(name = "gdi32")]
@@ -305,17 +375,7 @@ extern "system" {
         section: H,
         offset: u32,
     ) -> H;
-    fn BitBlt(
-        dest: H,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        src: H,
-        sx: i32,
-        sy: i32,
-        rop: u32,
-    ) -> i32;
+    fn BitBlt(dest: H, x: i32, y: i32, w: i32, h: i32, src: H, sx: i32, sy: i32, rop: u32) -> i32;
     fn DeleteObject(object: H) -> i32;
     fn SelectObject(dc: H, object: H) -> H;
     fn CreateFontW(
@@ -338,6 +398,8 @@ extern "system" {
 
 #[link(name = "shell32")]
 extern "system" {
+    fn DragQueryFileW(drop: H, index: u32, buffer: *mut u16, count: u32) -> u32;
+    fn ShellExecuteExW(info: *mut windows_actions::ShellExecuteInfo) -> i32;
     fn ShellExecuteW(
         hwnd: H,
         operation: *const u16,
@@ -652,6 +714,7 @@ struct App {
     view_mode: ViewMode,
     focused_edit: usize,
     hovered_child: H,
+    hovered_row: Option<usize>,
     hot_zone: HotZone,
     tracking_mouse: bool,
     operation_busy: bool,
@@ -771,7 +834,12 @@ fn dynamic_tab_rects(metrics: &WindowMetrics, tab_count: usize) -> Vec<BoxRect> 
             break;
         }
         let w = per.min(metrics.dynamic_tabs_right - x);
-        rects.push(BoxRect::new(x, metrics.new_tab.y, w, metrics.new_tab.height));
+        rects.push(BoxRect::new(
+            x,
+            metrics.new_tab.y,
+            w,
+            metrics.new_tab.height,
+        ));
         x += w + gap;
     }
     rects
@@ -959,7 +1027,10 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
 
     // Open folder tab chips when multiple tabs exist
     if app.tabs.len() > 1 {
-        for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len()).into_iter().enumerate() {
+        for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len())
+            .into_iter()
+            .enumerate()
+        {
             let active = idx == app.tabs.active();
             let hovered = app.hot_zone == HotZone::Tab(idx);
             let fill = if active {
@@ -1068,10 +1139,7 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
         let Some(row_rect) = sidebar_row_rect(&m, idx) else {
             break;
         };
-        let is_current = item
-            .target
-            .as_deref()
-            .map_or(false, |t| t == current_dir);
+        let is_current = item.target.as_deref().map_or(false, |t| t == current_dir);
         let is_hovered = app.hot_zone == HotZone::Sidebar(idx);
         if is_current || is_hovered {
             let fill = if is_current {
@@ -1126,7 +1194,12 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
         &mut buf,
         w,
         h,
-        BoxRect::new(m.col_header.x, m.col_header.bottom() - 1, m.col_header.width, 1),
+        BoxRect::new(
+            m.col_header.x,
+            m.col_header.bottom() - 1,
+            m.col_header.width,
+            1,
+        ),
         ui_theme::BORDER_SUBTLE,
     );
     // Fill list area background behind child listbox
@@ -1182,14 +1255,7 @@ fn slice_backdrop(app: &App, ox: i32, oy: i32, width: i32, height: i32) -> Vec<u
     out
 }
 
-unsafe fn draw_text_in(
-    dc: H,
-    font: H,
-    color: Rgb,
-    rect: BoxRect,
-    value: &str,
-    flags: u32,
-) {
+unsafe fn draw_text_in(dc: H, font: H, color: Rgb, rect: BoxRect, value: &str, flags: u32) {
     if rect.width <= 0 || rect.height <= 0 || value.is_empty() {
         return;
     }
@@ -1218,14 +1284,10 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
     let m = WindowMetrics::new(w, h);
     let theme = &*app.theme;
     let current_path = app.tabs.current().current().display().to_string();
-    let sel_index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
-    let selected_count = if sel_index >= 0 && (sel_index as usize) < app.entries.len() {
-        1
-    } else {
-        0
-    };
+    let selected = selected_indices(app);
+    let selected_count = selected.len();
     let active_path = if selected_count == 1 {
-        app.entries[sel_index as usize].path.display().to_string()
+        app.entries[selected[0]].path.display().to_string()
     } else {
         current_path.clone()
     };
@@ -1284,13 +1346,20 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
 
         // Open tab labels
         if app.tabs.len() > 1 {
-            for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len()).into_iter().enumerate() {
+            for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len())
+                .into_iter()
+                .enumerate()
+            {
                 if let Some(hist) = app.tabs.history(idx) {
                     let title = tab_title(hist.current());
                     let active = idx == app.tabs.active();
                     draw_text_in(
                         mem_dc,
-                        if active { theme.semibold_font } else { theme.small_font },
+                        if active {
+                            theme.semibold_font
+                        } else {
+                            theme.small_font
+                        },
                         if active {
                             ui_theme::TEXT_BRIGHT
                         } else {
@@ -1350,15 +1419,18 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
             (m.col_type, 10, "Type", false),
             (m.col_size, 10, "Size", true),
         ] {
-            let flags = DT_VCENTER
-                | DT_SINGLELINE
-                | DT_NOPREFIX
-                | if right_align { DT_RIGHT } else { 0 };
+            let flags =
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | if right_align { DT_RIGHT } else { 0 };
             draw_text_in(
                 mem_dc,
                 theme.semibold_font,
                 ui_theme::TEXT_PRIMARY,
-                BoxRect::new(rect.x + pad_left, rect.y, rect.width - pad_left - 8, rect.height),
+                BoxRect::new(
+                    rect.x + pad_left,
+                    rect.y,
+                    rect.width - pad_left - 8,
+                    rect.height,
+                ),
                 title,
                 flags,
             );
@@ -1431,20 +1503,28 @@ unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
             app.show_hidden,
             hovered,
         );
-        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
-            draw_text_in(
-                mem_dc,
-                theme.font,
-                if hovered {
-                    ui_theme::TEXT_BRIGHT
-                } else {
-                    ui_theme::TEXT_PRIMARY
-                },
-                BoxRect::new(2, 0, (w - 42).max(10), h),
-                "Show hidden",
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        });
+        blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            w,
+            h,
+            &pixels,
+            |mem_dc| {
+                draw_text_in(
+                    mem_dc,
+                    theme.font,
+                    if hovered {
+                        ui_theme::TEXT_BRIGHT
+                    } else {
+                        ui_theme::TEXT_PRIMARY
+                    },
+                    BoxRect::new(2, 0, (w - 42).max(10), h),
+                    "Show hidden",
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            },
+        );
         return 1;
     }
 
@@ -1496,20 +1576,28 @@ unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
         };
         ui_theme::paint_action_icon(&mut pixels, w, h, 18.0, (h / 2) as f32, icon, ink);
         let caption = if is_new { "New tab" } else { "Close tab" };
-        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
-            draw_text_in(
-                mem_dc,
-                if active_look {
-                    theme.semibold_font
-                } else {
-                    theme.font
-                },
-                ink,
-                BoxRect::new(30, 0, w - 34, h),
-                caption,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        });
+        blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            w,
+            h,
+            &pixels,
+            |mem_dc| {
+                draw_text_in(
+                    mem_dc,
+                    if active_look {
+                        theme.semibold_font
+                    } else {
+                        theme.font
+                    },
+                    ink,
+                    BoxRect::new(30, 0, w - 34, h),
+                    caption,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            },
+        );
         return 1;
     }
 
@@ -1568,7 +1656,15 @@ unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
             icon,
             ink,
         );
-        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |_| {});
+        blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            w,
+            h,
+            &pixels,
+            |_| {},
+        );
         return 1;
     }
 
@@ -1591,30 +1687,46 @@ unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
             icon,
             ink,
         );
-        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
-            draw_text_in(
-                mem_dc,
-                theme.font,
-                ink,
-                BoxRect::new(26, shift, w - 30, h),
-                caption,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        });
+        blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            w,
+            h,
+            &pixels,
+            |mem_dc| {
+                draw_text_in(
+                    mem_dc,
+                    theme.font,
+                    ink,
+                    BoxRect::new(26, shift, w - 30, h),
+                    caption,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            },
+        );
         return 1;
     }
 
     let raw_label = control_value(item.hwnd).to_string_lossy().into_owned();
-    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
-        draw_text_in(
-            mem_dc,
-            theme.font,
-            ink,
-            BoxRect::new(4, shift, w - 8, h),
-            &raw_label,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-    });
+    blit_pixels(
+        item.dc,
+        item.rect.left,
+        item.rect.top,
+        w,
+        h,
+        &pixels,
+        |mem_dc| {
+            draw_text_in(
+                mem_dc,
+                theme.font,
+                ink,
+                BoxRect::new(4, shift, w - 8, h),
+                &raw_label,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        },
+    );
     1
 }
 
@@ -1626,7 +1738,9 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
     let h = (item.rect.bottom - item.rect.top).max(1);
     let row_index = item.item_id as usize;
     let selected = item.item_state & 1 != 0;
-    let base_bg = if row_index % 2 == 0 {
+    let base_bg = if !selected && app.hovered_row == Some(row_index) {
+        ui_theme::SIDEBAR_HOVER
+    } else if row_index % 2 == 0 {
         ui_theme::ROW_EVEN
     } else {
         ui_theme::ROW_ODD
@@ -1654,7 +1768,15 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
     }
 
     let Some(entry) = app.entries.get(row_index) else {
-        blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |_| {});
+        blit_pixels(
+            item.dc,
+            item.rect.left,
+            item.rect.top,
+            w,
+            h,
+            &pixels,
+            |_| {},
+        );
         return 1;
     };
 
@@ -1683,66 +1805,74 @@ unsafe fn draw_list_item(parent: H, app: &App, item: &mut DrawItem) -> LResult {
     let size_text = ui_theme::format_human_size(entry);
     let theme = &*app.theme;
 
-    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |mem_dc| {
-        if app.view_mode == ViewMode::Compact {
-            draw_text_in(
-                mem_dc,
-                theme.semibold_font,
-                ui_theme::TEXT_BRIGHT,
-                BoxRect::new(44, 2, (w - 56).max(20), h / 2),
-                &entry.name,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-            let sub = if size_text.is_empty() {
-                format!("{type_text}  ·  {modified_text}")
+    blit_pixels(
+        item.dc,
+        item.rect.left,
+        item.rect.top,
+        w,
+        h,
+        &pixels,
+        |mem_dc| {
+            if app.view_mode == ViewMode::Compact {
+                draw_text_in(
+                    mem_dc,
+                    theme.semibold_font,
+                    ui_theme::TEXT_BRIGHT,
+                    BoxRect::new(44, 2, (w - 56).max(20), h / 2),
+                    &entry.name,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+                let sub = if size_text.is_empty() {
+                    format!("{type_text}  ·  {modified_text}")
+                } else {
+                    format!("{type_text}  ·  {size_text}  ·  {modified_text}")
+                };
+                draw_text_in(
+                    mem_dc,
+                    theme.small_font,
+                    ui_theme::TEXT_MUTED,
+                    BoxRect::new(44, h / 2, (w - 56).max(20), h / 2 - 2),
+                    &sub,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
             } else {
-                format!("{type_text}  ·  {size_text}  ·  {modified_text}")
-            };
-            draw_text_in(
-                mem_dc,
-                theme.small_font,
-                ui_theme::TEXT_MUTED,
-                BoxRect::new(44, h / 2, (w - 56).max(20), h / 2 - 2),
-                &sub,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-        } else {
-            draw_text_in(
-                mem_dc,
-                theme.font,
-                ui_theme::TEXT_BRIGHT,
-                BoxRect::new(44, 0, (name_end - 52).max(20), h),
-                &entry.name,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-            draw_text_in(
-                mem_dc,
-                theme.font,
-                ui_theme::TEXT_PRIMARY,
-                BoxRect::new(mod_x + 10, 0, (mod_w - 16).max(10), h),
-                &modified_text,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-            draw_text_in(
-                mem_dc,
-                theme.font,
-                ui_theme::TEXT_MUTED,
-                BoxRect::new(type_x + 10, 0, (type_w - 16).max(10), h),
-                &type_text,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-            if !size_text.is_empty() && size_w > 12 {
+                draw_text_in(
+                    mem_dc,
+                    theme.font,
+                    ui_theme::TEXT_BRIGHT,
+                    BoxRect::new(44, 0, (name_end - 52).max(20), h),
+                    &entry.name,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+                draw_text_in(
+                    mem_dc,
+                    theme.font,
+                    ui_theme::TEXT_PRIMARY,
+                    BoxRect::new(mod_x + 10, 0, (mod_w - 16).max(10), h),
+                    &modified_text,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
                 draw_text_in(
                     mem_dc,
                     theme.font,
                     ui_theme::TEXT_MUTED,
-                    BoxRect::new(size_x + 4, 0, size_w - 10, h),
-                    &size_text,
-                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    BoxRect::new(type_x + 10, 0, (type_w - 16).max(10), h),
+                    &type_text,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
                 );
+                if !size_text.is_empty() && size_w > 12 {
+                    draw_text_in(
+                        mem_dc,
+                        theme.font,
+                        ui_theme::TEXT_MUTED,
+                        BoxRect::new(size_x + 4, 0, size_w - 10, h),
+                        &size_text,
+                        DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                }
             }
-        }
-    });
+        },
+    );
     1
 }
 
@@ -1782,6 +1912,51 @@ unsafe fn invalidate_status_bar(hwnd: H) {
     InvalidateRect(hwnd, &bar, 0);
 }
 
+unsafe fn selected_indices(app: &App) -> Vec<usize> {
+    let count = SendMessageW(app.list, LB_GETSELCOUNT, 0, 0);
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut indices = vec![0i32; count as usize];
+    let n = SendMessageW(
+        app.list,
+        LB_GETSELITEMS,
+        indices.len(),
+        indices.as_mut_ptr() as isize,
+    );
+    if n < 0 {
+        return Vec::new();
+    }
+    indices.truncate(n as usize);
+    indices
+        .into_iter()
+        .filter(|i| *i >= 0)
+        .map(|i| i as usize)
+        .filter(|i| *i < app.entries.len())
+        .collect()
+}
+unsafe fn selected_path(hwnd: H, app: &mut App) -> Option<PathBuf> {
+    let selected = selected_indices(app);
+    if selected.len() != 1 {
+        set_status(
+            hwnd,
+            app,
+            Some("Select exactly one item for this action.".into()),
+        );
+        None
+    } else {
+        Some(app.entries[selected[0]].path.clone())
+    }
+}
+unsafe fn clear_selection(list: H) {
+    SendMessageW(list, LB_SETSEL, 0, -1);
+}
+unsafe fn select_one(list: H, index: usize) {
+    clear_selection(list);
+    SendMessageW(list, LB_SETSEL, 1, index as isize);
+    SendMessageW(list, LB_SETCARETINDEX, index, 0);
+}
+
 unsafe fn populate_listbox(app: &App, preserve_path: Option<&Path>) {
     SendMessageW(app.list, LB_RESETCONTENT, 0, 0);
     let mut select_idx: Option<usize> = None;
@@ -1789,10 +1964,15 @@ unsafe fn populate_listbox(app: &App, preserve_path: Option<&Path>) {
         if preserve_path.map_or(false, |p| p == entry.path) {
             select_idx = Some(idx);
         }
-        SendMessageW(app.list, LB_ADDSTRING, 0, text(&entry.name).as_ptr() as isize);
+        SendMessageW(
+            app.list,
+            LB_ADDSTRING,
+            0,
+            text(&entry.name).as_ptr() as isize,
+        );
     }
     if let Some(idx) = select_idx {
-        SendMessageW(app.list, LB_SETCURSEL, idx, 0);
+        select_one(app.list, idx);
     }
 }
 
@@ -1914,6 +2094,9 @@ enum Operation {
     NewFolder(PathBuf, OsString),
     Delete(PathBuf),
     Rename(PathBuf, OsString),
+    Copy(PathBuf, PathBuf, OsString),
+    Move(PathBuf, PathBuf),
+    Trash(PathBuf, usize),
 }
 
 unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
@@ -1929,18 +2112,26 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     set_status(hwnd, app, Some("Working…".into()));
     let target = hwnd as usize;
     thread::spawn(move || {
-        let result = match operation {
-            Operation::NewFile(dir, name) => zfm::operations::create_file(&dir, &name)
-                .map(|p| format!("Created {}", p.display())),
-            Operation::NewFolder(dir, name) => zfm::operations::create_directory(&dir, &name)
-                .map(|p| format!("Created {}", p.display())),
-            Operation::Rename(path, name) => zfm::operations::rename_child(&path, &name)
-                .map(|p| format!("Renamed to {}", p.display())),
-            Operation::Delete(path) => {
-                zfm::operations::remove_one(&path).map(|_| format!("Deleted {}", path.display()))
+        let result =
+            match operation {
+                Operation::NewFile(dir, name) => zfm::operations::create_file(&dir, &name)
+                    .map(|p| format!("Created {}", p.display())),
+                Operation::NewFolder(dir, name) => zfm::operations::create_directory(&dir, &name)
+                    .map(|p| format!("Created {}", p.display())),
+                Operation::Rename(path, name) => zfm::operations::rename_child(&path, &name)
+                    .map(|p| format!("Renamed to {}", p.display())),
+                Operation::Delete(path) => zfm::operations::remove_one(&path)
+                    .map(|_| format!("Deleted {}", path.display())),
+                Operation::Trash(path, owner) => zfm::trash::trash_with_owner(&path, owner)
+                    .map(|_| format!("Moved {} to Recycle Bin", path.display())),
+                Operation::Copy(path, dir, name) => {
+                    zfm::operations::copy_file(&path, &dir, &name, &AtomicBool::new(false), |_| {})
+                        .map(|p| format!("Copied to {}", p.display()))
+                }
+                Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
+                    .map(|p| format!("Moved to {}", p.display())),
             }
-        }
-        .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string());
         let msg = Box::into_raw(Box::new(OperationMessage { result }));
         if unsafe { PostMessageW(target as H, WM_OPERATION_RESULT, 0, msg as isize) } == 0 {
             unsafe {
@@ -1982,6 +2173,19 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
             }
         }
         HotZone::Sidebar(idx) => {
+            if GetKeyState(0x11) < 0 {
+                if let Some(path) = app
+                    .sidebar_items
+                    .get(idx)
+                    .and_then(|item| item.target.clone())
+                {
+                    app.tabs.add(path);
+                    rebuild_backdrop(hwnd, app);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                    load(hwnd, app, Destination::Refresh, false);
+                }
+                return;
+            }
             if let Some(item) = app.sidebar_items.get(idx).cloned() {
                 if item.is_drives_header {
                     app.drives_expanded = !app.drives_expanded;
@@ -2001,12 +2205,10 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
                 app.sort_ascending = matches!(col, SortColumn::Name | SortColumn::Kind);
             }
             let selected_path = {
-                let idx = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
-                if idx >= 0 {
-                    app.entries.get(idx as usize).map(|e| e.path.clone())
-                } else {
-                    None
-                }
+                selected_indices(app)
+                    .first()
+                    .and_then(|i| app.entries.get(*i))
+                    .map(|e| e.path.clone())
             };
             ui_theme::sort_entries(&mut app.entries, app.sort_column, app.sort_ascending);
             populate_listbox(app, selected_path.as_deref());
@@ -2030,6 +2232,329 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
     }
 }
 
+unsafe fn list_hit(app: &App, x: i32, y: i32) -> Option<usize> {
+    let mut rect: Rect = std::mem::zeroed();
+    GetClientRect(app.list, &mut rect);
+    if x < 0 || y < 0 || x >= rect.right || y >= rect.bottom {
+        return None;
+    }
+    let height = SendMessageW(app.list, LB_GETITEMHEIGHT, 0, 0);
+    let top = SendMessageW(app.list, LB_GETTOPINDEX, 0, 0);
+    if height <= 0 || top < 0 {
+        return None;
+    }
+    let index = top as usize + y as usize / height as usize;
+    if index < app.entries.len() {
+        Some(index)
+    } else {
+        None
+    }
+}
+
+unsafe extern "system" fn list_proc(
+    list: H,
+    msg: u32,
+    wp: WParam,
+    lp: LParam,
+    _: usize,
+    data: usize,
+) -> LResult {
+    let parent = data as H;
+    let app_ptr = get_data(parent) as *mut App;
+    if app_ptr.is_null() {
+        return DefSubclassProc(list, msg, wp, lp);
+    }
+    if msg == WM_RBUTTONDOWN {
+        let index = list_hit(&*app_ptr, (lp as i16) as i32, ((lp >> 16) as i16) as i32);
+        match index {
+            Some(i) if SendMessageW(list, LB_GETSEL, i, 0) <= 0 => select_one(list, i),
+            None => clear_selection(list),
+            _ => {}
+        }
+        SetFocus(list);
+        invalidate_status_bar(parent);
+        return 0;
+    }
+    if msg == WM_MOUSEMOVE {
+        let x = (lp as i16) as i32;
+        let y = ((lp >> 16) as i16) as i32;
+        let next = list_hit(&*app_ptr, x, y);
+        if (*app_ptr).hovered_row != next {
+            (*app_ptr).hovered_row = next;
+            InvalidateRect(list, ptr::null(), 0);
+        }
+        let mut tracking = TrackMouseEvent {
+            size: std::mem::size_of::<TrackMouseEvent>() as u32,
+            flags: 2,
+            hwnd_track: list,
+            hover_time: 0,
+        };
+        TrackMouseEvent(&mut tracking);
+    } else if msg == WM_MOUSELEAVE {
+        (*app_ptr).hovered_row = None;
+        InvalidateRect(list, ptr::null(), 0);
+    }
+    if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK || msg == WM_MBUTTONDOWN {
+        let x = (lp as i16) as i32;
+        let y = ((lp >> 16) as i16) as i32;
+        let index = list_hit(&*app_ptr, x, y);
+        if index.is_none() && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+            clear_selection(list);
+            SetFocus(list);
+            invalidate_status_bar(parent);
+            return 0;
+        }
+        if msg == WM_LBUTTONDBLCLK && (GetKeyState(0x11) < 0 || GetKeyState(0x12) < 0) {
+            if let Some(i) = index {
+                select_one(list, i);
+                let command = if GetKeyState(0x12) < 0 {
+                    PROPERTIES
+                } else {
+                    OPEN_TAB
+                };
+                SendMessageW(parent, WM_COMMAND, command, 0);
+            }
+            return 0;
+        }
+        if msg == WM_MBUTTONDOWN {
+            if let Some(path) = index
+                .and_then(|i| (&(*app_ptr).entries).get(i))
+                .filter(|e| e.is_dir)
+                .map(|e| e.path.clone())
+            {
+                let app = &mut *app_ptr;
+                app.tabs.add(path);
+                rebuild_backdrop(parent, app);
+                InvalidateRect(parent, ptr::null(), 0);
+                load(parent, app, Destination::Refresh, false);
+            }
+            return 0;
+        }
+    }
+    if msg == WM_XBUTTONDOWN {
+        SendMessageW(
+            parent,
+            WM_COMMAND,
+            if (wp >> 16) == 1 { BACK } else { FORWARD },
+            0,
+        );
+        return 1;
+    }
+    DefSubclassProc(list, msg, wp, lp)
+}
+
+unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
+    let keyboard = lp == -1;
+    let point = if keyboard {
+        let mut p = Point { x: 8, y: 8 };
+        ClientToScreen(app.list, &mut p);
+        p
+    } else {
+        Point {
+            x: (lp as i16) as i32,
+            y: ((lp >> 16) as i16) as i32,
+        }
+    };
+    if !keyboard {
+        let mut local = Point {
+            x: point.x,
+            y: point.y,
+        };
+        ScreenToClient(app.list, &mut local);
+        let index = list_hit(app, local.x, local.y);
+        match index {
+            Some(i) if SendMessageW(app.list, LB_GETSEL, i, 0) <= 0 => select_one(app.list, i),
+            None => clear_selection(app.list),
+            _ => {}
+        }
+        invalidate_status_bar(hwnd);
+    }
+    SetFocus(app.list);
+    let selected = !selected_indices(app).is_empty();
+    let menu = CreatePopupMenu();
+    if menu.is_null() {
+        return;
+    }
+    if selected {
+        AppendMenuW(menu, 0, 1, text("Open").as_ptr());
+        if selected_indices(app).len() == 1 && app.entries[selected_indices(app)[0]].is_dir {
+            AppendMenuW(menu, 0, OPEN_TAB, text("Open in new tab").as_ptr());
+        }
+        AppendMenuW(menu, 0x800, 0, ptr::null());
+        for (id, title) in [
+            (CUT, "Cut"),
+            (COPY, "Copy"),
+            (COPY_PATH, "Copy path"),
+            (PASTE, "Paste"),
+            (DUPLICATE, "Duplicate…"),
+            (PROMPT_RENAME, "Rename…"),
+            (TRASH, "Move to Recycle Bin"),
+            (DELETE, "Delete permanently…"),
+            (PROPERTIES, "Properties"),
+        ] {
+            AppendMenuW(menu, 0, id, text(title).as_ptr());
+        }
+    } else {
+        for (id, title) in [
+            (PROMPT_FILE, "New file…"),
+            (PROMPT_FOLDER, "New folder…"),
+            (PASTE, "Paste"),
+            (REFRESH, "Refresh"),
+            (HIDDEN, "Show / hide hidden files"),
+        ] {
+            AppendMenuW(menu, 0, id, text(title).as_ptr());
+        }
+        let sort = CreatePopupMenu();
+        if !sort.is_null() {
+            for (id, title) in [
+                (201, "Name"),
+                (202, "Date Modified"),
+                (203, "Type"),
+                (204, "Size"),
+            ] {
+                AppendMenuW(sort, 0, id, text(title).as_ptr());
+            }
+            AppendMenuW(menu, 0x10, sort as usize, text("Sort by").as_ptr());
+        }
+        let view = CreatePopupMenu();
+        if !view.is_null() {
+            AppendMenuW(view, 0, 205, text("Details").as_ptr());
+            AppendMenuW(view, 0, 206, text("Compact").as_ptr());
+            AppendMenuW(menu, 0x10, view as usize, text("View").as_ptr());
+        }
+    }
+    let id = TrackPopupMenu(
+        menu,
+        0x0100 | 0x0002,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        ptr::null(),
+    );
+    DestroyMenu(menu);
+    if id == 1 {
+        SendMessageW(hwnd, WM_COMMAND, LIST | (2 << 16), app.list as isize);
+    } else if (201..=206).contains(&id) {
+        let mut r: Rect = std::mem::zeroed();
+        GetClientRect(hwnd, &mut r);
+        let m = WindowMetrics::new(r.right, r.bottom);
+        let rect = match id {
+            201 => m.col_name,
+            202 => m.col_modified,
+            203 => m.col_type,
+            204 => m.col_size,
+            205 => m.view_details_btn,
+            _ => m.view_compact_btn,
+        };
+        handle_custom_click(hwnd, app, rect.x + 1, rect.y + 1);
+    } else if id != 0 {
+        SendMessageW(hwnd, WM_COMMAND, id as usize, 0);
+    }
+}
+
+unsafe fn custom_context(hwnd: H, app: &mut App, lp: LParam) {
+    if lp == -1 {
+        return;
+    }
+    let point = Point {
+        x: (lp as i16) as i32,
+        y: ((lp >> 16) as i16) as i32,
+    };
+    let mut local = Point {
+        x: point.x,
+        y: point.y,
+    };
+    ScreenToClient(hwnd, &mut local);
+    let mut rect: Rect = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rect);
+    let zone = hit_test_custom(
+        app,
+        &WindowMetrics::new(rect.right, rect.bottom),
+        local.x,
+        local.y,
+    );
+    let menu = CreatePopupMenu();
+    if menu.is_null() {
+        return;
+    }
+    match zone {
+        HotZone::Tab(_) => {
+            AppendMenuW(menu, 0, 1, text("New tab").as_ptr());
+            AppendMenuW(menu, 0, 2, text("Duplicate tab").as_ptr());
+            AppendMenuW(menu, 0, 3, text("Close tab").as_ptr());
+            AppendMenuW(menu, 0, 4, text("Close other tabs").as_ptr());
+        }
+        HotZone::Sidebar(index)
+            if app
+                .sidebar_items
+                .get(index)
+                .and_then(|item| item.target.as_ref())
+                .is_some() =>
+        {
+            AppendMenuW(menu, 0, 5, text("Open").as_ptr());
+            AppendMenuW(menu, 0, 6, text("Open in new tab").as_ptr());
+        }
+        _ => {
+            DestroyMenu(menu);
+            return;
+        }
+    }
+    let command = TrackPopupMenu(
+        menu,
+        0x0100 | 0x0002,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        ptr::null(),
+    );
+    DestroyMenu(menu);
+    match (zone, command) {
+        (HotZone::Tab(_), 1) => {
+            let path = app.tabs.current().current().to_path_buf();
+            app.tabs.add(path);
+        }
+        (HotZone::Tab(index), 2) => {
+            if let Some(path) = app.tabs.history(index).map(|h| h.current().to_path_buf()) {
+                app.tabs.add(path);
+            } else {
+                return;
+            }
+        }
+        (HotZone::Tab(index), 3) => {
+            if !app.tabs.close_at(index) {
+                set_status(hwnd, app, Some("At least one tab must remain open.".into()));
+                return;
+            }
+        }
+        (HotZone::Tab(index), 4) => {
+            if !app.tabs.close_others(index) {
+                return;
+            }
+        }
+        (HotZone::Sidebar(index), 5 | 6) => {
+            if let Some(path) = app
+                .sidebar_items
+                .get(index)
+                .and_then(|item| item.target.clone())
+            {
+                if command == 5 {
+                    load(hwnd, app, Destination::Visit(path), false);
+                    return;
+                }
+                app.tabs.add(path);
+            } else {
+                return;
+            }
+        }
+        _ => return,
+    }
+    rebuild_backdrop(hwnd, app);
+    InvalidateRect(hwnd, ptr::null(), 0);
+    load(hwnd, app, Destination::Refresh, false);
+}
+
 unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> LResult {
     if msg == WM_CREATE {
         let app = &mut *(*(lp as *const CreateStruct)).param.cast::<App>();
@@ -2048,7 +2573,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             hwnd,
             "LISTBOX",
             "",
-            WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            WS_TABSTOP
+                | WS_VSCROLL
+                | LBS_NOTIFY
+                | LBS_OWNERDRAWFIXED
+                | LBS_HASSTRINGS
+                | LBS_EXTENDEDSEL,
             LIST,
         );
         let status = CreateWindowExW(
@@ -2068,7 +2598,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         let filter_control = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, FILTER);
         let name_control = child(hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, NAME);
         let extra_buttons = [
-            child(hwnd, "BUTTON", "New tab", WS_TABSTOP | BS_OWNERDRAW, NEW_TAB),
+            child(
+                hwnd,
+                "BUTTON",
+                "New tab",
+                WS_TABSTOP | BS_OWNERDRAW,
+                NEW_TAB,
+            ),
             child(
                 hwnd,
                 "BUTTON",
@@ -2139,6 +2675,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         app.filter_control = filter_control;
         app.name_control = name_control;
         app.extra_buttons = extra_buttons;
+        SetWindowSubclass(list, Some(list_proc), 1, hwnd as usize);
 
         SendMessageW(list, LB_SETITEMHEIGHT, 0, 30);
         SendMessageW(
@@ -2251,9 +2788,84 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             }
             0
         }
+        WM_CONTEXTMENU if wp as H == app.list => {
+            list_context(hwnd, app, lp);
+            0
+        }
+        WM_CONTEXTMENU if wp as H == hwnd => {
+            custom_context(hwnd, app, lp);
+            0
+        }
+        WM_MBUTTONDOWN => {
+            let x = (lp as i16) as i32;
+            let y = ((lp >> 16) as i16) as i32;
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            match hit_test_custom(app, &WindowMetrics::new(rect.right, rect.bottom), x, y) {
+                HotZone::Tab(index) => {
+                    if app.tabs.close_at(index) {
+                        rebuild_backdrop(hwnd, app);
+                        InvalidateRect(hwnd, ptr::null(), 0);
+                        load(hwnd, app, Destination::Refresh, false);
+                    } else {
+                        set_status(hwnd, app, Some("At least one tab must remain open.".into()));
+                    }
+                }
+                HotZone::Sidebar(index) => {
+                    if let Some(path) = app
+                        .sidebar_items
+                        .get(index)
+                        .and_then(|item| item.target.clone())
+                    {
+                        app.tabs.add(path);
+                        rebuild_backdrop(hwnd, app);
+                        InvalidateRect(hwnd, ptr::null(), 0);
+                        load(hwnd, app, Destination::Refresh, false);
+                    }
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_XBUTTONDOWN => {
+            let destination = if (wp >> 16) == 1 {
+                Destination::Back
+            } else {
+                Destination::Forward
+            };
+            load(hwnd, app, destination, false);
+            1
+        }
+        WM_LBUTTONDBLCLK => {
+            let x = (lp as i16) as i32;
+            let y = ((lp >> 16) as i16) as i32;
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            let metrics = WindowMetrics::new(rect.right, rect.bottom);
+            if y >= metrics.tab_strip_top
+                && y < metrics.deck_top
+                && x >= metrics.dynamic_tabs_left
+                && x < metrics.dynamic_tabs_right
+                && hit_test_custom(app, &metrics, x, y) == HotZone::None
+            {
+                let path = app.tabs.current().current().to_path_buf();
+                app.tabs.add(path);
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                load(hwnd, app, Destination::Refresh, false);
+            }
+            0
+        }
         WM_LBUTTONDOWN => {
             let mx = (lp as i16) as i32;
             let my = ((lp >> 16) as i16) as i32;
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            if hit_test_custom(app, &WindowMetrics::new(rect.right, rect.bottom), mx, my)
+                != HotZone::AddressChip
+            {
+                SetFocus(app.list);
+            }
             handle_custom_click(hwnd, app, mx, my);
             0
         }
@@ -2275,7 +2887,11 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             match message.result {
                 Ok(Some(mut listing)) => {
                     app.tabs.current_mut().commit(message.destination);
-                    ui_theme::sort_entries(&mut listing.entries, app.sort_column, app.sort_ascending);
+                    ui_theme::sort_entries(
+                        &mut listing.entries,
+                        app.sort_column,
+                        app.sort_ascending,
+                    );
                     let path = wide(app.tabs.current().current().as_os_str());
                     SetWindowTextW(app.address, path.as_ptr());
                     let skipped_note = if listing.skipped > 0 {
@@ -2312,7 +2928,9 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     set_status(hwnd, app, Some(status));
                     load(hwnd, app, Destination::Refresh, true);
                 }
-                Err(error) => set_status(hwnd, app, Some(format!("File operation failed: {error}"))),
+                Err(error) => {
+                    set_status(hwnd, app, Some(format!("File operation failed: {error}")))
+                }
             }
             0
         }
@@ -2379,11 +2997,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         InvalidateRect(hwnd, ptr::null(), 0);
                         load(hwnd, app, Destination::Refresh, false);
                     } else {
-                        set_status(
-                            hwnd,
-                            app,
-                            Some("At least one tab must remain open.".into()),
-                        );
+                        set_status(hwnd, app, Some("At least one tab must remain open.".into()));
                     }
                 }
                 APPLY_FILTER if code == 0 => {
@@ -2402,8 +3016,145 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
                     load(hwnd, app, Destination::Refresh, false);
                 }
+                COPY | CUT if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) {
+                        let copy_allowed = id == CUT
+                            || std::fs::symlink_metadata(&path)
+                                .map_or(false, |m| m.is_file() && !m.file_type().is_symlink());
+                        let message = if !copy_allowed {
+                            "Copy supports regular files only."
+                        } else if windows_actions::copy_file(hwnd, &path, id == CUT) {
+                            "Item copied to clipboard."
+                        } else {
+                            "Could not write to clipboard."
+                        };
+                        set_status(hwnd, app, Some(message.into()));
+                    }
+                }
+                COPY_PATH if code == 0 => {
+                    let indices = selected_indices(app);
+                    let path = if indices.len() == 1 {
+                        app.entries[indices[0]].path.clone()
+                    } else {
+                        app.tabs.current().current().to_path_buf()
+                    };
+                    let ok = windows_actions::copy_text(hwnd, &path);
+                    set_status(
+                        hwnd,
+                        app,
+                        Some(
+                            if ok {
+                                "Path copied."
+                            } else {
+                                "Could not write to clipboard."
+                            }
+                            .into(),
+                        ),
+                    );
+                }
+                PASTE if code == 0 => match windows_actions::read_file(hwnd) {
+                    Ok((path, cut)) => {
+                        let dir = app.tabs.current().current().to_path_buf();
+                        if cut {
+                            start_operation(hwnd, app, Operation::Move(path, dir));
+                        } else {
+                            let name = if path.parent() == Some(dir.as_path()) {
+                                OsString::from(zfm::operations::suggest_copy_name(&dir, &path))
+                            } else {
+                                path.file_name().unwrap_or_default().to_os_string()
+                            };
+                            start_operation(hwnd, app, Operation::Copy(path, dir, name));
+                        }
+                    }
+                    Err(message) => set_status(hwnd, app, Some(message.into())),
+                },
+                PROPERTIES if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) {
+                        windows_actions::properties(hwnd, &path);
+                    }
+                }
+                OPEN_TAB if code == 0 => {
+                    let indices = selected_indices(app);
+                    if indices.len() == 1 {
+                        if let Some(path) = app
+                            .entries
+                            .get(indices[0])
+                            .filter(|e| e.is_dir)
+                            .map(|e| e.path.clone())
+                        {
+                            app.tabs.add(path);
+                            rebuild_backdrop(hwnd, app);
+                            InvalidateRect(hwnd, ptr::null(), 0);
+                            load(hwnd, app, Destination::Refresh, false);
+                        }
+                    }
+                }
+                DUPLICATE if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) {
+                        let dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+                        let proposed = zfm::operations::suggest_copy_name(&dir, &path);
+                        if let Some(name) = windows_actions::prompt(
+                            hwnd,
+                            app.theme,
+                            "Duplicate file",
+                            OsStr::new(&proposed),
+                            true,
+                        ) {
+                            start_operation(hwnd, app, Operation::Copy(path, dir, name));
+                        }
+                    }
+                }
+                TRASH if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) {
+                        start_operation(hwnd, app, Operation::Trash(path, hwnd as usize));
+                    }
+                }
+                PROMPT_FILE | PROMPT_FOLDER if code == 0 => {
+                    let dir = app.tabs.current().current().to_path_buf();
+                    let title = if id == PROMPT_FILE {
+                        "New file"
+                    } else {
+                        "New folder"
+                    };
+                    if let Some(name) =
+                        windows_actions::prompt(hwnd, app.theme, title, OsStr::new(""), false)
+                    {
+                        let operation = if id == PROMPT_FILE {
+                            Operation::NewFile(dir, name)
+                        } else {
+                            Operation::NewFolder(dir, name)
+                        };
+                        start_operation(hwnd, app, operation);
+                    }
+                }
+                PROMPT_RENAME if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) {
+                        if let Some(name) = windows_actions::prompt(
+                            hwnd,
+                            app.theme,
+                            "Rename",
+                            path.file_name().unwrap_or_default(),
+                            true,
+                        ) {
+                            start_operation(hwnd, app, Operation::Rename(path, name));
+                        }
+                    }
+                }
                 NEW_FILE | NEW_FOLDER if code == 0 => {
                     let name = control_value(app.name_control);
+                    if name.is_empty() {
+                        SendMessageW(
+                            hwnd,
+                            WM_COMMAND,
+                            if id == NEW_FILE {
+                                PROMPT_FILE
+                            } else {
+                                PROMPT_FOLDER
+                            },
+                            0,
+                        );
+                        return 0;
+                    }
                     let dir = app.tabs.current().current().to_path_buf();
                     let operation = if id == NEW_FILE {
                         Operation::NewFile(dir, name)
@@ -2413,15 +3164,22 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     start_operation(hwnd, app, operation);
                 }
                 RENAME if code == 0 => {
-                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
-                    let path = if index >= 0 {
-                        app.entries.get(index as usize).map(|e| e.path.clone())
-                    } else {
-                        None
-                    };
+                    let path = selected_path(hwnd, app);
                     if let Some(path) = path {
                         let name = control_value(app.name_control);
-                        start_operation(hwnd, app, Operation::Rename(path, name));
+                        if name.is_empty() {
+                            if let Some(name) = windows_actions::prompt(
+                                hwnd,
+                                app.theme,
+                                "Rename",
+                                path.file_name().unwrap_or_default(),
+                                true,
+                            ) {
+                                start_operation(hwnd, app, Operation::Rename(path, name));
+                            }
+                        } else {
+                            start_operation(hwnd, app, Operation::Rename(path, name));
+                        }
                     } else {
                         set_status(
                             hwnd,
@@ -2431,12 +3189,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     }
                 }
                 DELETE if code == 0 => {
-                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
-                    let path = if index >= 0 {
-                        app.entries.get(index as usize).map(|e| e.path.clone())
-                    } else {
-                        None
-                    };
+                    let path = selected_path(hwnd, app);
                     if let Some(path) = path {
                         let message = format!(
                             "Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.",
@@ -2459,10 +3212,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     invalidate_status_bar(hwnd);
                 }
                 LIST if code == 2 => {
-                    let index = SendMessageW(app.list, LB_GETCURSEL, 0, 0);
-                    let entry = if index >= 0 {
+                    let indices = selected_indices(app);
+                    let entry = if indices.len() == 1 {
                         app.entries
-                            .get(index as usize)
+                            .get(indices[0])
                             .map(|e| (e.path.clone(), e.is_dir))
                     } else {
                         None
@@ -2529,7 +3282,7 @@ pub fn run() -> Result<(), String> {
         let theme = Theme::new()?;
         let class = text("ZFMNativeWindow");
         let wc = WndClass {
-            style: 0,
+            style: 0x0008, // CS_DBLCLKS
             proc: Some(window_proc),
             cls_extra: 0,
             wnd_extra: 0,
@@ -2568,6 +3321,7 @@ pub fn run() -> Result<(), String> {
             view_mode: ViewMode::Details,
             focused_edit: 0,
             hovered_child: ptr::null_mut(),
+            hovered_row: None,
             hot_zone: HotZone::None,
             tracking_mouse: false,
             operation_busy: false,
@@ -2618,28 +3372,82 @@ pub fn run() -> Result<(), String> {
                 let focus = GetFocus();
                 let ctrl = GetKeyState(0x11) < 0;
                 let alt = GetKeyState(0x12) < 0;
+                let shift = GetKeyState(0x10) < 0;
+                if ctrl && !alt && (msg.wparam == 0x09 || msg.wparam == 0x21 || msg.wparam == 0x22)
+                {
+                    let previous = msg.wparam == 0x21 || (msg.wparam == 0x09 && shift);
+                    let state = &mut *app;
+                    if if previous {
+                        state.tabs.prev_tab()
+                    } else {
+                        state.tabs.next_tab()
+                    } {
+                        rebuild_backdrop(window, state);
+                        InvalidateRect(window, ptr::null(), 0);
+                        load(window, state, Destination::Refresh, false);
+                    }
+                    continue;
+                }
+                if (ctrl || alt) && (0x31..=0x39).contains(&msg.wparam) {
+                    let state = &mut *app;
+                    if state.tabs.select(msg.wparam - 0x31) {
+                        rebuild_backdrop(window, state);
+                        InvalidateRect(window, ptr::null(), 0);
+                        load(window, state, Destination::Refresh, false);
+                    }
+                    continue;
+                }
+                if msg.wparam == 0x1b {
+                    clear_selection((*app).list);
+                    SetFocus((*app).list);
+                    invalidate_status_bar(window);
+                    continue;
+                }
+                if focus == (*app).list && (msg.wparam == 0x5d || (msg.wparam == 0x79 && shift)) {
+                    SendMessageW(window, WM_CONTEXTMENU, (*app).list as usize, -1);
+                    continue;
+                }
                 let id = match msg.wparam {
                     0x74 if !ctrl && !alt => Some(REFRESH),
+                    0x71 if !ctrl && !alt && focus == (*app).list => Some(PROMPT_RENAME),
+                    0x43 if ctrl && !alt && shift => Some(COPY_PATH),
+                    0x43 if ctrl && !alt && focus == (*app).list => Some(COPY),
+                    0x58 if ctrl && !alt && focus == (*app).list => Some(CUT),
+                    0x56 if ctrl && !alt && focus == (*app).list => Some(PASTE),
+                    0x44 if ctrl && !alt && focus == (*app).list => Some(DUPLICATE),
+                    0x4e if ctrl && !alt && shift => Some(PROMPT_FOLDER),
+                    0x4e if ctrl && !alt => Some(PROMPT_FILE),
+                    0x0d if alt && !ctrl && focus == (*app).list => Some(PROPERTIES),
+                    0x2e if focus == (*app).list && !ctrl && !alt && !shift => Some(TRASH),
+                    0x52 if ctrl && !alt => Some(REFRESH),
+                    0x48 if ctrl && !alt => Some(HIDDEN),
+                    0x08 if focus == (*app).list && !ctrl && !alt => Some(UP),
                     0x54 if ctrl && !alt => Some(NEW_TAB),
                     0x57 if ctrl && !alt => Some(CLOSE_TAB),
                     0x25 if alt && !ctrl => Some(BACK),
                     0x27 if alt && !ctrl => Some(FORWARD),
                     0x26 if alt && !ctrl => Some(UP),
                     0x0d if focus == (*app).address => Some(GO),
-                    0x0d if focus == (*app).filter_control => Some(APPLY_FILTER),
-                    0x2e if focus == (*app).list && !ctrl && !alt => Some(DELETE),
+                    0x0d if focus == (*app).filter_control && !alt => Some(APPLY_FILTER),
+                    0x0d if focus == (*app).name_control && !alt => Some(NEW_FILE),
+                    0x2e if focus == (*app).list && !ctrl && !alt && shift => Some(DELETE),
                     _ => None,
                 };
                 if let Some(id) = id {
                     SendMessageW(window, WM_COMMAND, id, 0);
                     continue;
                 }
-                if ctrl && !alt && msg.wparam == 0x4c {
+                if (ctrl && !alt && msg.wparam == 0x4c) || (alt && !ctrl && msg.wparam == 0x44) {
                     SetFocus((*app).address);
                     SendMessageW((*app).address, EM_SETSEL, 0, -1);
                     continue;
                 }
-                if msg.wparam == 0x0d && focus == (*app).list {
+                if ctrl && !alt && msg.wparam == 0x46 {
+                    SetFocus((*app).filter_control);
+                    SendMessageW((*app).filter_control, EM_SETSEL, 0, -1);
+                    continue;
+                }
+                if msg.wparam == 0x0d && focus == (*app).list && !alt && !ctrl {
                     SendMessageW(window, WM_COMMAND, LIST | (2 << 16), (*app).list as isize);
                     continue;
                 }

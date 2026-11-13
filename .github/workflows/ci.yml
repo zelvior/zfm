@@ -31,6 +31,11 @@ jobs:
           cargo +1.77.2 test --locked -p zfm-installer
       - name: Build
         run: cargo +1.77.2 build --release --locked
+      - name: GTK interaction smoke test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0 xvfb xdotool
+          xvfb-run -a ./tests/gui-smoke-linux.sh "$PWD/target/release/zfm"
 
   windows:
     name: Windows ${{ matrix.target }}
