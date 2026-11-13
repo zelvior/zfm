@@ -19,6 +19,7 @@ struct Response { index: usize, epoch: u64, label: Option<String> }
 
 pub(super) struct Drives {
     mask: u32,
+    available: bool,
     slots: [Slot; 26],
     sender: Sender<Response>,
     receiver: Receiver<Response>,
@@ -26,7 +27,7 @@ pub(super) struct Drives {
 impl Drives {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
-        Self { mask: 0, slots: std::array::from_fn(|_| Slot {
+        Self { mask: 0, available: false, slots: std::array::from_fn(|_| Slot {
             epoch: 0, in_flight: false, label: None, next_query: Instant::now(),
         }), sender, receiver }
     }
@@ -36,6 +37,7 @@ impl Drives {
     pub fn poll(&mut self, with_labels: bool) -> bool {
         let mut changed = false;
         let mask = unsafe { GetLogicalDrives() };
+        if self.available != (mask != 0) { self.available = mask != 0; changed = true; }
         // Zero signifies an OS error, not a successful empty snapshot. Retain
         // the previous snapshot instead of inventing drives or erasing it.
         if mask != 0 && mask != self.mask {
@@ -87,6 +89,19 @@ impl Drives {
             }
         }
         changed
+    }
+
+    pub fn available(&self) -> bool { self.available }
+
+    /// Media can change without the logical drive letter disappearing.
+    pub fn invalidate_labels(&mut self) {
+        for index in 0..26 {
+            if self.mask & (1 << index) != 0 {
+                let slot = &mut self.slots[index];
+                slot.epoch = slot.epoch.wrapping_add(1);
+                slot.next_query = Instant::now();
+            }
+        }
     }
 
     pub fn entries(&self, with_labels: bool) -> Vec<(String, String)> {

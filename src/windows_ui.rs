@@ -323,6 +323,7 @@ extern "system" {
     fn SetFocus(hwnd: H) -> H;
     fn GetKeyState(key: i32) -> i16;
     fn IsDialogMessageW(hwnd: H, msg: *mut Msg) -> i32;
+    fn IsWindowEnabled(hwnd: H) -> i32;
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
     fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
     fn TrackMouseEvent(event: *mut TrackMouseEvent) -> i32;
@@ -812,7 +813,7 @@ fn build_sidebar_items(drives_expanded: bool, drives: &windows_drives::Drives, l
         }
     }
     items.push(SidebarEntry {
-        label: "Computer".to_string(),
+        label: if drives.available() { "Computer" } else { "Computer (unavailable)" }.to_string(),
         icon: ItemIcon::Drives,
         indent: 0,
         target: None,
@@ -2835,6 +2836,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         return 0;
     }
 
+    // A modal dialog disables its owner and runs a nested message loop. Defer
+    // scanner updates until it closes rather than mutating the list or sidebar
+    // underneath a settings, confirmation, or preview dialog.
+    if ((msg == WM_TIMER && wp == SCAN_TIMER) || msg == WM_DEVICECHANGE) && IsWindowEnabled(hwnd) == 0 {
+        return if msg == WM_TIMER { 0 } else { DefWindowProcW(hwnd, msg, wp, lp) };
+    }
     let data = get_data(hwnd);
     if data == 0 {
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -2864,6 +2871,8 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0
         }
         WM_DEVICECHANGE => {
+            // Arrival/removal can change a volume label without changing the letter.
+            if matches!(wp, 0x8000 | 0x8004 | 0x0007) { app.drives.invalidate_labels(); }
             poll_drives(hwnd, app);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
