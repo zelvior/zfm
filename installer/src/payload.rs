@@ -129,7 +129,7 @@ fn is_regular_file(path: &Path) -> bool {
 pub fn is_previous_install(dir: &Path) -> bool {
     if !payload_files()
         .iter()
-        .all(|(name, _)| is_regular_file(&dir.join(name)))
+        .all(|(name, _)| is_regular_file(&dir.join(*name)))
     {
         return false;
     }
@@ -138,8 +138,8 @@ pub fn is_previous_install(dir: &Path) -> bool {
             return false;
         }
     }
-    fs::read(dir.join("zfm.ico")).as_deref() == Ok(ICON)
-        && fs::read(dir.join("LICENSE.txt")).as_deref() == Ok(LICENSE.as_bytes())
+    fs::read(dir.join("zfm.ico")).ok().as_deref() == Some(ICON)
+        && fs::read(dir.join("LICENSE.txt")).ok().as_deref() == Some(LICENSE.as_bytes())
 }
 
 /// Remove the installation folder when nothing else lives in it. A folder that
