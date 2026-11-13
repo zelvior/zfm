@@ -122,6 +122,11 @@ try {
     }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 2) { throw 'Multiple selection failed.' }
+    # Right-button press on an already-selected row preserves the group.
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x204, [UIntPtr]::Zero, [IntPtr](10 -shl 16 -bor 10), 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Right-button press did not return.' }
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 2) { throw 'Right-click did not preserve multiple selection.' }
     # A click below the rows clears the selection rather than retaining it.
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot select the fixture.' }
