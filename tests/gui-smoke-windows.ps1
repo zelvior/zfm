@@ -169,7 +169,12 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($preview -eq [IntPtr]::Zero) { throw 'Text preview did not appear.' }
-    $previewEdit = [ZfmSmoke]::GetDlgItem($preview, 1001)
+    $previewEdit = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $previewEdit = [ZfmSmoke]::GetDlgItem($preview, 1001)
+        if ($previewEdit -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
     if ($previewEdit -eq [IntPtr]::Zero -or (([ZfmSmoke]::GetWindowLongW($previewEdit, -16) -band 0x0800) -eq 0)) { throw 'Preview is not read-only.' }
     $previewText = New-Object System.Text.StringBuilder 256
     $result = [UIntPtr]::Zero
@@ -405,7 +410,12 @@ try {
             Start-Sleep -Milliseconds 100
         }
         if ($dialog -eq [IntPtr]::Zero) { throw "$title dialog did not appear." }
-        $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+        $edit = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+            if ($edit -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
         if ($edit -eq [IntPtr]::Zero -or [ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, $destination) -eq [IntPtr]::Zero) { throw "Could not set $title destination." }
         if (-not [ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)) { throw "Could not submit $title." }
     }

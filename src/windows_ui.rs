@@ -782,6 +782,7 @@ struct OperationMessage {
 struct ResultMessage {
     generation: u64,
     destination: Destination,
+    notice: Option<String>,
     result: std::io::Result<Option<Listing>>,
 }
 
@@ -2196,6 +2197,7 @@ unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice
     let target = hwnd as usize;
     let filter = app.filter.clone();
     let show_hidden = app.show_hidden;
+    let notice = if preserve_notice { app.notice.clone() } else { None };
     if !preserve_notice {
         set_status(hwnd, app, Some(format!("Loading {}…", path.display())));
     }
@@ -2208,6 +2210,7 @@ unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice
         let message = Box::new(ResultMessage {
             generation,
             destination,
+            notice,
             result,
         });
         let raw = Box::into_raw(message);
@@ -3147,7 +3150,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     app.entries = listing.entries;
                     populate_listbox(app, None);
                     rebuild_backdrop(hwnd, app);
-                    set_status(hwnd, app, skipped_note);
+                    let notice = match (message.notice, skipped_note) {
+                        (Some(notice), Some(skipped)) => Some(format!("{notice}  |  {skipped}")),
+                        (Some(notice), None) => Some(notice),
+                        (None, skipped) => skipped,
+                    };
+                    set_status(hwnd, app, notice);
                     InvalidateRect(hwnd, ptr::null(), 0);
                     InvalidateRect(app.extra_buttons[0], ptr::null(), 0);
                     InvalidateRect(app.extra_buttons[1], ptr::null(), 0);
