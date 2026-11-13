@@ -2250,7 +2250,7 @@ enum Operation {
     Move(PathBuf, PathBuf),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
-    Trash(PathBuf, usize),
+    Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -2281,8 +2281,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     .map(|p| format!("Renamed to {}", p.display())),
                 Operation::Delete(path) => zfm::operations::remove_one(&path)
                     .map(|_| format!("Deleted {}", path.display())),
-                Operation::Trash(path, owner) => zfm::trash::trash_with_owner(&path, owner)
-                    .map(|_| format!("Moved {} to Recycle Bin", path.display())),
+                Operation::Trash(paths, owner) => zfm::trash::trash_items(&paths, owner, &cancel)
+                    .map(|result| result.message(paths.len())),
                 Operation::Copy(path, dir, name) => {
                     zfm::operations::copy_item(&path, &dir, &name, &cancel, |_| {})
                         .map(|p| format!("Copied to {}", p.display()))
@@ -3548,9 +3548,13 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     }
                 }
                 TRASH if code == 0 => {
-                    if let Some(path) = selected_path(hwnd, app) {
-                        start_operation(hwnd, app, Operation::Trash(path, hwnd as usize));
+                    let selected = selected_indices(app);
+                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS {
+                        set_status(hwnd, app, Some("Select between 1 and 1024 items to move to the Recycle Bin.".into()));
+                        return 0;
                     }
+                    let paths = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+                    start_operation(hwnd, app, Operation::Trash(paths, hwnd as usize));
                 }
                 PROMPT_FILE | PROMPT_FOLDER if code == 0 => {
                     let dir = app.tabs.current().current().to_path_buf();

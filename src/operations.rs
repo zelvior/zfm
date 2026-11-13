@@ -630,6 +630,24 @@ pub fn copy_items(
     })
 }
 
+/// Validate an absolute, non-overlapping selection without touching the files.
+/// This is a lexical guard, not protection against aliases or path races.
+pub(crate) fn validate_batch_selection(paths: &[PathBuf]) -> io::Result<()> {
+    if paths.is_empty() || paths.len() > MAX_COPY_ITEMS {
+        return Err(invalid("Select between 1 and 1024 items"));
+    }
+    for (i, path) in paths.iter().enumerate() {
+        if !path.is_absolute() || path.file_name().is_none()
+            || path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(invalid("Selected paths must be absolute and must not contain parent components"));
+        }
+        if paths[..i].iter().any(|other| path_within(path, other) || path_within(other, path)) {
+            return Err(invalid("Selected paths must be distinct and must not contain one another"));
+        }
+    }
+    Ok(())
+}
+
 /// A same-filesystem batch move stops at the first error or cancellation.
 /// Earlier moves remain in place; there is no rollback or overwrite.
 #[derive(Debug)]
