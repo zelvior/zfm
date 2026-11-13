@@ -1,3 +1,4 @@
+<!-- Modified: document the new preview and package removal UI. -->
 # Linux build and compatibility notes
 
 The Linux frontend uses GTK 3's C ABI, dynamically loading `libgtk-3.so.0` and resolving the required symbols at startup. This allows core tests and builds without GTK development files, but a GTK 3 runtime and a usable display are required to run the GUI. Missing GTK or display produces a diagnostic and a nonzero exit. `xdg-open` is used to open files. There is no daemon.
@@ -17,3 +18,7 @@ For automated rustup installation and native/cross-builds, use `./scripts/build-
 ## Debian package
 
 The release workflow builds an architecture-specific `.deb` from its Ubuntu 18.04-based executable. The package provides an applications-menu entry, declares the runtime dependencies and is removable through the system package manager. Its install, launch and removal are tested inside the build container before publication. These packages have not yet run through the workflow or been tested on Mint 19 itself; v0.0.2 only contains portable downloads, which are no longer produced.
+
+## Preview and removal UI
+
+Right-click one file for the read-only built-in preview; see the README for supported extensions, size limits, decoding and security limitations. Other formats require an external application. Organize → Uninstall ZFM prompts before querying the Debian package database and running `/usr/bin/pkexec /usr/bin/dpkg --remove zfm`. PolicyKit authentication and dpkg dependency checks apply; no manual deletion is attempted for non-package installations. If authentication or removal fails, use the system package manager or `sudo apt remove zfm`. This UI has not yet been tested on Mint 19.

@@ -1,3 +1,4 @@
+// Modified: expose bounded built-in viewer input handling.
 //! Filesystem and navigation logic independent of the user interface.
 pub mod directory;
 pub mod navigation;
@@ -25,3 +26,5 @@ pub mod json_csv;
 
 #[cfg(test)]
 mod test_support;
+
+pub mod viewer;

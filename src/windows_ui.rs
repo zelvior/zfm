@@ -1,3 +1,4 @@
+// Modified: integrate the native read-only preview and settings dialog.
 // Modified: compact reference-inspired file-manager layout and visuals.
 //! Native Win32 dark-slate file manager interface.
 //!
@@ -21,6 +22,10 @@ use zfm::navigation::{Destination, Tabs};
 
 #[path = "windows_actions.rs"]
 mod windows_actions;
+#[path = "windows_viewer.rs"]
+mod windows_viewer;
+#[path = "windows_settings.rs"]
+mod windows_settings;
 use zfm::ui_theme::{
     self, ActionIcon, BoxRect, ItemIcon, Rgb, SortColumn, ViewMode, WindowMetrics,
 };
@@ -129,6 +134,8 @@ const PROMPT_RENAME: usize = 138;
 const PROMPT_FILE: usize = 139;
 const PROMPT_FOLDER: usize = 140;
 const CONVERT: usize = 141;
+const PREVIEW: usize = 142;
+const SETTINGS: usize = 143;
 
 #[repr(C)]
 struct WndClass {
@@ -2398,6 +2405,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         }
         let selected_items = selected_indices(app);
         if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
+            AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
@@ -2424,6 +2432,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             (PASTE, "Paste"),
             (REFRESH, "Refresh"),
             (HIDDEN, "Show / hide hidden files"),
+            (SETTINGS, "Settings…"),
         ] {
             AppendMenuW(menu, 0, id, text(title).as_ptr());
         }
@@ -3034,6 +3043,16 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     SetWindowTextW(app.filter_control, text("").as_ptr());
                     load(hwnd, app, Destination::Refresh, false);
                 }
+                SETTINGS if code == 0 => {
+                    if let Some((hidden, ascending)) = windows_settings::show(hwnd, app.theme, app.show_hidden, app.sort_ascending) {
+                        app.show_hidden = hidden;
+                        app.sort_ascending = ascending;
+                        InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
+                        rebuild_backdrop(hwnd, app);
+                        InvalidateRect(hwnd, ptr::null(), 0);
+                        load(hwnd, app, Destination::Refresh, false);
+                    }
+                }
                 HIDDEN if code == 0 => {
                     app.show_hidden = !app.show_hidden;
                     InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
@@ -3259,6 +3278,9 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 LIST if code == 1 => {
                     invalidate_status_bar(hwnd);
                 }
+                PREVIEW if code == 0 => {
+                    if let Some(path) = selected_path(hwnd, app) { windows_viewer::show(hwnd, app.theme, &path); }
+                }
                 LIST if code == 2 => {
                     let indices = selected_indices(app);
                     let entry = if indices.len() == 1 {
@@ -3469,6 +3491,7 @@ pub fn run() -> Result<(), String> {
                     0x2e if focus == (*app).list && !ctrl && !alt && !shift => Some(TRASH),
                     0x52 if ctrl && !alt => Some(REFRESH),
                     0x48 if ctrl && !alt => Some(HIDDEN),
+                    0xbc if ctrl && !alt => Some(SETTINGS),
                     0x08 if focus == (*app).list && !ctrl && !alt => Some(UP),
                     0x54 if ctrl && !alt => Some(NEW_TAB),
                     0x57 if ctrl && !alt => Some(CLOSE_TAB),

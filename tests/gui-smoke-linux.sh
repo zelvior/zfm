@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Modified: cover the compact layout and tab behavior.
+# Modified: cover the compact layout, tabs and settings dialog.
 # Run under xvfb-run with GTK and xdotool installed, using the released binary.
 set -euo pipefail
 if [ "$#" -ne 1 ]; then echo 'Usage: gui-smoke-linux.sh /path/to/zfm' >&2; exit 2; fi
@@ -27,6 +27,19 @@ if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&
 # Exercise the GTK event loop without requiring a window manager.
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
+# The session settings dialog opens and can be cancelled without changing the list.
+xdotool key --window "$window" ctrl+comma
+settings=''
+for _ in $(seq 1 100); do
+    settings=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Settings$' 2>/dev/null | head -n 1 || true)
+    [ -z "$settings" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening settings:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+if [ -z "$settings" ]; then echo 'Settings dialog did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
+xdotool windowfocus --sync "$settings"
+xdotool key --window "$settings" Escape
+xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
 for _ in $(seq 1 7); do xdotool key --window "$window" ctrl+t; done
