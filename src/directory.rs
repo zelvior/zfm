@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
     pub name: String,

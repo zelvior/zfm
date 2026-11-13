@@ -1049,8 +1049,13 @@ unsafe extern "C" fn show_settings(_: P, data: P) {
     } else { None };
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     if let Some((hidden, ascending)) = values {
-        let saved = zfm::settings::Settings { show_hidden: hidden != 0, sort_ascending: ascending };
-        if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, saved)) {
+        let result = zfm::settings::user_path().and_then(|path| {
+            let mut saved = zfm::settings::load(&path)?;
+            saved.show_hidden = hidden != 0;
+            saved.sort_ascending = ascending;
+            zfm::settings::save(&path, saved)
+        });
+        if let Err(error) = result {
             set_status(&*(data as *mut App), &format!("Settings not saved: {error}"));
             return;
         }

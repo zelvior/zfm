@@ -15,7 +15,8 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zfm::directory::{self, Entry, Listing};
 use zfm::navigation::{Destination, Tabs};
@@ -26,6 +27,8 @@ mod windows_actions;
 mod windows_viewer;
 #[path = "windows_settings.rs"]
 mod windows_settings;
+#[path = "windows_drives.rs"]
+mod windows_drives;
 #[path = "windows_archive.rs"]
 mod windows_archive;
 use zfm::ui_theme::{
@@ -50,6 +53,10 @@ const WM_SETFONT: u32 = 0x0030;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_SYSKEYDOWN: u32 = 0x0104;
 const WM_COMMAND: u32 = 0x0111;
+const WM_TIMER: u32 = 0x0113;
+const WM_DEVICECHANGE: u32 = 0x0219;
+const WM_MOUSEWHEEL: u32 = 0x020a;
+const SCAN_TIMER: usize = 91;
 const WM_CTLCOLOREDIT: u32 = 0x0133;
 const WM_CTLCOLORLISTBOX: u32 = 0x0134;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
@@ -89,6 +96,7 @@ const LB_SETCARETINDEX: u32 = 0x019e;
 const LB_SETITEMHEIGHT: u32 = 0x01a0;
 const LB_GETITEMHEIGHT: u32 = 0x01a1;
 const LB_GETTOPINDEX: u32 = 0x018e;
+const LB_SETTOPINDEX: u32 = 0x0197;
 
 const BS_OWNERDRAW: u32 = 0x000b;
 const ODT_LISTBOX: u32 = 2;
@@ -282,6 +290,8 @@ extern "system" {
     fn DispatchMessageW(msg: *const Msg) -> LResult;
     fn PostQuitMessage(code: i32);
     fn PostMessageW(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> i32;
+    fn SetTimer(hwnd: H, id: usize, milliseconds: u32, callback: P) -> usize;
+    fn KillTimer(hwnd: H, id: usize) -> i32;
     fn LoadCursorW(instance: H, name: *const u16) -> H;
     fn SetCursor(cursor: H) -> H;
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
@@ -364,7 +374,6 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> H;
     fn LoadLibraryW(name: *const u16) -> H;
     fn GetProcAddress(module: H, name: *const u8) -> P;
-    fn GetLogicalDrives() -> u32;
     fn FileTimeToLocalFileTime(utc: *const u64, local: *mut u64) -> i32;
     fn GlobalAlloc(flags: u32, bytes: usize) -> H;
     fn GlobalLock(memory: H) -> P;
@@ -723,6 +732,13 @@ struct App {
     filter: String,
     show_hidden: bool,
     drives_expanded: bool,
+    preferences: zfm::settings::Settings,
+    drives: windows_drives::Drives,
+    sidebar_scroll: usize,
+    folder_scan: Option<Receiver<FolderScan>>,
+    next_folder_scan: Instant,
+    listing_pending: bool,
+    refresh_error: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
     view_mode: ViewMode,
@@ -758,7 +774,13 @@ struct ResultMessage {
     result: std::io::Result<Option<Listing>>,
 }
 
-fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
+struct FolderScan {
+    generation: u64,
+    path: PathBuf,
+    result: std::io::Result<Option<Listing>>,
+}
+
+fn build_sidebar_items(drives_expanded: bool, drives: &windows_drives::Drives, labels: bool) -> Vec<SidebarEntry> {
     let mut items = Vec::new();
     let profile = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -797,19 +819,9 @@ fn build_sidebar_items(drives_expanded: bool) -> Vec<SidebarEntry> {
         is_drives_header: true,
     });
     if drives_expanded {
-        let mask = unsafe { GetLogicalDrives() };
-        for bit in 0..26u32 {
-            if (mask & (1 << bit)) != 0 {
-                let letter = (b'A' + bit as u8) as char;
-                let root = format!("{letter}:\\");
-                items.push(SidebarEntry {
-                    label: root.clone(),
-                    icon: ItemIcon::DriveDisk,
-                    indent: 1,
-                    target: Some(PathBuf::from(root)),
-                    is_drives_header: false,
-                });
-            }
+        for (label, root) in drives.entries(labels) {
+            items.push(SidebarEntry { label, icon: ItemIcon::DriveDisk, indent: 1,
+                target: Some(PathBuf::from(root)), is_drives_header: false });
         }
     }
     items
@@ -913,8 +925,8 @@ fn hit_test_custom(app: &App, metrics: &WindowMetrics, x: i32, y: i32) -> HotZon
         }
     }
     if metrics.sidebar.contains(x, y) {
-        for idx in 0..app.sidebar_items.len() {
-            if let Some(rect) = sidebar_row_rect(metrics, idx) {
+        for idx in app.sidebar_scroll..app.sidebar_items.len() {
+            if let Some(rect) = sidebar_row_rect(metrics, idx - app.sidebar_scroll) {
                 let item = &app.sidebar_items[idx];
                 if rect.contains(x, y) && (item.target.is_some() || item.is_drives_header) {
                     return HotZone::Sidebar(idx);
@@ -1159,8 +1171,8 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
     );
 
     let current_dir = app.tabs.current().current();
-    for (idx, item) in app.sidebar_items.iter().enumerate() {
-        let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+    for (idx, item) in app.sidebar_items.iter().enumerate().skip(app.sidebar_scroll) {
+        let Some(row_rect) = sidebar_row_rect(&m, idx - app.sidebar_scroll) else {
             break;
         };
         let is_current = item.target.as_deref().map_or(false, |t| t == current_dir);
@@ -1415,8 +1427,8 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
         );
 
         // Sidebar labels
-        for (idx, item) in app.sidebar_items.iter().enumerate() {
-            let Some(row_rect) = sidebar_row_rect(&m, idx) else {
+        for (idx, item) in app.sidebar_items.iter().enumerate().skip(app.sidebar_scroll) {
+            let Some(row_rect) = sidebar_row_rect(&m, idx - app.sidebar_scroll) else {
                 break;
             };
             let base_x = row_rect.x + 10 + item.indent * 16 + 34;
@@ -2065,12 +2077,86 @@ unsafe fn layout(hwnd: H, app: &mut App) {
     }
 }
 
+// The sidebar is owner-drawn; scroll by rows so every detected drive remains
+// accessible on short windows or systems with many mapped drives.
+unsafe fn clamp_sidebar_scroll(hwnd: H, app: &mut App) {
+    let mut rect: Rect = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rect);
+    let metrics = WindowMetrics::new(rect.right, rect.bottom);
+    let rows = ((metrics.sidebar.height - 5).max(0) / 22) as usize;
+    app.sidebar_scroll = app.sidebar_scroll.min(app.sidebar_items.len().saturating_sub(rows.max(1)));
+}
+
+unsafe fn poll_drives(hwnd: H, app: &mut App) {
+    if app.drives.poll(app.preferences.windows_drive_labels) {
+        app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, app.preferences.windows_drive_labels);
+        clamp_sidebar_scroll(hwnd, app);
+        app.hot_zone = HotZone::None;
+        rebuild_backdrop(hwnd, app);
+        InvalidateRect(hwnd, ptr::null(), 0);
+    }
+}
+
+// A single background poller, separate from navigation, avoids blocking the UI
+// on slow filesystems. Generation/path checks discard results for old folders.
+unsafe fn poll_folder(hwnd: H, app: &mut App) {
+    let received = match app.folder_scan.as_ref().map(|rx| rx.try_recv()) {
+        Some(Ok(message)) => { app.folder_scan = None; Some(message) }
+        Some(Err(TryRecvError::Disconnected)) => { app.folder_scan = None; None }
+        _ => None,
+    };
+    if let Some(message) = received {
+        if app.preferences.windows_live_refresh && !app.listing_pending && !app.operation_busy
+            && app.token.load(Ordering::Relaxed) == message.generation
+            && app.tabs.current().current() == message.path {
+            if let Ok(Some(mut listing)) = message.result {
+                if app.refresh_error { app.refresh_error = false; set_status(hwnd, app, None); }
+                ui_theme::sort_entries(&mut listing.entries, app.sort_column, app.sort_ascending);
+                if app.entries != listing.entries {
+                    let selected: std::collections::HashSet<PathBuf> = selected_indices(app).into_iter()
+                        .map(|i| app.entries[i].path.clone()).collect();
+                    let top = SendMessageW(app.list, LB_GETTOPINDEX, 0, 0).max(0) as usize;
+                    app.entries = listing.entries;
+                    populate_listbox(app, None);
+                    for (i, entry) in app.entries.iter().enumerate() {
+                        if selected.contains(&entry.path) { SendMessageW(app.list, LB_SETSEL, 1, i as isize); }
+                    }
+                    if !app.entries.is_empty() { SendMessageW(app.list, LB_SETTOPINDEX, top.min(app.entries.len() - 1), 0); }
+                    set_status(hwnd, app, if listing.skipped > 0 { Some(format!("{} entries skipped during refresh", listing.skipped)) } else { None });
+                    InvalidateRect(app.list, ptr::null(), 0);
+                    InvalidateRect(hwnd, ptr::null(), 0);
+                }
+            } else if let Err(error) = message.result {
+                if !app.refresh_error {
+                    app.refresh_error = true;
+                    set_status(hwnd, app, Some(format!("Automatic folder refresh failed: {error}")));
+                }
+            }
+        }
+    }
+    if !app.preferences.windows_live_refresh || app.listing_pending || app.operation_busy
+        || app.folder_scan.is_some() || Instant::now() < app.next_folder_scan { return; }
+    app.next_folder_scan = Instant::now() + Duration::from_secs(3);
+    let path = app.tabs.current().current().to_path_buf();
+    let token = app.token.clone();
+    let generation = token.load(Ordering::Relaxed);
+    let filter = app.filter.clone();
+    let show_hidden = app.show_hidden;
+    let (sender, receiver) = mpsc::channel();
+    app.folder_scan = Some(receiver);
+    thread::spawn(move || {
+        let result = directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
+        let _ = sender.send(FolderScan { generation, path, result });
+    });
+}
+
 unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice: bool) {
     let path = match app.tabs.current().resolve(&destination) {
         Some(path) => path,
         None => return,
     };
     let generation = app.token.fetch_add(1, Ordering::Relaxed) + 1;
+    app.listing_pending = true;
     let token = app.token.clone();
     let target = hwnd as usize;
     let filter = app.filter.clone();
@@ -2218,7 +2304,8 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
             if let Some(item) = app.sidebar_items.get(idx).cloned() {
                 if item.is_drives_header {
                     app.drives_expanded = !app.drives_expanded;
-                    app.sidebar_items = build_sidebar_items(app.drives_expanded);
+                    app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, app.preferences.windows_drive_labels);
+                    clamp_sidebar_scroll(hwnd, app);
                     rebuild_backdrop(hwnd, app);
                     InvalidateRect(hwnd, ptr::null(), 0);
                 } else if let Some(target) = item.target {
@@ -2723,7 +2810,8 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         app.extra_buttons = extra_buttons;
         SetWindowSubclass(list, Some(list_proc), 1, hwnd as usize);
 
-        SendMessageW(list, LB_SETITEMHEIGHT, 0, 22);
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, if app.view_mode == ViewMode::Compact { 38 } else { 22 });
+        let timer_started = SetTimer(hwnd, SCAN_TIMER, 1000, ptr::null_mut()) != 0;
         SendMessageW(
             filter_control,
             EM_SETCUEBANNER,
@@ -2743,6 +2831,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         SetWindowTextW(address, path.as_ptr());
         layout(hwnd, app);
         load(hwnd, app, Destination::Refresh, false);
+        if !timer_started { set_status(hwnd, app, Some("Automatic refresh could not start; use Reload.".into())); }
         return 0;
     }
 
@@ -2765,8 +2854,36 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0
         }
         WM_SIZE => {
+            clamp_sidebar_scroll(hwnd, app);
             layout(hwnd, app);
             0
+        }
+        WM_TIMER if wp == SCAN_TIMER => {
+            poll_drives(hwnd, app);
+            poll_folder(hwnd, app);
+            0
+        }
+        WM_DEVICECHANGE => {
+            poll_drives(hwnd, app);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_MOUSEWHEEL => {
+            let mut point = Point { x: (lp as i16) as i32, y: ((lp >> 16) as i16) as i32 };
+            ScreenToClient(hwnd, &mut point);
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            let metrics = WindowMetrics::new(rect.right, rect.bottom);
+            if metrics.sidebar.contains(point.x, point.y) {
+                let delta = ((wp >> 16) as u16) as i16;
+                if delta > 0 { app.sidebar_scroll = app.sidebar_scroll.saturating_sub(3); }
+                else if delta < 0 { app.sidebar_scroll = app.sidebar_scroll.saturating_add(3); }
+                clamp_sidebar_scroll(hwnd, app);
+                app.hot_zone = HotZone::None;
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_SETCURSOR => {
             let target = wp as H;
@@ -2930,6 +3047,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             if app.token.load(Ordering::Relaxed) != message.generation {
                 return 0;
             }
+            app.listing_pending = false;
             match message.result {
                 Ok(Some(mut listing)) => {
                     app.tabs.current_mut().commit(message.destination);
@@ -3005,7 +3123,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             match id {
                 BACK if code == 0 => load(hwnd, app, Destination::Back, false),
                 FORWARD if code == 0 => load(hwnd, app, Destination::Forward, false),
-                REFRESH if code == 0 => load(hwnd, app, Destination::Refresh, false),
+                REFRESH if code == 0 => {
+                    poll_drives(hwnd, app);
+                    load(hwnd, app, Destination::Refresh, false);
+                }
                 UP if code == 0 => {
                     let parent = app
                         .tabs
@@ -3058,14 +3179,23 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     load(hwnd, app, Destination::Refresh, false);
                 }
                 SETTINGS if code == 0 => {
-                    if let Some((hidden, ascending)) = windows_settings::show(hwnd, app.theme, app.show_hidden, app.sort_ascending) {
-                        let settings = zfm::settings::Settings { show_hidden: hidden, sort_ascending: ascending };
+                    let mut current = app.preferences;
+                    current.show_hidden = app.show_hidden;
+                    current.sort_ascending = app.sort_ascending;
+                    if let Some(settings) = windows_settings::show(hwnd, app.theme, current) {
                         if let Err(error) = zfm::settings::user_path().and_then(|path| zfm::settings::save(&path, settings)) {
                             show_error(hwnd, &format!("Settings were not saved or applied: {error}"));
                             return 0;
                         }
-                        app.show_hidden = hidden;
-                        app.sort_ascending = ascending;
+                        app.preferences = settings;
+                        app.show_hidden = settings.show_hidden;
+                        app.sort_ascending = settings.sort_ascending;
+                        app.drives_expanded = settings.windows_expand_drives;
+                        app.view_mode = if settings.windows_compact_view { ViewMode::Compact } else { ViewMode::Details };
+                        SendMessageW(app.list, LB_SETITEMHEIGHT, 0, if settings.windows_compact_view { 38 } else { 22 });
+                        app.drives.poll(settings.windows_drive_labels);
+                        app.sidebar_items = build_sidebar_items(app.drives_expanded, &app.drives, settings.windows_drive_labels);
+                        clamp_sidebar_scroll(hwnd, app);
                         InvalidateRect(app.extra_buttons[4], ptr::null(), 0);
                         rebuild_backdrop(hwnd, app);
                         InvalidateRect(hwnd, ptr::null(), 0);
@@ -3380,6 +3510,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             theme.list_brush as LResult
         }
         WM_DESTROY => {
+            KillTimer(hwnd, SCAN_TIMER);
             app.token.fetch_add(1, Ordering::Relaxed);
             set_data(hwnd, 0);
             PostQuitMessage(0);
@@ -3435,10 +3566,17 @@ pub fn run() -> Result<(), String> {
             tabs: Tabs::new(initial),
             filter: String::new(),
             show_hidden: saved_settings.show_hidden,
-            drives_expanded: true,
+            drives_expanded: saved_settings.windows_expand_drives,
+            preferences: saved_settings,
+            drives: windows_drives::Drives::new(),
+            sidebar_scroll: 0,
+            folder_scan: None,
+            next_folder_scan: Instant::now() + Duration::from_secs(3),
+            listing_pending: false,
+            refresh_error: false,
             sort_column: SortColumn::Name,
             sort_ascending: saved_settings.sort_ascending,
-            view_mode: ViewMode::Details,
+            view_mode: if saved_settings.windows_compact_view { ViewMode::Compact } else { ViewMode::Details },
             focused_edit: 0,
             hovered_child: ptr::null_mut(),
             hovered_row: None,
@@ -3454,13 +3592,15 @@ pub fn run() -> Result<(), String> {
             status: ptr::null_mut(),
             nav_buttons: [ptr::null_mut(); 6],
             extra_buttons: [ptr::null_mut(); 9],
-            sidebar_items: build_sidebar_items(true),
+            sidebar_items: Vec::new(),
             entries: Vec::new(),
             backdrop_w: 0,
             backdrop_h: 0,
             backdrop: Vec::new(),
         }));
 
+        (*app).drives.poll(saved_settings.windows_drive_labels);
+        (*app).sidebar_items = build_sidebar_items((*app).drives_expanded, &(*app).drives, saved_settings.windows_drive_labels);
         let window = CreateWindowExW(
             0,
             class.as_ptr(),

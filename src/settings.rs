@@ -11,9 +11,16 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub struct Settings {
     pub show_hidden: bool,
     pub sort_ascending: bool,
+    /// Windows-specific preferences; older version 1 files use these defaults.
+    pub windows_live_refresh: bool,
+    pub windows_drive_labels: bool,
+    pub windows_compact_view: bool,
+    pub windows_expand_drives: bool,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { show_hidden: false, sort_ascending: true } }
+    fn default() -> Self { Self { show_hidden: false, sort_ascending: true,
+        windows_live_refresh: true, windows_drive_labels: true,
+        windows_compact_view: false, windows_expand_drives: true } }
 }
 
 /// The user's configuration directory, never the installation directory.
@@ -36,12 +43,20 @@ fn parse(text: &str) -> io::Result<Settings> {
     let mut version = None;
     let mut hidden = None;
     let mut ascending = None;
+    let mut live_refresh = None;
+    let mut drive_labels = None;
+    let mut compact_view = None;
+    let mut expand_drives = None;
     for line in text.lines() {
         let (key, value) = line.split_once('=').ok_or_else(|| invalid("Malformed settings"))?;
         let slot = match key {
             "version" if version.is_none() => { version = Some(value); continue; }
             "show_hidden" => &mut hidden,
             "sort_ascending" => &mut ascending,
+            "windows_live_refresh" => &mut live_refresh,
+            "windows_drive_labels" => &mut drive_labels,
+            "windows_compact_view" => &mut compact_view,
+            "windows_expand_drives" => &mut expand_drives,
             _ => return Err(invalid("Unknown or duplicate settings key")),
         };
         if slot.is_some() { return Err(invalid("Duplicate settings key")); }
@@ -51,6 +66,10 @@ fn parse(text: &str) -> io::Result<Settings> {
     Ok(Settings {
         show_hidden: hidden.ok_or_else(|| invalid("Missing settings key"))?,
         sort_ascending: ascending.ok_or_else(|| invalid("Missing settings key"))?,
+        windows_live_refresh: live_refresh.unwrap_or(true),
+        windows_drive_labels: drive_labels.unwrap_or(true),
+        windows_compact_view: compact_view.unwrap_or(false),
+        windows_expand_drives: expand_drives.unwrap_or(true),
     })
 }
 
@@ -136,7 +155,10 @@ pub fn save(path: &Path, settings: Settings) -> io::Result<()> {
         if !check_directory(dir)? { return Err(invalid("Settings directory is missing")); }
     }
     let _ = load(path)?;
-    let text = format!("version=1\nshow_hidden={}\nsort_ascending={}\n", settings.show_hidden, settings.sort_ascending);
+    let text = format!(concat!("version=1\nshow_hidden={}\nsort_ascending={}\n",
+        "windows_live_refresh={}\nwindows_drive_labels={}\nwindows_compact_view={}\nwindows_expand_drives={}\n"),
+        settings.show_hidden, settings.sort_ascending, settings.windows_live_refresh,
+        settings.windows_drive_labels, settings.windows_compact_view, settings.windows_expand_drives);
     for _ in 0..100 {
         let temp = dir.join(format!(".settings-{}-{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
         let mut options = OpenOptions::new();
@@ -172,12 +194,20 @@ mod tests {
         let path = dir.join("config").join("zfm").join("settings.conf");
         assert_eq!(load(&path).unwrap(), Settings::default());
         assert!(!path.parent().unwrap().exists());
-        let selected = Settings { show_hidden: true, sort_ascending: false };
+        let selected = Settings { show_hidden: true, sort_ascending: false, windows_live_refresh: false,
+            windows_drive_labels: false, windows_compact_view: true, windows_expand_drives: false };
         save(&path, selected).unwrap();
         assert_eq!(load(&path).unwrap(), selected);
         save(&path, Settings::default()).unwrap();
         assert_eq!(load(&path).unwrap(), Settings::default());
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn older_files_receive_new_defaults_and_duplicates_are_rejected() {
+        let old = parse("version=1\nshow_hidden=true\nsort_ascending=false\n").unwrap();
+        assert!(old.show_hidden && !old.sort_ascending && old.windows_live_refresh && old.windows_drive_labels && old.windows_expand_drives);
+        assert!(!old.windows_compact_view);
+        assert!(parse("version=1\nshow_hidden=true\nsort_ascending=true\nwindows_live_refresh=true\nwindows_live_refresh=false\n").is_err());
     }
     #[test]
     fn rejects_bad_files_without_overwriting() {

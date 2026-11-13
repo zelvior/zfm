@@ -81,4 +81,10 @@ Right-click one file and choose Preview in ZFM. See the README for formats, size
 
 ## Settings storage
 
-Apply in the Settings window stores hidden-file visibility and sort direction in `%APPDATA%\zfm\settings.conf`; changes through other controls are session-only until applied in Settings. Uninstall preserves this user file. A malformed or unrecognized settings file is not overwritten; correct or remove it manually to save new settings. Concurrent instances may overwrite each other, and parent paths are not protected against hostile concurrent changes.
+Apply in the Settings window stores hidden-file visibility, sort direction, automatic folder refresh, volume-name display, startup compact view and the startup Computer expansion state in `%APPDATA%\zfm\settings.conf`; changes through other controls are session-only until applied in Settings. Uninstall preserves this user file. A malformed or unrecognized settings file is not overwritten; correct or remove it manually to save new settings. Concurrent instances may overwrite each other, and parent paths are not protected against hostile concurrent changes.
+
+## Drive and folder updates
+
+The Computer sidebar enumerates Windows logical drive letters, rather than a fixed set. It checks for drive changes approximately once per second and on device notifications. Mapped, virtual, optical and removable drives reported by Windows can appear even when media is missing or a mapping is disconnected. Scroll the sidebar to see drives below the visible area. Volume labels are queried in background workers and refreshed approximately every 30 seconds; failures or empty labels fall back to the letter. Querying mapped network drives may contact the remote system.
+
+The current folder is polled in the background roughly every three seconds by default. It can be disabled in Settings; Reload still works. Selection and scroll position are preserved where possible. A slow or blocked filesystem can delay background updates, and a blocked poll may prevent later automatic folder scans until it returns. These updates are not guaranteed to be instantaneous. The new behavior should be verified on the target Windows system, including its removable and mapped drives.
