@@ -10,6 +10,7 @@ pub mod image_convert;
 pub mod operations;
 
 pub mod archive;
+pub mod archive_actions;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod archive_engine;
 

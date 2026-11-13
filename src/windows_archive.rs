@@ -102,15 +102,16 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         };
         state.list = make("LISTBOX", "", WS_TABSTOP | WS_VSCROLL | 0x0010_0000 | LBS_HASSTRINGS, 1001);
         state.status = make("STATIC", "Reading archive…", 0, 1002);
-        state.test = make("BUTTON", "Test archive", WS_TABSTOP, 1003);
-        state.extract = make("BUTTON", "Extract one file…", WS_TABSTOP, 1004);
-        state.extract_all = make("BUTTON", "Extract all…", WS_TABSTOP, 1005);
-        state.password_button = make("BUTTON", "Password…", WS_TABSTOP, 1006);
-        state.close = make("BUTTON", "Close", WS_TABSTOP | 1, 2);
+        state.test = make("BUTTON", "Test archive", WS_TABSTOP | BS_OWNERDRAW, 1003);
+        state.extract = make("BUTTON", "Extract one file…", WS_TABSTOP | BS_OWNERDRAW, 1004);
+        state.extract_all = make("BUTTON", "Extract all…", WS_TABSTOP | BS_OWNERDRAW, 1005);
+        state.password_button = make("BUTTON", "Password…", WS_TABSTOP | BS_OWNERDRAW, 1006);
+        state.close = make("BUTTON", "Close", WS_TABSTOP | BS_OWNERDRAW, 2);
         for control in [state.list, state.status, state.test, state.extract, state.extract_all, state.password_button, state.close] {
             if control.is_null() { EndDialog(hwnd, -1); return 1; }
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
         }
+        SendMessageW(hwnd, 0x0401, 2, 0); // DM_SETDEFID: Close
         layout(hwnd, state);
         EnableWindow(state.test, 0);
         EnableWindow(state.extract, 0);
@@ -126,6 +127,12 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
     if state.is_null() { return 0; }
     let state = &mut *state;
     match message {
+        WM_GETMINMAXINFO if lp != 0 => {
+            let limits = &mut *(lp as *mut MinMaxInfo);
+            limits.min_track_size.x = 520;
+            limits.min_track_size.y = 320;
+            1
+        }
         WM_SIZE => { layout(hwnd, state); 1 }
         WM_TIMER if wp == 1 => {
             let result = match state.receiver.as_ref() { Some(receiver) => receiver.try_recv(), None => return 1 };
@@ -237,7 +244,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
                 None => return 1,
             };
             let question = format!("Extract all supported entries into {}?\n\nExisting files are not overwritten. Earlier files remain after an error or cancellation. Only use directories that untrusted users cannot modify.", destination.display());
-            if MessageBoxW(hwnd, text(&question).as_ptr(), text("Extract archive").as_ptr(), 0x31) != 1 { return 1; }
+            if !windows_actions::confirm(hwnd, state.theme, "Extract archive", &question) { return 1; }
             let archive = state.path.clone();
             let cancel = state.cancel.clone();
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -290,6 +297,8 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         }
         WM_COMMAND if wp & 0xffff == 2 => { KillTimer(hwnd, 1); EndDialog(hwnd, 0); 1 }
         WM_CLOSE => { KillTimer(hwnd, 1); EndDialog(hwnd, 0); 1 }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button(state.theme, &*(lp as *const DrawItem)),
+        0x0136 => (*state.theme).window_brush as isize,
         WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
             SetBkColor(wp as H, ui_theme::HEADER_TOP.colorref());

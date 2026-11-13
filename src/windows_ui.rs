@@ -149,6 +149,12 @@ const SETTINGS: usize = 143;
 const ARCHIVE: usize = 144;
 const ARCHIVE_CREATE: usize = 145;
 const ARCHIVE_CREATE_ENCRYPTED: usize = 146;
+const ARCHIVE_FORMAT_BASE: usize = 150; // 150..158 follow Format::ALL
+const ARCHIVE_ENCRYPTED_7Z: usize = 159;
+const ARCHIVE_ENCRYPTED_ZIP: usize = 160;
+const ARCHIVE_EXTRACT_HERE: usize = 161;
+const ARCHIVE_EXTRACT_TO: usize = 162;
+const ARCHIVE_EXTRACT_PASSWORD: usize = 163;
 
 #[repr(C)]
 struct WndClass {
@@ -1502,6 +1508,30 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
     EndPaint(hwnd, &ps);
 }
 
+/// The same palette and rounded treatment as the main toolbar, reused by
+/// native dialogs while retaining Win32 button focus and keyboard behavior.
+unsafe fn draw_dialog_button(theme: *const Theme, item: &DrawItem) -> LResult {
+    let w = item.rect.right - item.rect.left;
+    let h = item.rect.bottom - item.rect.top;
+    if w <= 0 || h <= 0 || w > 4096 || h > 1024 { return 1; }
+    let pressed = item.item_state & 1 != 0;
+    let disabled = item.item_state & 4 != 0;
+    let focused = item.item_state & 0x10 != 0;
+    let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
+    let (top, bottom) = if disabled { (Rgb(38, 42, 48), Rgb(34, 38, 44)) }
+        else if pressed { (ui_theme::BTN_PRESS_TOP, ui_theme::BTN_PRESS_BOTTOM) }
+        else { (ui_theme::BTN_TOP, ui_theme::BTN_BOTTOM) };
+    ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(0, 0, w, h), 6.0,
+        top, bottom, Some(if focused { ui_theme::BORDER_FOCUS } else { ui_theme::BORDER_STRONG }));
+    let caption = control_value(item.hwnd).to_string_lossy().into_owned();
+    blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |dc| {
+        draw_text_in(dc, (*theme).font, if disabled { ui_theme::TEXT_DIM } else { ui_theme::TEXT_PRIMARY },
+            BoxRect::new(4, 0, (w - 8).max(1), h), &caption,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    });
+    1
+}
+
 unsafe fn draw_button(parent: H, app: &App, item: &mut DrawItem) -> LResult {
     let w = (item.rect.right - item.rect.left).max(1);
     let h = (item.rect.bottom - item.rect.top).max(1);
@@ -2196,6 +2226,7 @@ enum Operation {
     Trash(PathBuf, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
+    ArchiveExtract(PathBuf, PathBuf, Option<String>),
 }
 
 unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
@@ -2234,6 +2265,9 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::ArchiveCreate(inputs, output, password) =>
                     zfm::archive_engine::create_items_password(&inputs, &output, &AtomicBool::new(false), password.as_deref())
                         .map(|_| format!("Created {}", output.display())),
+                Operation::ArchiveExtract(archive, destination, password) =>
+                    zfm::archive_engine::extract_all_password(&archive, &destination, &AtomicBool::new(false), password.as_deref())
+                        .map(|count| format!("Extracted {count} files to {}", destination.display())),
                 Operation::Convert(input, output, mode) => {
                     let cancel = AtomicBool::new(false);
                     let result = match mode {
@@ -2264,6 +2298,11 @@ pub fn show_startup_error(message: &str) {
 }
 
 unsafe fn show_error(hwnd: H, message: &str) {
+    // If resource creation or the custom dialog itself fails (including during
+    // startup), retain a native alert as a last-resort error path.
+    if let Ok(theme) = Theme::new() {
+        if windows_actions::question(hwnd, &theme, "ZFM", message, "OK", false).is_some() { return; }
+    }
     MessageBoxW(hwnd, text(message).as_ptr(), text("ZFM").as_ptr(), 0x10);
 }
 
@@ -2505,13 +2544,31 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
+            if zfm::archive_actions::can_extract(&app.entries[selected_items[0]].path) {
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_HERE, text("Extract here…").as_ptr());
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_TO, text("Extract to folder…").as_ptr());
+                AppendMenuW(menu, 0, ARCHIVE_EXTRACT_PASSWORD, text("Extract with password…").as_ptr());
+            }
             if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                 AppendMenuW(menu, 0, CONVERT, text("Convert file (built-in)…").as_ptr());
             }
         }
         if !selected_items.is_empty() && selected_items.len() <= 1024 && selected_items.iter().all(|i| app.entries[*i].is_file || app.entries[*i].is_dir) {
-            AppendMenuW(menu, 0, ARCHIVE_CREATE, text("Create archive from selection…").as_ptr());
-            AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive from selection…").as_ptr());
+            let submenu = CreatePopupMenu();
+            if !submenu.is_null() {
+                for (index, format) in zfm::archive_actions::Format::ALL.iter().enumerate() {
+                    // Single-stream codecs cannot represent folders or multiple files.
+                    if format.single_file() && (selected_items.len() != 1 || !app.entries[selected_items[0]].is_file) { continue; }
+                    AppendMenuW(submenu, 0, ARCHIVE_FORMAT_BASE + index, text(&format!("{}…", format.suffix())).as_ptr());
+                }
+                AppendMenuW(submenu, 0x800, 0, ptr::null());
+                AppendMenuW(submenu, 0, ARCHIVE_ENCRYPTED_7Z, text("Encrypted .7z…").as_ptr());
+                AppendMenuW(submenu, 0, ARCHIVE_ENCRYPTED_ZIP, text("Encrypted .zip…").as_ptr());
+                AppendMenuW(submenu, 0x800, 0, ptr::null());
+                AppendMenuW(submenu, 0, ARCHIVE_CREATE, text("Custom filename…").as_ptr());
+                AppendMenuW(menu, 0x10, submenu as usize, text("Compress to").as_ptr());
+            }
+            AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive…").as_ptr());
         }
         AppendMenuW(menu, 0x800, 0, ptr::null());
         for (id, title) in [
@@ -3420,13 +3477,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             "Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.",
                             path.display()
                         );
-                        if MessageBoxW(
-                            hwnd,
-                            text(&message).as_ptr(),
-                            text("Confirm permanent deletion").as_ptr(),
-                            0x134,
-                        ) == 6
-                        {
+                        if windows_actions::question(hwnd, app.theme, "Confirm permanent deletion", &message, "Delete", true) == Some(true) {
                             start_operation(hwnd, app, Operation::Delete(path));
                         }
                     } else {
@@ -3436,19 +3487,32 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 LIST if code == 1 => {
                     invalidate_status_bar(hwnd);
                 }
-                ARCHIVE_CREATE | ARCHIVE_CREATE_ENCRYPTED if code == 0 => {
+                ARCHIVE_CREATE | ARCHIVE_CREATE_ENCRYPTED | ARCHIVE_FORMAT_BASE..=ARCHIVE_ENCRYPTED_ZIP if code == 0 => {
+                    let chosen = if (ARCHIVE_FORMAT_BASE..ARCHIVE_FORMAT_BASE + zfm::archive_actions::Format::ALL.len()).contains(&id) {
+                        Some(zfm::archive_actions::Format::ALL[id - ARCHIVE_FORMAT_BASE])
+                    } else if id == ARCHIVE_ENCRYPTED_7Z { Some(zfm::archive_actions::Format::SevenZip) }
+                    else if id == ARCHIVE_ENCRYPTED_ZIP { Some(zfm::archive_actions::Format::Zip) }
+                    else { None };
+                    let encrypted = matches!(id, ARCHIVE_CREATE_ENCRYPTED | ARCHIVE_ENCRYPTED_7Z | ARCHIVE_ENCRYPTED_ZIP);
                     let selected = selected_indices(app);
                     if selected.is_empty() || selected.len() > 1024 { set_status(hwnd, app, Some("Select between 1 and 1024 items.".into())); return 0; }
+                    if selected.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
+                        set_status(hwnd, app, Some("Select regular files or folders only.".into())); return 0;
+                    }
+                    if chosen.map_or(false, |f| f.single_file()) && (selected.len() != 1 || !app.entries[selected[0]].is_file) {
+                        set_status(hwnd, app, Some("This compression format requires one regular file.".into())); return 0;
+                    }
                     let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
-                    let proposed = if paths.len() == 1 { format!("{}.7z", paths[0].file_name().unwrap_or_default().to_string_lossy()) } else { "Archive.7z".to_string() };
+                    let suffix = chosen.map_or(".7z", |format| format.suffix());
+                    let proposed = if paths.len() == 1 { format!("{}{suffix}", paths[0].file_name().unwrap_or_default().to_string_lossy()) } else { format!("Archive{suffix}") };
                     if let Some(name) = windows_actions::prompt(hwnd, app.theme, "Create .7z, .zip, .tar, compressed TAR, .gz, .bz2 or .xz", OsStr::new(&proposed), false) {
                         match zfm::operations::validate_name(&name) {
                             Ok(()) => {
                                 let output = app.tabs.current().current().join(name);
-                                let password = if id == ARCHIVE_CREATE_ENCRYPTED {
-                                    if !output.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case("7z") || e.eq_ignore_ascii_case("zip")) {
-                                        show_error(hwnd, "Encrypted archives require a .7z or .zip filename."); return 0;
-                                    }
+                                if !zfm::archive_engine::supports_creation(&output, encrypted) || chosen.map_or(false, |format| !format.matches(&output)) {
+                                    show_error(hwnd, "The output filename does not match the chosen archive format."); return 0;
+                                }
+                                let password = if encrypted {
                                     let first = match windows_actions::password_prompt(hwnd, app.theme, "Archive password") { Some(p) => p, None => return 0 };
                                     let second = match windows_actions::password_prompt(hwnd, app.theme, "Confirm archive password") { Some(p) => p, None => return 0 };
                                     if first != second { show_error(hwnd, "Passwords do not match."); return 0; }
@@ -3458,6 +3522,30 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             }
                             Err(e) => set_status(hwnd, app, Some(format!("Invalid output name: {e}"))),
                         }
+                    }
+                }
+                ARCHIVE_EXTRACT_HERE | ARCHIVE_EXTRACT_TO | ARCHIVE_EXTRACT_PASSWORD if code == 0 => {
+                    let archive = match selected_path(hwnd, app) { Some(path) if zfm::archive_actions::can_extract(&path) => path,
+                        _ => { set_status(hwnd, app, Some("Select one supported archive file.".into())); return 0; } };
+                    let default = archive.parent().unwrap_or_else(|| Path::new("."));
+                    let destination = if id == ARCHIVE_EXTRACT_HERE { default.to_path_buf() } else {
+                        match windows_actions::prompt(hwnd, app.theme, "Extract to existing folder", default.as_os_str(), false) {
+                            Some(value) => PathBuf::from(value), None => return 0,
+                        }
+                    };
+                    if !destination.is_absolute() || !destination.is_dir() {
+                        show_error(hwnd, "Choose an existing absolute destination folder."); return 0;
+                    }
+                    let password = if id == ARCHIVE_EXTRACT_PASSWORD {
+                        match windows_actions::password_prompt(hwnd, app.theme, "Archive password") {
+                            Some(value) if !value.is_empty() => Some(value),
+                            Some(_) => { show_error(hwnd, "Enter a password."); return 0; },
+                            None => return 0,
+                        }
+                    } else { None };
+                    let question = format!("Extract {} into {}?\n\nExisting files are not overwritten. Earlier files may remain after failure. Use a trusted destination and archive.", archive.display(), destination.display());
+                    if windows_actions::confirm(hwnd, app.theme, "Extract archive", &question) {
+                        start_operation(hwnd, app, Operation::ArchiveExtract(archive, destination, password));
                     }
                 }
                 ARCHIVE if code == 0 => {

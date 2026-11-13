@@ -37,12 +37,13 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
             make("BUTTON", "Expand Computer at startup", WS_TABSTOP | 3, 30, 187, 340, 23, 1007),
         ];
         let note = make("STATIC", "Drive changes are detected automatically. Apply saves these preferences.", 0, 20, 224, 370, 36, 1003);
-        let apply = make("BUTTON", "Apply", WS_TABSTOP | 1, 220, 268, 80, 28, 1);
-        let cancel = make("BUTTON", "Cancel", WS_TABSTOP, 310, 268, 80, 28, 2);
+        let apply = make("BUTTON", "Apply", WS_TABSTOP | BS_OWNERDRAW, 220, 268, 80, 28, 1);
+        let cancel = make("BUTTON", "Cancel", WS_TABSTOP | BS_OWNERDRAW, 310, 268, 80, 28, 2);
         for control in state.controls.into_iter().chain(headings).chain([note, apply, cancel]) {
             if control.is_null() { EndDialog(hwnd, -1); return 1; }
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
         }
+        SendMessageW(hwnd, 0x0401, 1, 0); // DM_SETDEFID: Apply
         for (control, checked) in state.controls.into_iter().zip([
             state.settings.show_hidden, state.settings.sort_ascending,
             state.settings.windows_live_refresh, state.settings.windows_compact_view,
@@ -68,6 +69,8 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         }
         WM_COMMAND if wp & 0xffff == 2 => { EndDialog(hwnd, 0); 1 }
         CLOSE => { EndDialog(hwnd, 0); 1 }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button(state.theme, &*(lp as *const DrawItem)),
+        0x0136 => (*state.theme).window_brush as isize,
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
             SetBkColor(wp as H, ui_theme::HEADER_TOP.colorref());
