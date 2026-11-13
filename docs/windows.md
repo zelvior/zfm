@@ -3,6 +3,13 @@
 
 The experimental Win32 browser includes multiple row selection, row/background/tab/sidebar context menus, common navigation and file shortcuts, clipboard copy/paste for multiple items and single-item cut, rename and create dialogs, Properties, and Recycle Bin requests. Direct copy and archive creation also accept multiple items; most other file operations remain single-item. Copy accepts up to 1,024 regular files or bounded directory trees, stops on the first failure with earlier copies retained, rejecting links, reparse points and special files; move is same-volume and never overwrites. Plain Delete asks the Windows shell to recycle on fixed drives; remote/removable drives and reparse points are rejected. The shell may warn and ask for confirmation if recycling is unavailable. Shift+Delete confirms permanent deletion and only removes files or empty directories. Clipboard, dialogs and Recycle Bin behavior should still be tested on target Windows versions; Windows 7 has not been exercised in CI. Right-click selected files or folders and choose **Copy to folder…** (up to 1,024 items) or **Move to folder…** (one item); enter an existing absolute path. While an operation is running, the file-list context menu offers cooperative cancellation for supported copy, conversion and archive jobs. Some operations cannot be cancelled and completed outputs remain.
 
+
+Press Ctrl+B to bookmark the current folder; use the file-list context menu → **Bookmarks** to add, open or remove bookmarks. They are stored in `%APPDATA%\zfm\bookmarks.conf` and remain after uninstall. Bookmark paths must be absolute UTF-8 without control characters; the limit is 64 entries.
+
+Enter a filename term and use Ctrl+Shift+F or the file-list context menu → **Search subfolders**. Results show relative paths and support **Open containing folder**. Search is case-insensitive; Clear exits search mode. See the README for limits and filesystem caveats.
+
+The built-in converter offers uncompressed PCM WAV ↔ AIFF (8/16-bit mono/stereo only) from the file context menu; metadata is not preserved. See the README for limits.
+
 ## Automated builds
 
 Run `scripts\build-windows.cmd` from the checkout. It downloads/updates Rust with rustup, tests the native target, and attempts 32-bit and 64-bit Windows MSVC builds. Install Visual Studio C++ Build Tools, its Desktop development with C++ workload, Windows SDK and x86/x64 tools first. System prerequisites are not installed automatically. PowerShell 5.1+ and network access to rustup/Rust distribution servers are required. The script has not been run on Windows yet.

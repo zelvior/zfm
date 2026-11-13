@@ -24,9 +24,9 @@ pub fn kind(path: &Path) -> Kind {
     }
 }
 
-fn open_regular(path: &Path) -> io::Result<File> {
+pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(all(target_os = "linux", not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))))]
-    return Err(io::Error::new(io::ErrorKind::Unsupported, "Safe preview is unavailable on this architecture"));
+    return Err(io::Error::new(io::ErrorKind::Unsupported, "Safe regular-file access is unavailable on this architecture"));
     // Avoid waiting on a FIFO and reject a final-component symlink on Linux.
     let mut options = OpenOptions::new();
     options.read(true);
@@ -47,11 +47,11 @@ fn open_regular(path: &Path) -> io::Result<File> {
     {
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 { // FILE_ATTRIBUTE_REPARSE_POINT
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Viewer rejects reparse points"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Input must not be a reparse point"));
         }
     }
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Viewer requires a regular file"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Input must be a regular file"));
     }
     Ok(file)
 }

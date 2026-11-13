@@ -38,13 +38,15 @@ is never presented as conversion.
 | TXT | HTML | Converter window or context menu | Context menu | Plain text escaped into a `pre` element; valid UTF-8 and supported ASCII controls only; not a Markdown renderer. |
 | BMP | ICO | Converter window or context menu | Context menu | Uncompressed bottom-up 24-bit BITMAPINFOHEADER only, 1–256 pixels per side; creates one opaque icon. |
 | ICO | BMP | Converter window or context menu | Context menu | One opaque, 24-bit BMP-based icon with a zero AND mask; no PNG payloads, alpha, palettes or multiple images. |
+| WAV | AIFF | Converter window or context menu | Context menu | PCM, 8/16-bit, mono/stereo, integer 1–192000 Hz; metadata omitted, input ≤512 MiB. |
+| AIFF | WAV | Converter window or context menu | Context menu | Same PCM constraints; no AIFF-C, metadata omitted, input ≤512 MiB. |
 
 The core is tested on Linux and in Windows CI for both supported MSVC
 architectures. Linux has progress and cancellation. The Windows context menu
 is a first increment: output is limited to a filename in the input folder and
 there is no progress indicator; cancellation is available through the file-list context menu. Other formats are not
 supported or advertised: PNG/JPEG/GIF/TIFF/WebP; Markdown/XML/PDF;
-WAV/MP3/FLAC/OGG/AAC; MP4/MKV/AVI/WebM/MOV. FFmpeg integration is not yet
+MP3/FLAC/OGG/AAC; MP4/MKV/AVI/WebM/MOV. FFmpeg integration is not yet
 implemented. Other BMP and ICO variants are not supported; use an image editor to convert them to an opaque 24-bit BMP first. Image input is limited to 1 MiB. No universal bidirectional support is implied.
 
 ## Performance baseline procedure
@@ -72,7 +74,7 @@ performance guarantee. Windows and Mint 19 measurements remain outstanding.
    multi-file/folder creation, conflict resolution, encryption, and standalone
    compression are not implemented yet.
 3. Expand beyond bounded multi-item clipboard copying to bulk moves and deletes,
-   cross-volume moves, batch rename, improved clipboard behavior, drag-and-drop, bookmarks, recent files, recursive search, directory
+   cross-volume moves, batch rename, improved clipboard behavior, drag-and-drop, recent files, directory
    sizes and previews with cancellation and safe partial-failure handling.
 4. Measure and address directory virtualization, worker limits and notifications.
 5. Close UI parity gaps, test on actual Windows 7 and Mint 19 in both

@@ -75,10 +75,20 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo +1.77.2 test --locked --target $env:TARGET
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.77.2 test --locked --target $env:TARGET -p zfm-installer
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.77.2 test --locked --target $env:TARGET *>&1 | Tee-Object -FilePath test.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $message = (Get-Content test.log -Tail 50 | Out-String) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error title=Windows tests::$message"
+            exit $code
+          }
+          cargo +1.77.2 test --locked --target $env:TARGET -p zfm-installer *>&1 | Tee-Object -FilePath installer-test.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $message = (Get-Content installer-test.log -Tail 50 | Out-String) -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error title=Windows installer tests::$message"
+            exit $code
+          }
       - name: Build and smoke-test the installer
         shell: pwsh
         env:

@@ -216,6 +216,9 @@ struct App {
     case_toggle: P,
     search_query: String,
     search_case: bool,
+    recursive_search: bool,
+    search_root: Option<PathBuf>,
+    search_truncated: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
     columns: [P; 4],
@@ -282,8 +285,12 @@ unsafe fn navigate(app: &mut App, destination: Destination) {
         Some(p) => p,
         None => return,
     };
-    if !matches!(destination, Destination::Refresh) {
-        app.notice = None;
+    if !matches!(destination, Destination::Refresh) { app.notice = None; }
+    if app.recursive_search && (!matches!(destination, Destination::Refresh) || app.search_root.as_deref() != Some(path.as_path())) {
+        app.recursive_search = false;
+        app.search_root = None;
+        app.search_query.clear();
+        (api().gtk_entry_set_text)(app.search_entry, c("").as_ptr());
     }
     let generation = app.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let token = app.generation.clone();
@@ -291,10 +298,14 @@ unsafe fn navigate(app: &mut App, destination: Destination) {
     let app_ptr = app as *mut App as usize;
     let query = app.search_query.clone();
     let case_sensitive = app.search_case;
+    let recursive = app.recursive_search;
     set_status(app, &format!("Loading {}…", path.display()));
     thread::spawn(move || {
-        let result =
-            directory::read_filtered(&path, hidden, &query, case_sensitive, &token, generation);
+        let result = if recursive {
+            directory::search_recursive(&path, hidden, &query, case_sensitive, &token, generation)
+        } else {
+            directory::read_filtered(&path, hidden, &query, case_sensitive, &token, generation)
+        };
         if token.load(Ordering::Relaxed) != generation {
             return;
         }
@@ -336,6 +347,7 @@ unsafe extern "C" fn receive(data: P) -> c_int {
             (api().gtk_container_foreach)(app.list, destroy_child, ptr::null_mut());
             app.entries = listing.entries;
             app.skipped = listing.skipped;
+            app.search_truncated = listing.truncated;
             app.render_index = 0;
             let render = Box::new(RenderMessage {
                 app: msg.app,
@@ -410,7 +422,7 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
         (api().gtk_widget_set_margin_bottom)(row, 1);
         let kind = (api().gtk_image_new_from_icon_name)(c(linux_item_icon(entry)).as_ptr(), 1);
         add_class(kind, "zfm-file-icon");
-        let name = label(&entry.name);
+        let name = label(&directory::display_name(entry, app.tabs.current().current(), app.recursive_search));
         (api().gtk_label_set_xalign)(name, 0.0);
         (api().gtk_label_set_ellipsize)(name, 3);
         (api().gtk_widget_set_hexpand)(name, 1);
@@ -442,6 +454,10 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
         (api().gtk_widget_show_all)(list_row);
     }
     app.render_index = end;
+    let search_note = if app.recursive_search {
+        if app.search_truncated { "  |  Recursive search: limit reached; results may be incomplete" }
+        else { "  |  Recursive search" }
+    } else { "" };
     let skipped = if app.skipped > 0 {
         format!("  |  {} entries skipped", app.skipped)
     } else {
@@ -469,11 +485,12 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
         set_status(
             app,
             &format!(
-                "{} items   |   Selected: {}   |   {}{}{}   |   Path: {}",
+                "{} items   |   Selected: {}   |   {}{}{}{}   |   Path: {}",
                 app.entries.len(),
                 rows.len(),
                 current,
                 skipped,
+                search_note,
                 notice,
                 selected_path
             ),
@@ -605,6 +622,7 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0xff52, 8) => up(ptr::null_mut(), p),
         (0xff08, 0) if list_has_focus(p) => up(ptr::null_mut(), p),
         (0x6c, 4) | (0x4c, 4) | (0x64, 8) | (0x44, 8) => focus_entry((*(p as *mut App)).address),
+        (0x66, 5) | (0x46, 5) => search_subfolders(ptr::null_mut(), p),
         (0x66, 4) | (0x46, 4) => focus_entry((*(p as *mut App)).search_entry),
         (0x63, 5) | (0x43, 5) => copy_path(ptr::null_mut(), p),
         (0x63, 4) | (0x43, 4) if list_has_focus(p) => copy_to_clipboard(ptr::null_mut(), p),
@@ -623,6 +641,7 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
         (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
         (0x2c, 4) => show_settings(ptr::null_mut(), p),
+        (0x62, 4) | (0x42, 4) => bookmark_current(ptr::null_mut(), p),
         (0x70, 4) | (0x50, 4) if list_has_focus(p) => preview_selected(ptr::null_mut(), p),
         (0x68, 4) | (0x48, 4) => {
             let hidden = (*(p as *mut App)).hidden;
@@ -673,18 +692,21 @@ unsafe fn selected_rows(list: P) -> Vec<P> {
 unsafe extern "C" fn selection_changed(_: P, data: P) {
     let app = &*(data as *mut App);
     let rows = selected_rows(app.list);
+    let search_info = if app.recursive_search {
+        if app.search_truncated { " · recursive search (limit reached)" } else { " · recursive search" }
+    } else { "" };
     if rows.len() == 1 {
         let i = (api().gtk_list_box_row_get_index)(rows[0]);
         if let Some(entry) = app.entries.get(i as usize) {
             (api().gtk_image_set_from_icon_name)(app.status_icon, c(linux_item_icon(entry)).as_ptr(), 6);
-            set_status(app, &format!("{}   Date modified: {}\n{}   ·   {} items   ·   {}",
-                entry.name, modified(entry), ui_theme::entry_type_label(entry), app.entries.len(), entry.path.display()));
+            set_status(app, &format!("{}   Date modified: {}\n{}   ·   {} items{}   ·   {}",
+                entry.name, modified(entry), ui_theme::entry_type_label(entry), app.entries.len(), search_info, entry.path.display()));
             return;
         }
     }
     (api().gtk_image_set_from_icon_name)(app.status_icon, c("folder-symbolic").as_ptr(), 6);
-    set_status(app, &format!("{}\n{} items   ·   {} selected",
-        app.tabs.current().current().display(), app.entries.len(), rows.len()));
+    set_status(app, &format!("{}\n{} items   ·   {} selected{}",
+        app.tabs.current().current().display(), app.entries.len(), rows.len(), search_info));
 }
 unsafe fn focus_entry(entry: P) {
     (api().gtk_widget_grab_focus)(entry);
@@ -935,7 +957,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let can_convert = can_duplicate
-        && ["csv", "json", "txt", "bmp", "ico"].iter().any(|ext| extension.eq_ignore_ascii_case(ext));
+        && ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|ext| extension.eq_ignore_ascii_case(ext));
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
@@ -950,6 +972,9 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     if is_directory {
         menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
     }
+    if app.recursive_search && selected_rows(list).len() == 1 {
+        menu_action(menu, "Open containing folder", open_containing_folder as P, data);
+    }
     if can_convert && selected_rows(list).len() == 1 {
         menu_action(
             menu,
@@ -961,6 +986,10 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
                 "Convert BMP to ICO…"
             } else if extension.eq_ignore_ascii_case("ico") {
                 "Convert ICO to BMP…"
+            } else if extension.eq_ignore_ascii_case("wav") {
+                "Convert PCM WAV to AIFF…"
+            } else if extension.eq_ignore_ascii_case("aiff") || extension.eq_ignore_ascii_case("aif") {
+                "Convert PCM AIFF to WAV…"
             } else {
                 "Convert CSV to JSON…"
             },
@@ -1028,6 +1057,59 @@ unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     (api().gtk_menu_shell_append)(menu, item);
     connect(item, "activate", callback, data);
 }
+struct BookmarkMenuItem { app: usize, path: PathBuf, remove: bool }
+unsafe extern "C" fn free_bookmark_item(data: P, _: P) { drop(Box::from_raw(data as *mut BookmarkMenuItem)); }
+unsafe extern "C" fn bookmark_action(_: P, data: P) {
+    let item = &*(data as *mut BookmarkMenuItem);
+    let app = &mut *(item.app as *mut App);
+    if item.remove {
+        match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::remove(&file, &item.path)) {
+            Ok(true) => set_status(app, "Bookmark removed."),
+            Ok(false) => set_status(app, "Bookmark was already removed."),
+            Err(error) => set_status(app, &format!("Could not remove bookmark: {error}")),
+        }
+    } else { navigate(app, Destination::Visit(item.path.clone())); }
+}
+unsafe extern "C" fn bookmark_current(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let path = app.tabs.current().current().to_path_buf();
+    match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::add(&file, &path)) {
+        Ok(true) => set_status(app, "Folder bookmarked."),
+        Ok(false) => set_status(app, "Folder is already bookmarked."),
+        Err(error) => set_status(app, &format!("Could not save bookmark: {error}")),
+    }
+}
+unsafe fn bookmark_entries(menu: P, paths: &[PathBuf], app: P, remove: bool) {
+    for path in paths {
+        let display = path.to_string_lossy();
+        let title = if display.chars().count() > 100 { format!("{}…", display.chars().take(100).collect::<String>()) } else { display.into_owned() };
+        let item = (api().gtk_menu_item_new_with_label)(c(&title).as_ptr());
+        (api().gtk_menu_shell_append)(menu, item);
+        let data = Box::into_raw(Box::new(BookmarkMenuItem { app: app as usize, path: path.clone(), remove })) as P;
+        (api().g_signal_connect_data)(item, c("activate").as_ptr(), bookmark_action as P, data, free_bookmark_item as P, 0);
+    }
+}
+unsafe extern "C" fn bookmarks_menu(widget: P, data: P) {
+    let menu = (api().gtk_menu_new)();
+    menu_action(menu, "Bookmark current folder", bookmark_current as P, data);
+    match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::load(&file)) {
+        Ok(paths) if !paths.is_empty() => {
+            (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
+            bookmark_entries(menu, &paths, data, false);
+            let submenu = (api().gtk_menu_new)();
+            bookmark_entries(submenu, &paths, data, true);
+            let item = (api().gtk_menu_item_new_with_label)(c("Remove bookmark").as_ptr());
+            (api().gtk_menu_item_set_submenu)(item, submenu);
+            (api().gtk_menu_shell_append)(menu, item);
+        }
+        Ok(_) => (),
+        Err(error) => set_status(&*(data as *mut App), &format!("Could not load bookmarks: {error}")),
+    }
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    (api().gtk_menu_popup_at_widget)(menu, widget, 6, 2, ptr::null_mut());
+}
+
 unsafe extern "C" fn organize_menu(widget: P, data: P) {
     let menu = (api().gtk_menu_new)();
     for (title, callback) in [
@@ -1037,6 +1119,7 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
         ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
         ("Cancel operation", cancel_operation as P),
+        ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
         ("Converter…", show_converter as P), ("Archive manager…", show_archive as P),
         ("Settings…", show_settings as P),
         ("Uninstall ZFM…", show_uninstaller as P),
@@ -1243,6 +1326,9 @@ pub fn run() -> Result<(), String> {
             case_toggle: ptr::null_mut(),
             search_query: String::new(),
             search_case: false,
+            recursive_search: false,
+            search_root: None,
+            search_truncated: false,
             sort_column: SortColumn::Name,
             sort_ascending: saved_settings.sort_ascending,
             columns: [ptr::null_mut(); 4],
@@ -1358,6 +1444,7 @@ pub fn run() -> Result<(), String> {
             }
         }
         for (caption, cb) in [
+            ("★  Bookmarks ▾", bookmarks_menu as P),
             ("⚙  Converter", show_converter as P),
             ("▣  Archives", show_archive as P),
         ] {
@@ -1496,6 +1583,8 @@ unsafe extern "C" fn converter_start(_: P, data: P) {
             2 => zfm::converter::text_to_html(&input, &output, &cancel, &mut report),
             3 => zfm::image_convert::convert(&input, &output, true, &cancel, &mut report),
             4 => zfm::image_convert::convert(&input, &output, false, &cancel, &mut report),
+            5 => zfm::audio_convert::convert(&input, &output, true, &cancel, &mut report),
+            6 => zfm::audio_convert::convert(&input, &output, false, &cancel, &mut report),
             _ => zfm::converter::csv_to_json(&input, &output, &cancel, &mut report),
         }
         .map_err(|e| e.to_string());
@@ -1603,11 +1692,13 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
                         .extension()
                         .and_then(|s| s.to_str())
                         .unwrap_or("");
-                    if ["csv", "json", "txt", "bmp", "ico"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
+                    if ["csv", "json", "txt", "bmp", "ico", "wav", "aiff", "aif"].iter().any(|e| extension.eq_ignore_ascii_case(e)) {
                         let (mode, output_extension) = if extension.eq_ignore_ascii_case("json") { (1, "csv") }
                             else if extension.eq_ignore_ascii_case("txt") { (2, "html") }
                             else if extension.eq_ignore_ascii_case("bmp") { (3, "ico") }
                             else if extension.eq_ignore_ascii_case("ico") { (4, "bmp") }
+                            else if extension.eq_ignore_ascii_case("wav") { (5, "aiff") }
+                            else if extension.eq_ignore_ascii_case("aiff") || extension.eq_ignore_ascii_case("aif") { (6, "wav") }
                             else { (0, "json") };
                         (api().gtk_combo_box_set_active)(converter.mode, mode);
                         (api().gtk_entry_set_text)(
@@ -1640,7 +1731,7 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let caption = label("Built-in offline converter · CSV/JSON values are strings · images: opaque 24-bit");
+    let caption = label("Offline converter · audio: PCM 8/16-bit mono/stereo; metadata is not preserved");
     (api().gtk_label_set_xalign)(caption, 0.0);
     (api().gtk_box_pack_start)(layout, caption, 0, 0, 0);
     let mode = (api().gtk_combo_box_text_new)();
@@ -1649,6 +1740,8 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_combo_box_text_append_text)(mode, c("Plain text → HTML (escaped)").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("24-bit BMP → ICO (up to 256 × 256)").as_ptr());
     (api().gtk_combo_box_text_append_text)(mode, c("Opaque 24-bit ICO → BMP").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("PCM WAV → AIFF (8/16-bit)").as_ptr());
+    (api().gtk_combo_box_text_append_text)(mode, c("PCM AIFF → WAV (8/16-bit)").as_ptr());
     (api().gtk_combo_box_set_active)(mode, 0);
     (api().gtk_box_pack_start)(layout, mode, 0, 0, 0);
     let input_row = (api().gtk_box_new)(0, 4);
@@ -1821,7 +1914,8 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
     app.operation = None;
     match message.result {
         Ok(result) => {
-            if app.tabs.current().current() == message.directory
+            if (app.tabs.current().current() == message.directory
+                || (app.recursive_search && message.directory.starts_with(app.tabs.current().current())))
                 && app.generation.load(Ordering::Relaxed) == message.generation
             {
                 app.notice = Some(result);
@@ -1832,7 +1926,8 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
         }
         Err(error) => {
             let notice = format!("Operation failed: {error}");
-            if app.tabs.current().current() == message.directory
+            if (app.tabs.current().current() == message.directory
+                || (app.recursive_search && message.directory.starts_with(app.tabs.current().current())))
                 && app.generation.load(Ordering::Relaxed) == message.generation {
                 // Extract/copy may have published earlier files before failing.
                 app.notice = Some(notice);
@@ -1906,11 +2001,27 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
 }
 unsafe extern "C" fn search_apply(_: P, data: P) {
     let app = &mut *(data as *mut App);
+    app.recursive_search = false;
+    app.search_root = None;
     app.search_query = CStr::from_ptr((api().gtk_entry_get_text)(app.search_entry))
         .to_string_lossy()
         .into_owned();
     app.search_case = (api().gtk_toggle_button_get_active)(app.case_toggle) != 0;
     navigate(app, Destination::Refresh);
+}
+unsafe extern "C" fn search_subfolders(_: P, data: P) {
+    let app = &mut *(data as *mut App);
+    let query = CStr::from_ptr((api().gtk_entry_get_text)(app.search_entry)).to_string_lossy().into_owned();
+    if query.is_empty() { set_status(app, "Enter a search term, then choose Search subfolders."); focus_entry(app.search_entry); return; }
+    app.search_query = query;
+    app.search_case = (api().gtk_toggle_button_get_active)(app.case_toggle) != 0;
+    app.recursive_search = true;
+    app.search_root = Some(app.tabs.current().current().to_path_buf());
+    navigate(app, Destination::Refresh);
+}
+unsafe extern "C" fn open_containing_folder(_: P, data: P) {
+    let path = match selected_path(data).and_then(|path| path.parent().map(|p| p.to_path_buf())) { Some(path) => path, None => return };
+    navigate(&mut *(data as *mut App), Destination::Visit(path));
 }
 unsafe extern "C" fn search_clear(_: P, data: P) {
     let entry = (*(data as *mut App)).search_entry;
