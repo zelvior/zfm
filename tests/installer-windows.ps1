@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+# Modified: exercise the interactive uninstaller and reject unrelated folders.
 # Smoke test for the ZFM setup program: interactive wizard flow, silent install,
 # registry entries, Start Menu shortcuts, reinstalling, recovering an
 # interrupted install, and the uninstaller's promise to keep the user's own
@@ -569,6 +570,32 @@ try {
     if ($wizardLink.TargetPath -ne (Join-Path $wizard 'zfm.exe')) {
         throw "Interactive wizard shortcut points at '$($wizardLink.TargetPath)'."
     }
+
+    # Interactive uninstallation from setup opens the installer-style wizard.
+    $uninstallUi = Start-Process -FilePath $setup -ArgumentList '/UNINSTALL' -PassThru
+    try {
+        Wait-Until { $uninstallUi.Refresh(); $uninstallUi.MainWindowHandle -ne [IntPtr]::Zero -or $uninstallUi.HasExited } 'the uninstall wizard'
+        if ($uninstallUi.HasExited) { throw 'Uninstall wizard exited before opening.' }
+        $uninstallWindow = $uninstallUi.MainWindowHandle
+        $uninstallNext = [ZfmSetupSmoke]::GetDlgItem($uninstallWindow, 102)
+        if ((Get-WizardText $uninstallNext) -ne 'Uninstall') { throw 'Uninstall wizard is missing its confirmation action.' }
+        Send-WizardCommand $uninstallWindow 102
+        Wait-Until { $uninstallUi.Refresh(); $uninstallUi.HasExited -or (Get-WizardText $uninstallNext) -eq 'Finish' } 'uninstall completion'
+        if ($uninstallUi.HasExited) { throw 'Uninstall wizard exited before completion.' }
+        Assert-Uninstalled $wizard
+        Send-WizardCommand $uninstallWindow 102
+        if (-not $uninstallUi.WaitForExit(30000)) { throw 'Uninstall wizard did not close.' }
+    } finally {
+        $uninstallUi.Refresh()
+        if (-not $uninstallUi.HasExited) { Stop-Process -Id $uninstallUi.Id -Force; $uninstallUi.WaitForExit() }
+    }
+    # A supplied unrelated folder must never be treated as an installation.
+    $code = Invoke-Setup $setup @('/UNINSTALL', '/S', "/D=`"$conflict`"")
+    Assert-ExitCode $code 1 'Uninstall of an unregistered folder'
+    if (-not (Test-Path -LiteralPath $intruder)) { throw 'Uninstall removed an unrelated file.' }
+    $code = Invoke-Setup $setup @('/S', "/D=`"$wizard`"")
+    Assert-ExitCode $code 0 'Reinstall before incomplete-install test'
+    Assert-Installed $wizard
 
     # 10. An incomplete prior ZFM installation (payload copied, registry and
     # shortcuts absent) is recognized and completed cleanly on rerun.

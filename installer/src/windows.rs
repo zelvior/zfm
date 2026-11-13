@@ -1,3 +1,4 @@
+// Modified: add the interactive uninstaller and safer removal error handling.
 //! ZFM setup: a native graphical wizard, a silent installer for automation, and
 //! the uninstaller that the installer writes next to the application.
 
@@ -159,6 +160,7 @@ impl Drop for Palette {
 
 struct Wizard {
     page: Page,
+    removing: bool,
     dir: String,
     status: String,
     percent: i32,
@@ -362,51 +364,47 @@ where
 /// installation folder is no longer running and can be removed. A running
 /// executable can be copied, but it can neither be deleted nor moved to another
 /// volume, so the copy does the removal and this process only hands over.
-fn relaunch_from_temp(exe: &Path, dir: &Path) -> Option<()> {
+fn relaunch_from_temp(exe: &Path, dir: &Path, silent: bool) -> Option<()> {
     let temp = win32::temporary_folder()?;
-    // One fixed name keeps at most one copy behind; a concurrent uninstall
-    // simply falls back to the in-place removal below.
-    let copy = temp.join("zfm-uninstall.exe");
-    // Remove copies left behind by earlier uninstalls; one run needs one copy.
-    if let Ok(entries) = fs::read_dir(&temp) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("zfm-uninstall") && name.ends_with(".exe") {
-                let _ = fs::remove_file(entry.path());
+    // Create a unique file without overwriting or cleaning other temp files.
+    let mut copy = None;
+    for attempt in 0..100 {
+        let path = temp.join(format!("zfm-uninstall-{}-{attempt}.exe", std::process::id()));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut output) => {
+                let result = fs::File::open(exe).and_then(|mut input| io::copy(&mut input, &mut output));
+                if result.is_err() { let _ = fs::remove_file(&path); return None; }
+                copy = Some(path);
+                break;
             }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
         }
     }
-    fs::copy(exe, &copy).ok()?;
-    // The parent has already asked or was started silently, so the copy never
-    // prompts. It also receives the folder, so it never depends on the registry
-    // entry it is about to remove.
-    let started = std::process::Command::new(&copy)
-        .arg("/UNINSTALL")
-        .arg("/S")
-        .arg(format!("/D={}", dir.display()))
-        .spawn();
-    match started {
+    let copy = copy?;
+    let mut command = std::process::Command::new(&copy);
+    command.arg("/UNINSTALL");
+    if silent { command.arg("/S"); }
+    command.arg(format!("/D={}", dir.display()));
+    match command.spawn() {
         Ok(_) => Some(()),
-        Err(_) => {
-            let _ = fs::remove_file(&copy);
-            None
-        }
+        Err(_) => { let _ = fs::remove_file(&copy); None }
     }
 }
 
 /// Wait until the original uninstaller has exited, then delete its file. Only
 /// a relocated copy calls this; the file is still locked while the process that
 /// started us is shutting down.
-fn remove_original_uninstaller(dir: &Path) {
+fn remove_original_uninstaller(dir: &Path) -> io::Result<()> {
     let original = dir.join("Uninstall.exe");
     for _ in 0..100 {
         match fs::remove_file(&original) {
-            Ok(()) => return,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(_) => unsafe { win32::Sleep(100) },
         }
     }
+    fs::remove_file(&original)
 }
 
 fn relocated_copy(exe: &Path) -> bool {
@@ -437,6 +435,13 @@ fn uninstall(exe: &Path, options: &Options) -> i32 {
             return 1;
         }
     };
+    // Do not remove a different registered installation's shortcuts/keys.
+    if !registered.as_ref().map_or(false, |path| plan::same_directory(path, &dir)) {
+        if !options.silent {
+            win32::message(ptr::null_mut(), "No matching registered ZFM installation was found; no files were removed.", "Uninstall ZFM", win32::MB_ICONERROR);
+        }
+        return 1;
+    }
     if !options.silent {
         let prompt = format!(
             "Remove ZFM File Manager from\n{}\n\nYour own files in that folder are kept.",
@@ -461,25 +466,22 @@ fn uninstall(exe: &Path, options: &Options) -> i32 {
         // Hand the removal to a copy in the temporary folder; otherwise the
         // running file would keep the installation folder alive. The window
         // closes immediately and the copy finishes the removal.
-        if relaunch_from_temp(exe, &dir).is_some() {
-            return 0;
-        }
-    } else if relocated_copy(exe) {
-        remove_original_uninstaller(&dir);
+        return if relaunch_from_temp(exe, &dir, true).is_some() { 0 } else { 1 };
     }
 
-    let mut problems = Vec::new();
-    problems.extend(remove_shortcuts());
-    problems.extend(remove_registry());
-    problems.extend(payload::remove_files_except(
-        &dir,
-        if inside { Some("Uninstall.exe") } else { None },
-    ));
-    if inside || relocated_copy(exe) {
-        // The running copy can only be removed at the next restart.
-        win32::delete_on_reboot(exe);
+    // Keep the uninstaller and registration until managed payload removal has
+    // succeeded so a locked file can be retried instead of orphaning ZFM.
+    let mut problems = payload::remove_files_except(&dir, Some("Uninstall.exe"));
+    if problems.is_empty() { problems.extend(remove_shortcuts()); }
+    if problems.is_empty() {
+        if inside {
+            problems.push("Could not start the temporary uninstaller; retry after closing ZFM.".to_string());
+        } else if let Err(error) = remove_original_uninstaller(&dir) {
+            problems.push(format!("{}: {error}", dir.join("Uninstall.exe").display()));
+        }
     }
-    payload::remove_folder_if_empty(&dir);
+    if problems.is_empty() { problems.extend(remove_registry()); }
+    if problems.is_empty() { payload::remove_folder_if_empty(&dir); }
 
     if problems.is_empty() {
         0
@@ -855,6 +857,15 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
             "ZFM is installed. Start it from the Start Menu, or choose Finish to close setup.",
         ),
     };
+    let removal_body = format!("ZFM will be removed from:\n{}\n\nOnly ZFM-managed files, shortcuts and registration are removed. Your other files are kept.", wizard.dir);
+    let (heading, body) = if wizard.removing {
+        match page {
+            Page::Welcome => ("Uninstall ZFM", removal_body.as_str()),
+            Page::Installing => ("Removing ZFM", "Removing managed files and registration. Please wait."),
+            Page::Finish => ("Uninstall complete", "ZFM has been removed. Your other files were left untouched."),
+            _ => (heading, body),
+        }
+    } else { (heading, body) };
     win32::set_text(wizard.heading, heading);
     win32::set_text(wizard.body, body);
     win32::set_text(wizard.status_control, &wizard.status);
@@ -870,7 +881,7 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
     win32::show(wizard.path_edit, page == Page::Folder);
     win32::show(wizard.browse, page == Page::Folder);
     win32::show(wizard.license, page == Page::License);
-    win32::show(wizard.launch, page == Page::Finish);
+    win32::show(wizard.launch, page == Page::Finish && !wizard.removing);
     win32::show(
         wizard.status_control,
         matches!(page, Page::Folder | Page::Installing | Page::Finish),
@@ -887,6 +898,7 @@ unsafe fn render(hwnd: Hwnd, wizard: &mut Wizard) {
     win32::set_text(
         wizard.next,
         match page {
+            Page::Welcome if wizard.removing => "Uninstall",
             Page::License => "Install",
             Page::Finish => "Finish",
             _ => "Next",
@@ -958,6 +970,29 @@ unsafe fn begin_install(hwnd: Hwnd, wizard: &mut Wizard, close_existing: bool) {
     });
 }
 
+unsafe fn begin_uninstall(hwnd: Hwnd, wizard: &mut Wizard) {
+    wizard.page = Page::Installing;
+    wizard.busy = true;
+    wizard.percent = 15;
+    wizard.status = "Removing ZFM…".to_string();
+    render(hwnd, wizard);
+    let dir = PathBuf::from(&wizard.dir);
+    let window = hwnd as usize;
+    thread::spawn(move || {
+        let result = match std::env::current_exe() {
+            Ok(exe) => {
+                let options = Options { uninstall: true, silent: true, directory: Some(dir) };
+                if uninstall(&exe, &options) == 0 { Ok(()) } else {
+                    Err(InstallFailure { message: "Some files could not be removed. Close ZFM and retry; registration is retained when possible.".into(), retryable: false, blocked_path: None })
+                }
+            }
+            Err(e) => Err(InstallFailure { message: format!("Could not locate the uninstaller: {e}"), retryable: false, blocked_path: None }),
+        };
+        let done = Box::into_raw(Box::new(Done { result }));
+        unsafe { if win32::PostMessageW(window as Hwnd, WM_DONE, 0, done as LParam) == 0 { drop(Box::from_raw(done)); } }
+    });
+}
+
 unsafe fn finish(hwnd: Hwnd, wizard: &mut Wizard) {
     if wizard.launch_checked {
         let dir = PathBuf::from(&wizard.dir);
@@ -971,6 +1006,7 @@ unsafe fn finish(hwnd: Hwnd, wizard: &mut Wizard) {
 
 unsafe fn advance(hwnd: Hwnd, wizard: &mut Wizard) {
     match wizard.page {
+        Page::Welcome if wizard.removing => begin_uninstall(hwnd, wizard),
         Page::Welcome => {
             wizard.page = Page::Folder;
             render(hwnd, wizard);
@@ -1086,13 +1122,13 @@ unsafe fn completed(hwnd: Hwnd, wizard: &mut Wizard, lparam: LParam) -> Option<I
     match message.result {
         Ok(()) => {
             wizard.percent = 100;
-            wizard.status = format!("Installed in {}", wizard.dir);
+            wizard.status = if wizard.removing { "Removal completed.".to_string() } else { format!("Installed in {}", wizard.dir) };
             wizard.page = Page::Finish;
             render(hwnd, wizard);
             None
         }
         Err(error) => {
-            wizard.page = Page::Folder;
+            wizard.page = if wizard.removing { Page::Welcome } else { Page::Folder };
             wizard.status = error.message.clone();
             render(hwnd, wizard);
             Some(error)
@@ -1198,8 +1234,10 @@ unsafe extern "system" fn window_proc(
         win32::message(hwnd, &error, "ZFM Setup", win32::MB_ICONERROR);
     }
     if let Some(error) = install_failure {
-        let message = format!("Setup could not finish:\n\n{}", error.message);
-        if error.retryable {
+        let message = format!("{} could not finish:\n\n{}", if (*WIZARD).removing { "Uninstall" } else { "Setup" }, error.message);
+        if (*WIZARD).removing {
+            win32::message(hwnd, &message, "Uninstall ZFM", win32::MB_ICONERROR);
+        } else if error.retryable {
             let target = PathBuf::from(&(*WIZARD).dir).join("zfm.exe");
             if error.blocked_path.as_deref() == Some(target.as_path()) && crate::running_app::is_running(&target) {
                 let prompt = format!("{}\n\nZFM is running from this installation. May setup ask it to close and retry? Save any work first. Choosing No leaves ZFM open.", message);
@@ -1292,11 +1330,13 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
                 return 1;
             }
         };
-        let dir = install_directory(&options)
-            .map(|path| path_text(&path))
-            .unwrap_or_default();
+        let dir = if options.uninstall {
+            options.directory.clone().or_else(|| plan::uninstall_directory(exe.parent(), registered_directory().as_deref()))
+        } else { install_directory(&options) }
+        .map(|path| path_text(&path)).unwrap_or_default();
         let wizard = Box::into_raw(Box::new(Wizard {
             page: Page::Welcome,
+            removing: options.uninstall,
             dir,
             status: String::new(),
             percent: 0,
@@ -1332,7 +1372,7 @@ fn show_setup(exe: PathBuf, options: Options) -> i32 {
         let window = win32::CreateWindowExW(
             0,
             class.as_ptr(),
-            win32::text("ZFM File Manager — Setup").as_ptr(),
+            win32::text(if options.uninstall { "ZFM File Manager — Uninstall" } else { "ZFM File Manager — Setup" }).as_ptr(),
             WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             0x8000_0000u32 as i32,
             0x8000_0000u32 as i32,
@@ -1424,7 +1464,25 @@ pub fn main() -> i32 {
             .map(|name| name.to_string_lossy().eq_ignore_ascii_case("uninstall.exe"))
             .unwrap_or(false);
     if uninstaller {
-        return uninstall(&exe, &options);
+        // Schedule cleanup even if the user cancels or removal fails.
+        if relocated_copy(&exe) && exe.parent().zip(win32::temporary_folder().as_deref())
+            .map_or(false, |(parent, temp)| plan::same_directory(parent, temp)) {
+            win32::delete_on_reboot(&exe);
+        }
+        if options.silent { return uninstall(&exe, &options); }
+        let dir = options.directory.clone().or_else(|| plan::uninstall_directory(exe.parent(), registered_directory().as_deref()));
+        let Some(dir) = dir else {
+            win32::message(ptr::null_mut(), "Could not determine the installation folder.", "Uninstall ZFM", win32::MB_ICONERROR);
+            return 1;
+        };
+        let inside = exe.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("Uninstall.exe")).unwrap_or(false)
+            && exe.parent().map(|p| plan::same_directory(p, &dir)).unwrap_or(false);
+        if inside {
+            if relaunch_from_temp(&exe, &dir, false).is_some() { return 0; }
+            win32::message(ptr::null_mut(), "Could not start the temporary uninstaller. No files were removed.", "Uninstall ZFM", win32::MB_ICONERROR);
+            return 1;
+        }
+        return show_setup(exe, Options { uninstall: true, silent: false, directory: Some(dir) });
     }
     if options.silent {
         return install_silently(&exe, &options);

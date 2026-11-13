@@ -1,3 +1,4 @@
+// Modified: add a bounded built-in preview, settings and package-managed removal UI.
 // Modified: compact reference-inspired file-manager layout and visuals.
 //! Minimal GTK 3 adapter. GTK is loaded at runtime so the filesystem core can
 //! be built and tested without GTK headers. All widget calls stay on GTK's
@@ -21,6 +22,9 @@ use archive_ui::{create_archive_manager, show_archive, supports_archive, Archive
 #[path = "file_clipboard_ui.rs"]
 mod file_clipboard_ui;
 use file_clipboard_ui::{copy_to_clipboard, cut_to_clipboard, paste_from_clipboard};
+#[path = "linux_viewer.rs"]
+mod linux_viewer;
+use linux_viewer::{preview_selected, show_uninstaller};
 
 type P = *mut c_void;
 type Idle = unsafe extern "C" fn(P) -> c_int;
@@ -86,6 +90,22 @@ api! {
     gtk_check_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_toggle_button_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_entry_new: unsafe extern "C" fn() -> P,
+    gtk_text_view_new: unsafe extern "C" fn() -> P,
+    gtk_text_view_get_buffer: unsafe extern "C" fn(P) -> P,
+    gtk_text_buffer_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
+    gtk_text_view_set_editable: unsafe extern "C" fn(P, c_int),
+    gtk_text_view_set_cursor_visible: unsafe extern "C" fn(P, c_int),
+    gtk_image_new_from_pixbuf: unsafe extern "C" fn(P) -> P,
+    gtk_image_set_from_pixbuf: unsafe extern "C" fn(P, P),
+    gdk_pixbuf_loader_new: unsafe extern "C" fn() -> P,
+    gdk_pixbuf_loader_write: unsafe extern "C" fn(P, *const u8, usize, P) -> c_int,
+    gdk_pixbuf_loader_close: unsafe extern "C" fn(P, P) -> c_int,
+    gdk_pixbuf_loader_set_size: unsafe extern "C" fn(P, c_int, c_int),
+    gdk_pixbuf_loader_get_pixbuf: unsafe extern "C" fn(P) -> P,
+    gdk_pixbuf_get_width: unsafe extern "C" fn(P) -> c_int,
+    gdk_pixbuf_get_height: unsafe extern "C" fn(P) -> c_int,
+    gdk_pixbuf_scale_simple: unsafe extern "C" fn(P, c_int, c_int, c_int) -> P,
+    g_object_ref: unsafe extern "C" fn(P) -> P,
     gtk_entry_set_width_chars: unsafe extern "C" fn(P, c_int),
     gtk_image_new_from_icon_name: unsafe extern "C" fn(*const c_char, c_int) -> P,
     gtk_image_set_from_icon_name: unsafe extern "C" fn(P, *const c_char, c_int),
@@ -172,6 +192,7 @@ struct App {
     tabs: Tabs,
     tab_strip: P,
     generation: Arc<AtomicU64>,
+    alive: Arc<AtomicBool>,
     address: P,
     list: P,
     status: P,
@@ -464,6 +485,7 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
 unsafe extern "C" fn quit(_: P, data: P) {
     let app = &mut *(data as *mut App);
     app.generation.fetch_add(1, Ordering::Relaxed);
+    app.alive.store(false, Ordering::Relaxed);
     if let Some(cancel) = &app.operation {
         cancel.store(true, Ordering::Relaxed);
     }
@@ -595,6 +617,8 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0x6e, 5) | (0x4e, 5) => new_folder(ptr::null_mut(), p),
         (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
         (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
+        (0x2c, 4) => show_settings(ptr::null_mut(), p),
+        (0x70, 4) | (0x50, 4) if list_has_focus(p) => preview_selected(ptr::null_mut(), p),
         (0x68, 4) | (0x48, 4) => {
             let hidden = (*(p as *mut App)).hidden;
             (api().gtk_toggle_button_set_active)(
@@ -917,6 +941,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     (api().gtk_widget_grab_focus)(list);
     let menu = (api().gtk_menu_new)();
     menu_action(menu, "Open", open_selected as P, data);
+    if entry.is_file { menu_action(menu, "Preview in ZFM…", preview_selected as P, data); }
     if is_directory {
         menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
     }
@@ -984,12 +1009,50 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
         ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
         ("Cancel copy", cancel_operation as P),
+        ("Settings…", show_settings as P),
+        ("Uninstall ZFM…", show_uninstaller as P),
     ] {
         menu_action(menu, title, callback, data);
     }
     connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
     (api().gtk_widget_show_all)(menu);
     (api().gtk_menu_popup_at_widget)(menu, widget, 6, 2, ptr::null_mut());
+}
+
+unsafe extern "C" fn show_settings(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c("ZFM Settings").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, app.window);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 360, 180);
+    let content = (api().gtk_dialog_get_content_area)(dialog);
+    let hidden = (api().gtk_check_button_new_with_label)(c("Show hidden files").as_ptr());
+    let ascending = (api().gtk_check_button_new_with_label)(c("Sort ascending").as_ptr());
+    (api().gtk_toggle_button_set_active)(hidden, (api().gtk_toggle_button_get_active)(app.hidden));
+    (api().gtk_toggle_button_set_active)(ascending, app.sort_ascending as c_int);
+    (api().gtk_box_pack_start)(content, hidden, 0, 0, 8);
+    (api().gtk_box_pack_start)(content, ascending, 0, 0, 8);
+    (api().gtk_box_pack_start)(content, label("Changes apply to this session only."), 0, 0, 8);
+    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    (api().gtk_dialog_add_button)(dialog, c("Apply").as_ptr(), -5);
+    (api().gtk_widget_show_all)(dialog);
+    let response = (api().gtk_dialog_run)(dialog);
+    let values = if response == -5 {
+        Some(((api().gtk_toggle_button_get_active)(hidden), (api().gtk_toggle_button_get_active)(ascending) != 0))
+    } else { None };
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    if let Some((hidden, ascending)) = values {
+        let app = &*(data as *mut App);
+        let hidden_widget = app.hidden;
+        let sort = app.sort_column;
+        let change_sort = app.sort_ascending != ascending;
+        if (api().gtk_toggle_button_get_active)(hidden_widget) != hidden {
+            (api().gtk_toggle_button_set_active)(hidden_widget, hidden);
+        }
+        if change_sort { apply_linux_sort(data, sort); }
+    }
 }
 
 struct Shortcut {
@@ -1114,6 +1177,7 @@ pub fn run() -> Result<(), String> {
             tabs: Tabs::new(initial),
             tab_strip: ptr::null_mut(),
             generation: Arc::new(AtomicU64::new(0)),
+            alive: Arc::new(AtomicBool::new(true)),
             address: ptr::null_mut(),
             list,
             status,

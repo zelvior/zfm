@@ -1,3 +1,4 @@
+<!-- Modified: document preview, session settings and uninstall scope and limits. -->
 <!-- Modified: describe the compact file-manager interface. -->
 # ZFM — Zelvior File Manager
 
@@ -23,6 +24,18 @@ A small native file manager written in Rust with a compact, dark details-view de
 
 Sidebar locations currently use conventional subdirectories of `$HOME`, **not** customized XDG user directories. Both lists support multiple selection for clipboard copying, but other file actions still require one selected item. The list is batched but not virtualized: very large directories still consume memory for all entries and widgets. Directory sorting happens after enumeration; a slow network filesystem call cannot be interrupted until it returns. Displayed non-UTF-8 filenames are lossily decoded, although double-clicking uses the original path. Entering a non-UTF-8 path in the address bar is not supported. File opening depends on `xdg-open` and an installed application for the file type.
 
+## Built-in preview and removal
+
+Right-click one regular file and choose **Preview in ZFM…**, or focus the list and press Ctrl+P. The read-only viewer accepts UTF-8 or BOM-marked UTF-16 text (up to 4 MiB) for TXT, Markdown, LOG, CSV, TSV, JSON, XML, HTML, CSS, JS, TS, Rust, Python, C/C++, TOML, YAML, INI, CONF, SH and PS1 extensions. HTML and Markdown are displayed as source, not rendered. PNG, JPEG, GIF and BMP files up to 16 MiB and 40 million pixels can be previewed using the system image decoder; image zoom is limited and animated images show a static frame. Decoder availability and supported subformats vary by system. GTK scales images on load; Windows uses a conservative header check before decoding. These checks are not a decoder sandbox: avoid previewing untrusted files. Reading and decoding currently happen on the GUI thread and may temporarily block it. Final-component links and special files are rejected; path components are not protected against hostile concurrent changes.
+
+This is **not** a universal document viewer: PDF, Office documents, ebooks and other formats are not rendered. Use **Open** to launch the OS default application for unsupported files (or if a preview fails); opening continues to use the external application, not the built-in viewer.
+
+On Windows, the installed uninstaller opens an installer-style confirmation and progress wizard. It removes the registered installation's managed files and shortcuts, preserving other files. A temporary copy performs removal so the installed executable can be deleted. If it cannot finish, close ZFM and retry; partial changes are possible. Silent removal (`Uninstall.exe /S`) returns after handing off to the temporary process, so a zero exit code from the original process does **not** prove removal succeeded; check the installed files and registration. Temporary copies may remain until reboot. On Linux, **Organize → Uninstall ZFM…** offers to remove the installed Debian package through `pkexec` and `dpkg --remove`, with authentication and package-manager dependency checks. It does not manually remove package-owned files or personal files. If PolicyKit is unavailable or this is not a Debian-package installation, use your package manager or the original installation method instead. The new viewer and uninstall UIs need further platform testing; Windows 7 and Mint 19 are not verified.
+
+## Settings
+
+Open **Settings…** from Linux’s Organize menu or the Windows file-list background menu, or press Ctrl+, on either platform. The dialog controls hidden-file visibility and the current sort direction. Apply changes them for the current session; Cancel leaves them unchanged. Preferences are not yet saved across restarts.
+
 ## Mouse and keyboard
 
 Click a row to select it; Ctrl/Shift-click selects multiple rows and clicking empty list space clears the selection. Double-click opens an item, while middle-clicking a folder or sidebar location opens a new tab; middle-click a tab to close it. Right-click rows, empty space, tabs or sidebar items for context actions. Shift+F10 or the Menu key opens the list context menu. Ctrl+double-click a folder opens it in a new tab; Alt+double-click shows properties.
@@ -41,6 +54,7 @@ Click a row to select it; Ctrl/Shift-click selects multiple rows and clicking em
 | Ctrl+Shift+C | Copy selected or current path as text |
 | Ctrl+D / Ctrl+N / Ctrl+Shift+N | Duplicate / new file / new folder |
 | Ctrl+H / Alt+Enter / Escape | Toggle hidden / properties / clear selection and focus list |
+| Ctrl+, / Ctrl+P | Open session settings / preview one selected file |
 
 ## File-operation limits
 

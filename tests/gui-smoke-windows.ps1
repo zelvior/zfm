@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Modified: cover the compact layout and tab behavior.
+# Modified: cover the compact layout, tabs, settings and read-only preview.
 param([Parameter(Mandatory=$true)][string]$Executable)
 $ErrorActionPreference = 'Stop'
 if (-not ('ZfmSmoke' -as [type])) {
@@ -30,6 +30,8 @@ public static class ZfmSmoke {
     public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, string text);
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+    public static extern IntPtr GetControlText(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
 }
 '@
 }
@@ -127,6 +129,39 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $populated) { throw 'ZFM did not list the fixture file within 10 seconds.' }
+    # Preview the first text fixture; this command opens a modal dialog.
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot select preview fixture.' }
+    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]142, [IntPtr]::Zero)) { throw 'Could not request preview.' }
+    $preview = [IntPtr]::Zero
+    $previewTitle = 'ZFM Preview — ' + (Join-Path $work 'example.txt')
+    for ($i = 0; $i -lt 100; $i++) {
+        $preview = [ZfmSmoke]::FindWindowW('#32770', $previewTitle)
+        if ($preview -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($preview -eq [IntPtr]::Zero) { throw 'Text preview did not appear.' }
+    $previewEdit = [ZfmSmoke]::GetDlgItem($preview, 1001)
+    if ($previewEdit -eq [IntPtr]::Zero -or (([ZfmSmoke]::GetWindowLongW($previewEdit, -16) -band 0x0800) -eq 0)) { throw 'Preview is not read-only.' }
+    $previewText = New-Object System.Text.StringBuilder 256
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::GetControlText($previewEdit, 0x000D, [UIntPtr]$previewText.Capacity, $previewText, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read preview text.' }
+    if ($previewText.ToString() -notmatch 'GUI smoke fixture') { throw "Preview text is incorrect: $previewText" }
+    if (-not [ZfmSmoke]::PostMessageW($preview, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close preview.' }
+    # Clear the selection after the preview.
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
+    # Settings is a modal session-only dialog; cancel must not apply changes.
+    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings.' }
+    $settings = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $settings = [ZfmSmoke]::FindWindowW('#32770', 'ZFM Settings')
+        if ($settings -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($settings -eq [IntPtr]::Zero) { throw 'Settings dialog did not appear.' }
+    if ([ZfmSmoke]::GetDlgItem($settings, 1001) -eq [IntPtr]::Zero -or [ZfmSmoke]::GetDlgItem($settings, 1002) -eq [IntPtr]::Zero) { throw 'Settings controls are missing.' }
+    if (-not [ZfmSmoke]::PostMessageW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close settings.' }
     # Extended selection accepts more than one row and reports both.
     if (([ZfmSmoke]::GetWindowLongW($list, -16) -band 0x0800) -eq 0) { throw 'List does not support extended selection.' }
     foreach ($index in @(0, 1)) {
