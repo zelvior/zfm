@@ -379,6 +379,30 @@ try {
     }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -ne 2) { throw 'Multiple selection failed.' }
+    # Add and then remove a tag on both selected paths, retaining existing tags.
+    foreach ($operation in @(
+        @{ Id = 192; Title = 'Add tags to 2 selected path(s) — comma-separated'; Count = 2 },
+        @{ Id = 193; Title = 'Remove tags from 2 selected path(s) — comma-separated'; Count = 0 }
+    )) {
+        [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$operation.Id, [IntPtr]::Zero)
+        $batchTag = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $batchTag = [ZfmSmoke]::FindWindowW('#32770', $operation.Title)
+            if ($batchTag -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($batchTag, 1001) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($batchTag -eq [IntPtr]::Zero) { throw "Batch tag prompt did not open: $($operation.Title)" }
+        [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($batchTag, 1001), 0x000c, [UIntPtr]::Zero, 'batch-tag')
+        [void][ZfmSmoke]::PostMessageW($batchTag, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+        $saved = $false
+        for ($i = 0; $i -lt 100; $i++) {
+            $db = Get-Content -LiteralPath $tagConfig -Raw
+            $count = ([regex]::Matches($db, '62617463682d746167')).Count # hex-encoded batch-tag
+            if ($count -eq $operation.Count -and $db.Contains('736d6f6b652d746167')) { $saved = $true; break }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $saved) { throw "Batch tag operation did not persist correctly: $($operation.Title)" }
+    }
     # Right-button press on an already-selected row preserves the group.
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x204, [UIntPtr]::Zero, [IntPtr](10 -shl 16 -bor 10), 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Right-button press did not return.' }

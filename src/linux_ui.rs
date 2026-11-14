@@ -1094,6 +1094,10 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
+    if selected_count <= zfm::tags::MAX_BATCH {
+        menu_action(menu, "Add tags to selected…", add_tags as P, data);
+        menu_action(menu, "Remove tags from selected…", remove_tags as P, data);
+    }
     if selected_count == 1 {
         menu_action(menu, "Copy path", copy_path as P, data);
         menu_action(menu, "Edit tags…", edit_tags as P, data);
@@ -2627,6 +2631,30 @@ unsafe extern "C" fn find_tags(_: P, data: P) {
         Ok(report) => show_report(parent, "Saved paths by tag", &report),
         Err(error) => set_status(app, &format!("Tag search failed: {error}")),
     }
+}
+
+unsafe extern "C" fn add_tags(_: P, data: P) { batch_tags(data, zfm::tags::BatchMode::Add); }
+unsafe extern "C" fn remove_tags(_: P, data: P) { batch_tags(data, zfm::tags::BatchMode::Remove); }
+unsafe fn batch_tags(data: P, mode: zfm::tags::BatchMode) {
+    let app = &*(data as *mut App); let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::tags::MAX_BATCH { set_status(app, "Select 1 to 1024 items for batch tagging."); return; }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) => paths.push(entry.path.clone()),
+            None => { set_status(app, "Selection is no longer available."); return; }
+        }
+    }
+    let parent = app.window; let alive = app.alive.clone(); let generation = app.generation.load(Ordering::Relaxed);
+    let (title, action) = match mode { zfm::tags::BatchMode::Add => ("Add tags to selected", "Add"), zfm::tags::BatchMode::Remove => ("Remove tags from selected", "Remove") };
+    let message = format!("{action} comma-separated tags {} {} selected path(s). Other tags are preserved; the files are not modified.", if mode == zfm::tags::BatchMode::Add { "to" } else { "from" }, paths.len());
+    let input = match prompt(parent, title, &message, Some("")) { Some(input) => input, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation { set_status(app, "Tags not saved because the view changed."); return; }
+    let result = zfm::tags::user_path().and_then(|file| zfm::tags::parse_input(&input).and_then(|tags| zfm::tags::edit_batch(&file, &paths, &tags, mode)));
+    set_status(app, &match result { Ok(count) => format!("Tags updated for {count} of {} selected path(s).", paths.len()), Err(error) => format!("Tags not saved: {error}") });
 }
 
 unsafe extern "C" fn edit_tags(_: P, data: P) {
