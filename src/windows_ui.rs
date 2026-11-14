@@ -165,6 +165,13 @@ const CONVERT_WAV_TO_AU: usize = 170;
 const CALCULATE_SIZE: usize = 171;
 const ACTIONS_MENU: usize = 172;
 const SEARCH_CASE: usize = 173;
+const SNAPSHOT_SAVE: usize = 174;
+const SNAPSHOT_COMPARE: usize = 175;
+const CLEANUP_REVIEW: usize = 176;
+const IMPACT_COPY: usize = 177;
+const IMPACT_MOVE: usize = 178;
+const IMPACT_RENAME: usize = 179;
+const IMPACT_ARCHIVE: usize = 180;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -864,7 +871,7 @@ struct App {
 struct OperationMessage {
     result: Result<String, String>,
     consumed_cut_sequence: Option<u32>,
-    details: bool,
+    details: Option<&'static str>,
 }
 
 struct ResultMessage {
@@ -2340,6 +2347,7 @@ enum Operation {
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
     CalculateSize(Vec<PathBuf>),
+    Insight(zfm::insights::Job),
     Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
@@ -2360,7 +2368,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     app.operation_cancel = Some(cancel.clone());
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
-    let details = matches!(&operation, Operation::CalculateSize(_));
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Insight(job) => Some(job.title()), _ => None };
     thread::spawn(move || {
         let mut consumed_cut_sequence = None;
         let result =
@@ -2383,6 +2391,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 }
                 Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
                     .map(|result| result.message()),
+                Operation::Insight(job) => job.run(&cancel),
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
                 Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
@@ -2756,9 +2765,13 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
             (TRASH, "Move to Recycle Bin"),
             (DELETE, "Delete permanently…"),
             (CALCULATE_SIZE, "Calculate size…"),
+            (IMPACT_COPY, "Preview copy impact…"),
+            (IMPACT_MOVE, "Preview move impact…"),
+            (IMPACT_RENAME, "Preview rename impact…"),
+            (IMPACT_ARCHIVE, "Preview archive impact…"),
             (PROPERTIES, "Properties"),
         ] {
-            if selected_items.len() != 1 && matches!(id, COPY_PATH | DUPLICATE | DELETE | PROPERTIES) { continue; }
+            if selected_items.len() != 1 && matches!(id, COPY_PATH | DUPLICATE | DELETE | PROPERTIES | IMPACT_RENAME) { continue; }
             AppendMenuW(menu, 0, id, text(title).as_ptr());
         }
     } else {
@@ -2796,6 +2809,9 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         AppendMenuW(menu, 0, PROMPT_FILE, text("New file…").as_ptr());
         AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
     }
+    AppendMenuW(menu, 0, SNAPSHOT_SAVE, text("Save folder snapshot…").as_ptr());
+    AppendMenuW(menu, 0, SNAPSHOT_COMPARE, text("Compare folder snapshot…").as_ptr());
+    AppendMenuW(menu, 0, CLEANUP_REVIEW, text("Review cleanup candidates…").as_ptr());
     AppendMenuW(menu, 0, SEARCH_RECURSIVE, text("Search subfolders (Ctrl+Shift+F)").as_ptr());
     AppendMenuW(menu, if app.search_case { 0x0008 } else { 0 }, SEARCH_CASE, text("Case-sensitive search").as_ptr());
     if selected { AppendMenuW(menu, 0, SETTINGS, text("Settings…").as_ptr()); }
@@ -3388,10 +3404,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             app.operation_busy = false;
             app.operation_cancel = None;
             let mut result = message.result;
-            if message.details {
-                let text = match result { Ok(text) => text, Err(error) => format!("Could not calculate size: {error}") };
-                set_status(hwnd, app, Some("Size scan finished; see results.".into()));
-                windows_actions::question(hwnd, app.theme, "Size results", &text, "Close", false);
+            if let Some(title) = message.details {
+                let text = match result { Ok(text) => text, Err(error) => format!("Could not complete {title}: {error}") };
+                set_status(hwnd, app, Some("Review finished; see results.".into()));
+                windows_actions::question(hwnd, app.theme, title, &text, "Close", false);
                 return 0;
             }
             if let Some(sequence) = message.consumed_cut_sequence {
@@ -3682,6 +3698,42 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         cancel.store(true, Ordering::Relaxed);
                         set_status(hwnd, app, Some("Cancellation requested where supported; earlier results may remain.".into()));
                     } else { set_status(hwnd, app, Some("No operation is running.".into())); }
+                }
+                SNAPSHOT_SAVE | SNAPSHOT_COMPARE | CLEANUP_REVIEW if code == 0 => {
+                    let root = app.tabs.current().current().to_path_buf();
+                    let job = match id {
+                        SNAPSHOT_SAVE => {
+                            let notice = "Save names and metadata of immediate entries? This replaces the one previously saved baseline, possibly from another folder. It is not a backup. Filenames are stored in your user configuration.";
+                            if windows_actions::question(hwnd, app.theme, "Save folder snapshot?", notice, "Save snapshot", true) != Some(true) { return 0; }
+                            if app.tabs.current().current() != root { set_status(hwnd, app, Some("Folder changed; snapshot cancelled.".into())); return 0; }
+                            zfm::insights::Job::Save(root)
+                        }
+                        SNAPSHOT_COMPARE => zfm::insights::Job::Compare(root),
+                        _ => zfm::insights::Job::Cleanup(root),
+                    };
+                    start_operation(hwnd, app, Operation::Insight(job));
+                }
+                IMPACT_COPY | IMPACT_MOVE | IMPACT_RENAME | IMPACT_ARCHIVE if code == 0 => {
+                    use zfm::insights::PreviewKind;
+                    let selected = selected_indices(app);
+                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS || (id == IMPACT_RENAME && selected.len() != 1) {
+                        set_status(hwnd, app, Some("Select 1–1024 items (one for rename) to preview.".into())); return 0;
+                    }
+                    let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+                    let root = app.tabs.current().current().to_path_buf();
+                    let (kind, title, initial) = match id {
+                        IMPACT_COPY => (PreviewKind::Copy, "Preview copy to folder", root.as_os_str().to_os_string()),
+                        IMPACT_MOVE => (PreviewKind::Move, "Preview move to folder", root.as_os_str().to_os_string()),
+                        IMPACT_RENAME => (PreviewKind::Rename, "Preview rename impact", paths[0].file_name().unwrap_or_default().to_os_string()),
+                        _ => (PreviewKind::Archive, "Preview archive impact", OsString::from("archive.zip")),
+                    };
+                    let answer = match windows_actions::prompt(hwnd, app.theme, title, &initial, false) { Some(value) => value, None => return 0 };
+                    if app.tabs.current().current() != root { set_status(hwnd, app, Some("Folder changed; preview cancelled.".into())); return 0; }
+                    let target = if matches!(kind, PreviewKind::Copy | PreviewKind::Move) { PathBuf::from(answer) } else {
+                        if let Err(e) = zfm::operations::validate_name(&answer) { show_error(hwnd, &format!("Invalid proposed name: {e}")); return 0; }
+                        if matches!(kind, PreviewKind::Rename) { paths[0].parent().unwrap_or(&root).join(answer) } else { root.join(answer) }
+                    };
+                    start_operation(hwnd, app, Operation::Insight(zfm::insights::Job::Impact(kind, paths, target)));
                 }
                 CALCULATE_SIZE if code == 0 => {
                     let selected = selected_indices(app);

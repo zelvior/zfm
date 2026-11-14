@@ -43,3 +43,5 @@ pub mod office;
 pub mod office_render;
 
 pub mod settings;
+
+pub mod insights;
