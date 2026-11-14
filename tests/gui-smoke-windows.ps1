@@ -618,7 +618,8 @@ try {
             if ($text.ToString() -match $pattern) { return }
             Start-Sleep -Milliseconds 100
         }
-        throw "Cut/paste did not report $pattern."
+        $details = "status=$($text.ToString()); source=$((Get-ChildItem -LiteralPath $cutSource -Name) -join ','); destination=$((Get-ChildItem -LiteralPath $cutTarget -Name) -join ','); clipboard=$([ZfmSmoke]::IsClipboardFormatAvailable(15))"
+        throw "Cut/paste did not report $pattern; $details"
     }
     Navigate-Cut $cutSource 'folder-a'
     Select-Cut @('folder-a', 'z-conflict.txt')
