@@ -45,6 +45,9 @@ pub mod office_render;
 pub mod settings;
 
 pub mod insights;
+pub mod duplicate_finder;
+pub mod mobile;
+pub mod scratchpad;
 
 pub mod tags;
 

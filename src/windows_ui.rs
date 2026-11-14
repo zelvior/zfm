@@ -185,6 +185,11 @@ const OPEN_TERMINAL: usize = 190;
 const FIND_TAGS: usize = 191;
 const ADD_TAGS: usize = 192;
 const REMOVE_TAGS: usize = 193;
+const FIND_DUPLICATES: usize = 194;
+const ADB_DEVICES: usize = 195;
+const ADB_CONNECT: usize = 196;
+const ADB_PUSH: usize = 197;
+const SCRATCHPAD: usize = 198;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2309,6 +2314,7 @@ enum Operation {
     Snippet(OsString, OsString, String, PathBuf),
     Script(OsString, OsString, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
+    Mobile(zfm::mobile::Job),
     Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
@@ -2329,7 +2335,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     app.operation_cancel = Some(cancel.clone());
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), _ => None };
     thread::spawn(move || {
         let mut consumed_cut_sequence = None;
         let result =
@@ -2356,6 +2362,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::Snippet(program, flag, code, dir) => zfm::tools::snippet(&program, &flag, &code, &dir, &cancel),
                 Operation::Script(program, flag, path, dir) => zfm::tools::script_file(&program, &flag, &path, &dir, &cancel),
                 Operation::Insight(job) => job.run(&cancel),
+            Operation::Mobile(job) => job.run(&cancel),
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
                 Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
@@ -2424,6 +2431,51 @@ unsafe fn batch_rename(hwnd: H, app: &mut App) {
         set_status(hwnd, app, Some("Rename cancelled because the view changed; select the files again.".into())); return;
     }
     start_operation(hwnd, app, Operation::BatchRename(plan));
+}
+
+unsafe fn scratchpad(hwnd: H, app: &mut App) {
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let mut content = String::new();
+    loop {
+        let (value, preview) = match windows_actions::text_editor(hwnd, app.theme, true, OsStr::new(&content)) { Some(value) => value, None => return };
+        content = match value.into_string() { Ok(value) => value, Err(_) => { set_status(hwnd, app, Some("Scratchpad text must be Unicode.".into())); return; } };
+        if preview { windows_actions::question(hwnd, app.theme, "Scratchpad preview", &zfm::scratchpad::preview(&content), "Close", false); continue; }
+        let name = match windows_actions::prompt(hwnd, app.theme, "Save scratchpad as new file", OsStr::new("scratch.md"), false) { Some(name) => name, None => continue };
+        if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+            windows_actions::question(hwnd, app.theme, "Scratchpad not saved — copy your text", &content, "Close", false); return;
+        }
+        match zfm::scratchpad::save_new(&root, &name, &content) {
+            Ok(path) => { set_status(hwnd, app, Some(format!("Saved scratchpad to {}", path.display()))); load(hwnd, app, Destination::Refresh, true); return; }
+            Err(error) => { windows_actions::question(hwnd, app.theme, "Scratchpad not saved", &format!("{error}\n\nYour text remains in the editor."), "Close", false); }
+        }
+    }
+}
+
+unsafe fn adb_devices(hwnd: H, app: &mut App) {
+    let root = app.tabs.current().current().to_path_buf();
+    start_operation(hwnd, app, Operation::Mobile(zfm::mobile::Job::Devices(root)));
+}
+unsafe fn adb_connect(hwnd: H, app: &mut App) {
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let input = match windows_actions::prompt(hwnd, app.theme, "Android IP:port (pair separately if required)", OsStr::new(""), false) { Some(value) => value, None => return };
+    let address = match input.to_str().and_then(|s| zfm::mobile::parse_address(s).ok()) { Some(value) => value, None => { set_status(hwnd, app, Some("Enter a unicast IP:port or [IPv6]:port.".into())); return; } };
+    let warning = format!("Connect ADB to {address}? This starts or uses the installed ADB server. Legacy wireless debugging may be unencrypted and can expose device control on the network. Use only trusted networks and devices.");
+    if windows_actions::question(hwnd, app.theme, "Connect Android?", &warning, "Connect", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(hwnd, app, Some("ADB connection cancelled because the view changed.".into())); return; }
+    start_operation(hwnd, app, Operation::Mobile(zfm::mobile::Job::Connect(root, address)));
+}
+unsafe fn adb_push(hwnd: H, app: &mut App) {
+    let selected = selected_indices(app);
+    if selected.len() != 1 || !app.entries[selected[0]].is_file { set_status(hwnd, app, Some("Select one regular file to send.".into())); return; }
+    let path = app.entries[selected[0]].path.clone(); let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let serial = match windows_actions::prompt(hwnd, app.theme, "Android device serial from ADB devices", OsStr::new(""), false).and_then(|v| v.into_string().ok()) { Some(value) => value, None => return };
+    if let Err(error) = zfm::mobile::validate_serial(&serial) { set_status(hwnd, app, Some(format!("Invalid serial: {error}"))); return; }
+    let remote = match windows_actions::prompt(hwnd, app.theme, "Android absolute destination filename", OsStr::new("/sdcard/Download/"), false).and_then(|v| v.into_string().ok()) { Some(value) => value, None => return };
+    if let Err(error) = zfm::mobile::validate_remote(&remote) { set_status(hwnd, app, Some(format!("Invalid Android path: {error}"))); return; }
+    let warning = format!("Send {} to {serial}:{remote}? ADB can overwrite existing remote files and leave partial data on failure or cancellation. The file is limited to 1 GiB. Use trusted source folders and devices.", path.display());
+    if windows_actions::question(hwnd, app.theme, "Send file to Android?", &warning, "Send", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(hwnd, app, Some("ADB transfer cancelled because the view changed.".into())); return; }
+    start_operation(hwnd, app, Operation::Mobile(zfm::mobile::Job::Push(root, serial, path, remote)));
 }
 
 unsafe fn run_code(hwnd: H, app: &mut App, file: Option<PathBuf>) {
@@ -2834,6 +2886,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
             AppendMenuW(menu, 0, HASH_FILE, text("Calculate MD5 and SHA-256…").as_ptr());
             AppendMenuW(menu, 0, VERIFY_HASH, text("Verify checksum…").as_ptr());
             AppendMenuW(menu, 0, RUN_SCRIPT, text("Run script with interpreter…").as_ptr());
+            AppendMenuW(menu, 0, ADB_PUSH, text("Send file to Android via ADB…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
             if zfm::archive_actions::can_extract(&app.entries[selected_items[0]].path) {
@@ -2931,6 +2984,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
     }
     AppendMenuW(menu, 0, FIND_TAGS, text("Find saved paths by tag…").as_ptr());
+    AppendMenuW(menu, 0, SCRATCHPAD, text("Markdown / code scratchpad…").as_ptr());
     AppendMenuW(menu, 0, RUN_SNIPPET, text("Run code snippet…").as_ptr());
     AppendMenuW(menu, 0, OPEN_TERMINAL, text("Open terminal here…").as_ptr());
     AppendMenuW(menu, 0, SERVER_START, text("Start local static server…").as_ptr());
@@ -2939,6 +2993,9 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
     AppendMenuW(menu, 0, SNAPSHOT_SAVE, text("Save folder snapshot…").as_ptr());
     AppendMenuW(menu, 0, SNAPSHOT_COMPARE, text("Compare folder snapshot…").as_ptr());
     AppendMenuW(menu, 0, CLEANUP_REVIEW, text("Review cleanup candidates…").as_ptr());
+    AppendMenuW(menu, 0, FIND_DUPLICATES, text("Find duplicates and junk…").as_ptr());
+    AppendMenuW(menu, 0, ADB_DEVICES, text("List Android devices (ADB)…").as_ptr());
+    AppendMenuW(menu, 0, ADB_CONNECT, text("Connect Android over Wi-Fi (ADB)…").as_ptr());
     AppendMenuW(menu, 0, SEARCH_RECURSIVE, text("Search subfolders (Ctrl+Shift+F)").as_ptr());
     AppendMenuW(menu, if app.search_case { 0x0008 } else { 0 }, SEARCH_CASE, text("Case-sensitive search").as_ptr());
     if selected { AppendMenuW(menu, 0, SETTINGS, text("Settings…").as_ptr()); }
@@ -3660,6 +3717,10 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 ADD_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Add),
                 REMOVE_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Remove),
                 FIND_TAGS if code == 0 => find_tags(hwnd, app),
+                ADB_DEVICES if code == 0 => adb_devices(hwnd, app),
+                ADB_CONNECT if code == 0 => adb_connect(hwnd, app),
+                ADB_PUSH if code == 0 => adb_push(hwnd, app),
+                SCRATCHPAD if code == 0 => scratchpad(hwnd, app),
                 RUN_SNIPPET if code == 0 => run_code(hwnd, app, None),
                 RUN_SCRIPT if code == 0 => {
                     let selected = selected_indices(app);
@@ -3847,7 +3908,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         set_status(hwnd, app, Some("Cancellation requested where supported; earlier results may remain.".into()));
                     } else { set_status(hwnd, app, Some("No operation is running.".into())); }
                 }
-                SNAPSHOT_SAVE | SNAPSHOT_COMPARE | CLEANUP_REVIEW if code == 0 => {
+                SNAPSHOT_SAVE | SNAPSHOT_COMPARE | CLEANUP_REVIEW | FIND_DUPLICATES if code == 0 => {
                     let root = app.tabs.current().current().to_path_buf();
                     let job = match id {
                         SNAPSHOT_SAVE => {
@@ -3857,6 +3918,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                             zfm::insights::Job::Save(root)
                         }
                         SNAPSHOT_COMPARE => zfm::insights::Job::Compare(root),
+                        FIND_DUPLICATES => zfm::insights::Job::Duplicates(root),
                         _ => zfm::insights::Job::Cleanup(root),
                     };
                     start_operation(hwnd, app, Operation::Insight(job));

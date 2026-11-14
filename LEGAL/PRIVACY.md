@@ -25,3 +25,7 @@
 | Support | GitHub issues, any future private reporting channel and attachments go to their operator; public issues are publicly visible. Never post sensitive data unnecessarily. |
 
 **ACTION REQUIRED:** identify the actual operator/controller and verified contact, purposes and lawful bases if applicable, retention/access/deletion process and applicable rights; assess Pakistan and target jurisdictions with counsel. Do not claim zero collection, universal GDPR compliance, or control over OS/third-party practices. Avoid sending files or sensitive paths in reports. Privacy policy needs revision if telemetry, services, accounts or hosted distribution change.
+
+- Duplicate/junk review reads file names, sizes, timestamps and candidate contents; it displays results locally and does not save a report or delete files.
+- Android actions invoke a user-installed ADB client, which may start or reuse an ADB server and communicate with a device or network endpoint chosen by the user. Device serials and command output appear in the local report. The selected file is sent to the device only after confirmation.
+- Scratchpad text remains in the editor until explicitly saved or discarded; a saved file is ordinary unencrypted local data and may be retained by backups or other software.
