@@ -128,7 +128,6 @@ api! {
     gtk_list_box_select_row: unsafe extern "C" fn(P, P),
     gtk_menu_new: unsafe extern "C" fn() -> P,
     gtk_menu_item_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
-    gtk_menu_item_get_label: unsafe extern "C" fn(P) -> *const c_char,
     gtk_menu_shell_append: unsafe extern "C" fn(P, P),
     gtk_menu_item_set_submenu: unsafe extern "C" fn(P, P),
     gtk_file_chooser_set_current_name: unsafe extern "C" fn(P, *const c_char),
@@ -157,9 +156,6 @@ api! {
     gtk_container_foreach: unsafe extern "C" fn(P, unsafe extern "C" fn(P, P), P),
     gtk_widget_destroy: unsafe extern "C" fn(P),
     gtk_widget_show_all: unsafe extern "C" fn(P),
-    gtk_widget_get_mapped: unsafe extern "C" fn(P) -> c_int,
-    gtk_widget_get_realized: unsafe extern "C" fn(P) -> c_int,
-    gtk_window_get_title: unsafe extern "C" fn(P) -> *const c_char,
     gtk_widget_grab_focus: unsafe extern "C" fn(P),
     gtk_widget_set_can_focus: unsafe extern "C" fn(P, c_int),
     gtk_widget_set_tooltip_text: unsafe extern "C" fn(P, *const c_char),
@@ -1069,14 +1065,8 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
     if selected_count == 1 { menu_action(menu, "Properties", properties as P, data); }
  }
 
-unsafe extern "C" fn trace_menu_select(item: P, _: P) {
-    let label = (api().gtk_menu_item_get_label)(item);
-    if !label.is_null() { eprintln!("TRACE selected menu: {}", CStr::from_ptr(label).to_string_lossy()); }
-}
 unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     let item = (api().gtk_menu_item_new_with_label)(c(text).as_ptr());
-    connect(item, "select", trace_menu_select as P, ptr::null_mut());
-    connect(item, "activate", trace_menu_select as P, ptr::null_mut());
     (api().gtk_menu_shell_append)(menu, item);
     connect(item, "activate", callback, data);
 }
@@ -1140,7 +1130,6 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         let submenu = (api().gtk_menu_new)();
         populate_selection_menu(submenu, *row, data);
         let item = (api().gtk_menu_item_new_with_label)(c("Selected items").as_ptr());
-        connect(item, "select", trace_menu_select as P, ptr::null_mut());
         (api().gtk_menu_item_set_submenu)(item, submenu);
         (api().gtk_menu_shell_append)(menu, item);
         (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());

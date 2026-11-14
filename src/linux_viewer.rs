@@ -81,11 +81,9 @@ unsafe extern "C" fn office_preview_ready(data: P) -> c_int {
 pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     let app = &mut *(data as *mut App);
     let rows = selected_rows(app.list);
-    eprintln!("TRACE preview callback selected rows: {}", rows.len());
     if rows.len() != 1 { set_status(app, "Select one file to preview."); return; }
     let index = (api().gtk_list_box_row_get_index)(rows[0]);
     let entry = match app.entries.get(index as usize) { Some(e) if e.is_file => e, _ => return };
-    eprintln!("TRACE preview path {:?} file {}", entry.path, entry.is_file);
     let kind = viewer::kind(&entry.path);
     if kind == Kind::Office {
         if app.office_cancels.len() >= 4 { set_status(app, "Too many document previews are already running."); return; }
@@ -110,10 +108,9 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     let limit = match kind { Kind::Text => viewer::MAX_TEXT_BYTES, Kind::Image => viewer::MAX_IMAGE_BYTES, Kind::Pdf => zfm::pdf::MAX_PDF_BYTES, Kind::Office | Kind::Unsupported => unreachable!() };
     let bytes = match viewer::read_bounded(&entry.path, limit) {
         Ok(bytes) => bytes,
-        Err(e) => { eprintln!("TRACE preview read error: {e}"); set_status(app, &format!("Preview failed: {e}")); return; }
+        Err(e) => { set_status(app, &format!("Preview failed: {e}")); return; }
     };
     let title = entry.name.clone();
-    eprintln!("TRACE preview rendering title={title:?} kind={kind:?}");
     show_visual(app, &title, kind, bytes);
 }
 
@@ -183,11 +180,9 @@ unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     }
     (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
     (api().gtk_widget_show_all)(dialog);
-    eprintln!("TRACE preview dialog shown: {title:?} mapped={} realized={} actual_title={:?}", (api().gtk_widget_get_mapped)(dialog), (api().gtk_widget_get_realized)(dialog), CStr::from_ptr((api().gtk_window_get_title)(dialog)));
     let mut zoom = 100i32;
     loop {
         let response = (api().gtk_dialog_run)(dialog);
-        eprintln!("TRACE preview dialog response: {response}");
         if pixbuf.is_null() || ![10, 11, 12, 13, 14].contains(&response) {
             if response != -1 { (api().gtk_widget_destroy)(dialog); }
             break;
