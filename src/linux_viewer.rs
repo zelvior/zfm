@@ -110,9 +110,10 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     let limit = match kind { Kind::Text => viewer::MAX_TEXT_BYTES, Kind::Image => viewer::MAX_IMAGE_BYTES, Kind::Pdf => zfm::pdf::MAX_PDF_BYTES, Kind::Office | Kind::Unsupported => unreachable!() };
     let bytes = match viewer::read_bounded(&entry.path, limit) {
         Ok(bytes) => bytes,
-        Err(e) => { set_status(app, &format!("Preview failed: {e}")); return; }
+        Err(e) => { eprintln!("TRACE preview read error: {e}"); set_status(app, &format!("Preview failed: {e}")); return; }
     };
     let title = entry.name.clone();
+    eprintln!("TRACE preview rendering title={title:?} kind={kind:?}");
     show_visual(app, &title, kind, bytes);
 }
 
@@ -182,9 +183,11 @@ unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     }
     (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
     (api().gtk_widget_show_all)(dialog);
+    eprintln!("TRACE preview dialog shown: {title:?}");
     let mut zoom = 100i32;
     loop {
         let response = (api().gtk_dialog_run)(dialog);
+        eprintln!("TRACE preview dialog response: {response}");
         if pixbuf.is_null() || ![10, 11, 12, 13, 14].contains(&response) {
             if response != -1 { (api().gtk_widget_destroy)(dialog); }
             break;
