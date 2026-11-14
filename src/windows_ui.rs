@@ -277,6 +277,17 @@ struct BitmapInfo {
 }
 
 #[repr(C)]
+struct ScrollBarInfo {
+    size: u32,
+    rect: Rect,
+    line_button: i32,
+    thumb_top: i32,
+    thumb_bottom: i32,
+    reserved: i32,
+    state: [u32; 6],
+}
+
+#[repr(C)]
 struct TrackMouseEvent {
     size: u32,
     flags: u32,
@@ -313,6 +324,9 @@ extern "system" {
     fn LoadCursorW(instance: H, name: *const u16) -> H;
     fn SetCursor(cursor: H) -> H;
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
+    fn GetWindowDC(hwnd: H) -> H;
+    fn ReleaseDC(hwnd: H, dc: H) -> i32;
+    fn GetScrollBarInfo(hwnd: H, object: i32, info: *mut ScrollBarInfo) -> i32;
     fn GetWindowRect(hwnd: H, rect: *mut Rect) -> i32;
     fn ScreenToClient(hwnd: H, point: *mut Point) -> i32;
     fn ClientToScreen(hwnd: H, point: *mut Point) -> i32;
@@ -343,6 +357,7 @@ extern "system" {
     fn IsDialogMessageW(hwnd: H, msg: *mut Msg) -> i32;
     fn IsWindowEnabled(hwnd: H) -> i32;
     fn DrawTextW(dc: H, value: *const u16, count: i32, rect: *mut Rect, format: u32) -> i32;
+    fn DrawFocusRect(dc: H, rect: *const Rect) -> i32;
     fn LoadImageW(instance: H, name: *const u16, kind: u32, cx: i32, cy: i32, load: u32) -> H;
     fn TrackMouseEvent(event: *mut TrackMouseEvent) -> i32;
     fn OpenClipboard(owner: H) -> i32;
@@ -602,7 +617,64 @@ unsafe fn apply_dark_window_chrome(hwnd: H) {
     let _ = set_attr(hwnd, 36, &title_text as *const u32 as *const c_void, size);
 }
 
+// The native control still owns the non-client scrollbar and all hit testing,
+// keyboard, wheel, dragging and accessibility behavior. Paint over its track
+// and thumb using the geometry supplied by Windows instead of replacing it
+// with a separate, potentially out-of-sync scroll model.
+unsafe fn paint_scrollbars(hwnd: H) {
+    let mut window: Rect = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut window) == 0 { return; }
+    let dc = GetWindowDC(hwnd);
+    if dc.is_null() { return; }
+    for (object, vertical) in [(-5, true), (-6, false)] { // OBJID_VSCROLL / OBJID_HSCROLL
+        let mut info: ScrollBarInfo = std::mem::zeroed();
+        info.size = std::mem::size_of::<ScrollBarInfo>() as u32;
+        if GetScrollBarInfo(hwnd, object, &mut info) == 0 || info.state[0] & 0x18000 != 0 { continue; }
+        let w = info.rect.right - info.rect.left;
+        let h = info.rect.bottom - info.rect.top;
+        if w <= 0 || h <= 0 || w > 4096 || h > 4096 { continue; }
+        let mut pixels = vec![Rgb(29, 37, 46).pixel(); (w * h) as usize];
+        ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(1, 1, w - 2, h - 2),
+            6.0, Rgb(46, 53, 63), Rgb(46, 53, 63), None);
+        let start = info.thumb_top.max(info.line_button).max(0);
+        let end = info.thumb_bottom.min(if vertical { h } else { w }).max(start);
+        let thumb = if vertical { BoxRect::new(3, start, (w - 6).max(1), end - start) }
+            else { BoxRect::new(start, 3, end - start, (h - 6).max(1)) };
+        if end > start && info.state[0] & 1 == 0 {
+            ui_theme::paint_rounded_box(&mut pixels, w, h, thumb, 5.0,
+                Rgb(133, 141, 151), Rgb(133, 141, 151), None);
+        }
+        // Arrow affordances remain visible and use the native hit targets.
+        let arrow = Rgb(168, 177, 187);
+        let line = info.line_button as f32;
+        if vertical && h > info.line_button * 2 {
+            let x = w as f32 / 2.0;
+            for (y, dir) in [(line / 2.0, -1.0f32), (h as f32 - line / 2.0, 1.0f32)] {
+                ui_theme::draw_segment_aa(&mut pixels, w, h, x - 3.0, y - dir, x, y + dir * 2.0, 1.2, arrow);
+                ui_theme::draw_segment_aa(&mut pixels, w, h, x, y + dir * 2.0, x + 3.0, y - dir, 1.2, arrow);
+            }
+        } else if !vertical && w > info.line_button * 2 {
+            let y = h as f32 / 2.0;
+            for (x, dir) in [(line / 2.0, -1.0f32), (w as f32 - line / 2.0, 1.0f32)] {
+                ui_theme::draw_segment_aa(&mut pixels, w, h, x - dir, y - 3.0, x + dir * 2.0, y, 1.2, arrow);
+                ui_theme::draw_segment_aa(&mut pixels, w, h, x + dir * 2.0, y, x - dir, y + 3.0, 1.2, arrow);
+            }
+        }
+        blit_pixels(dc, info.rect.left - window.left, info.rect.top - window.top, w, h, &pixels, |_| {});
+    }
+    ReleaseDC(hwnd, dc);
+}
+unsafe extern "system" fn scrollbar_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam, _: usize, _: usize) -> LResult {
+    let result = DefSubclassProc(hwnd, msg, wp, lp);
+    if matches!(msg, 0x0085 | WM_PAINT | WM_SIZE | 0x0114 | 0x0115 | WM_MOUSEWHEEL | 0x020e | 0x00a1 | 0x00a2 | 0x00a0 | 0x0200 | 0x0202 | 0x0101 | 0x000c | 0x0197 | 0x00b6) {
+        paint_scrollbars(hwnd);
+    }
+    result
+}
+
 unsafe fn apply_dark_scrollbar(hwnd: H) {
+    if hwnd.is_null() { return; }
+    SetWindowSubclass(hwnd, Some(scrollbar_proc), 2, 0);
     let module = LoadLibraryW(text("uxtheme.dll").as_ptr());
     if module.is_null() {
         return;
@@ -1539,12 +1611,13 @@ unsafe fn draw_dialog_button(theme: *const Theme, item: &DrawItem) -> LResult {
     let disabled = item.item_state & 4 != 0;
     let focused = item.item_state & 0x10 != 0;
     let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
+    let caption = control_value(item.hwnd).to_string_lossy().into_owned();
     let (top, bottom) = if disabled { (Rgb(38, 42, 48), Rgb(34, 38, 44)) }
+        else if caption == "Apply" { if pressed { (Rgb(38, 101, 158), Rgb(38, 101, 158)) } else { (Rgb(51, 132, 205), Rgb(42, 112, 179)) } }
         else if pressed { (ui_theme::BTN_PRESS_TOP, ui_theme::BTN_PRESS_BOTTOM) }
         else { (ui_theme::BTN_TOP, ui_theme::BTN_BOTTOM) };
     ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(0, 0, w, h), 6.0,
         top, bottom, Some(if focused { ui_theme::BORDER_FOCUS } else { ui_theme::BORDER_STRONG }));
-    let caption = control_value(item.hwnd).to_string_lossy().into_owned();
     blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |dc| {
         draw_text_in(dc, (*theme).font, if disabled { ui_theme::TEXT_DIM } else { ui_theme::TEXT_PRIMARY },
             BoxRect::new(4, 0, (w - 8).max(1), h), &caption,

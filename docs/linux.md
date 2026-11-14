@@ -40,3 +40,10 @@ The offline converter supports uncompressed PCM WAV ↔ AIFF and WAV ↔ AU (8/1
 F2 or Rename on 2–100 selected regular files in the same folder opens a numbered batch-rename preview. See the README for preflight checks, no-overwrite and partial-result limitations.
 
 **Calculate size…** (context menu or Organize, Ctrl+Shift+I) scans selected files and folders on a cancellable worker; see the README for its limits, link handling and partial-result caveats.
+
+### Dialog and scrollbar styling
+
+The GTK interface uses grouped settings and a shared dark scrollbar style for
+ZFM's GTK scrolled windows. Linux exposes only the preferences supported by its
+interface; drive-specific Windows settings are not shown. Desktop-owned dialogs
+may use the desktop's own styling.

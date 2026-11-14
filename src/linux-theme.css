@@ -29,3 +29,21 @@ menu, menuitem { background-color: #252930; color: #eeeeee; }
 menuitem:hover { background-color: #38414d; color: #ffffff; }
 separator { background-color: #3d434b; }
 label, checkbutton, radiobutton { color: #e2e2e2; }
+
+/* Consistent slim tracks in every GTK scrolled window, including dialogs. */
+scrollbar { background-color: #1d252e; border: 0; }
+scrollbar trough { background-color: #303740; border-radius: 8px; min-width: 12px; min-height: 12px; }
+scrollbar slider { background-color: #858d97; border: 2px solid #303740; border-radius: 8px; min-width: 8px; min-height: 32px; }
+scrollbar.horizontal slider { min-width: 32px; min-height: 8px; }
+scrollbar slider:hover { background-color: #a5adb8; }
+scrollbar slider:active { background-color: #63aee7; }
+
+.zfm-settings { padding: 20px 26px 8px; }
+.zfm-settings-card { background-color: #282e38; border: 1px solid #20252d; border-radius: 10px; padding: 18px; }
+.zfm-settings-heading { font-size: 1.25em; font-weight: bold; }
+.zfm-settings-note { color: #abb2ba; }
+.zfm-settings-apply { background-color: #337fc2; color: #ffffff; border-radius: 16px; padding: 5px 22px; }
+.zfm-settings-apply:hover { background-color: #4094d9; }
+switch { background-color: #303740; border: 1px solid #6b737c; border-radius: 14px; box-shadow: none; }
+switch:checked { background-color: #4aa6e5; border-color: #4aa6e5; }
+switch slider { background-color: #d9e0e8; border: 0; border-radius: 14px; box-shadow: none; }

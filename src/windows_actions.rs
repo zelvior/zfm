@@ -398,6 +398,8 @@ struct ConfirmDialog {
     accepted: bool,
     affirmative: &'static str,
     has_cancel: bool,
+    report: bool,
+    report_complete: bool,
 }
 unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 { // WM_INITDIALOG
@@ -409,16 +411,25 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
         let mut rect: Rect = std::mem::zeroed();
         GetClientRect(hwnd, &mut rect);
         let width = rect.right.max(360);
+        let height = rect.bottom.max(155);
+        let message_top = if state.report { 22 } else { 16 };
+        let message_height = if state.report { height - 80 } else { 98 };
+        if state.report {
+            let mark = CreateWindowExW(0, text("STATIC").as_ptr(), text(if state.report_complete { "✓" } else { "!" }).as_ptr(), WS_CHILD | WS_VISIBLE,
+                18, 22, 22, 24, hwnd, 1003usize as H, instance, ptr::null_mut());
+            if !mark.is_null() { SendMessageW(mark, WM_SETFONT, (*state.theme).semibold_font as usize, 1); }
+        }
         let message = CreateWindowExW(0, text("EDIT").as_ptr(), state.message.as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x0800,
-            18, 16, width - 36, 98, hwnd, 1002usize as H, instance, ptr::null_mut());
+            if state.report { 48 } else { 18 }, message_top, if state.report { width - 66 } else { width - 36 }, message_height, hwnd, 1002usize as H, instance, ptr::null_mut());
         let yes = CreateWindowExW(0, text("BUTTON").as_ptr(), text(state.affirmative).as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            width - 192, 125, 82, 28, hwnd, 1usize as H, instance, ptr::null_mut());
+            if state.report { width - 106 } else { width - 192 }, if state.report { height - 46 } else { 125 }, 88, 30, hwnd, 1usize as H, instance, ptr::null_mut());
         let cancel = if state.has_cancel { CreateWindowExW(0, text("BUTTON").as_ptr(), text("Cancel").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 100, 125, 82, 28, hwnd, 2usize as H, instance, ptr::null_mut()) } else { ptr::null_mut() };
         if message.is_null() || yes.is_null() || (state.has_cancel && cancel.is_null()) { EndDialog(hwnd, -1); return 1; }
         for control in [message, yes, cancel] {
             if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }
         }
+        apply_dark_scrollbar(message);
         // Make cancellation the default for destructive or extract actions.
         SendMessageW(hwnd, 0x0401, if state.has_cancel { 2 } else { 1 }, 0);
         SetFocus(if state.has_cancel { cancel } else { yes });
@@ -446,8 +457,16 @@ pub(super) unsafe fn confirm(hwnd: H, theme: *const Theme, title: &str, message:
 }
 pub(super) unsafe fn question(hwnd: H, theme: *const Theme, title: &str, message: &str, affirmative: &'static str, has_cancel: bool) -> Option<bool> {
     let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
-    let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 360, 145, 0, 0, 0];
-    let mut state = ConfirmDialog { theme, title: text(title), message: text(&message.replace("\n", "\r\n")), accepted: false, affirmative, has_cancel };
+    let report = title == "Size results" && !has_cancel;
+    let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0,
+        if report { 480 } else { 360 }, if report { 225 } else { 145 }, 0, 0, 0];
+    let formatted = if report {
+        match message.split_once('\n') {
+            Some((headline, rest)) => format!("{headline}\n\nDetailed Report:\n{rest}"),
+            None => message.to_owned(),
+        }
+    } else { message.to_owned() };
+    let mut state = ConfirmDialog { theme, title: text(title), message: text(&formatted.replace("\n", "\r\n")), accepted: false, affirmative, has_cancel, report, report_complete: message.starts_with("Scan finished.") };
     let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(confirm_proc), &mut state as *mut _ as isize);
     if result == -1 { None } else { Some(state.accepted) }
 }

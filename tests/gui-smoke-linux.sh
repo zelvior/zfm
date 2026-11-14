@@ -323,4 +323,5 @@ fi
 grep -q alpha "$work/rename-test/Holiday (1).txt"
 grep -q beta "$work/rename-test/Holiday (2).csv"
 [ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
+if grep -q 'ZFM theme CSS could not be loaded' "$work/stderr"; then cat "$work/stderr" >&2; exit 1; fi
 echo "GTK navigation, multi-item clipboard copy/cut, size scan, trash, batch rename and name dialog smoke tests passed (window $window)."

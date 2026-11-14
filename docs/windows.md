@@ -103,3 +103,11 @@ Windows cut/paste moves up to 1,024 items on the same volume without replacement
 F2 or Rename on 2–100 selected regular files in the same folder opens a numbered batch-rename preview. See the README for preflight checks, no-overwrite and partial-result limitations.
 
 **Calculate size…** in the file context menu scans selected files and folders on a cancellable worker; see the README for its limits, reparse-point handling and partial-result caveats.
+
+### Dialog and scrollbar styling
+
+ZFM's settings use native checkbox state and keyboard navigation with a custom
+switch appearance. Its file list, archive list, text preview and report dialogs
+use dark, rounded scrollbars over the native Windows scroll controls; the native
+controls still handle scrolling and accessibility. Windows-owned dialogs (such
+as system file pickers and Properties) and the installer use system styling.

@@ -258,6 +258,13 @@ try {
     foreach ($id in @(1001, 1002, 1004, 1005, 1006, 1007)) {
         if ([ZfmSmoke]::GetDlgItem($settings, $id) -eq [IntPtr]::Zero) { throw "Settings control $id is missing." }
     }
+    # The custom-painted switches retain native checkbox state and activation.
+    $switch = [ZfmSmoke]::GetDlgItem($settings, 1001)
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read settings switch.' }
+    $before = $result.ToUInt64()
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not activate settings switch.' }
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -eq $before) { throw 'Settings switch did not toggle.' }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not cancel settings.' }
     $configFile = Join-Path $configRoot 'zfm\settings.conf'
@@ -755,7 +762,7 @@ try {
     $value = New-Object System.Text.StringBuilder 4096
     $r = [UIntPtr]::Zero
     [void][ZfmSmoke]::GetControlText($sizeText, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$r)
-    if ($value.ToString() -notmatch 'Scan finished' -or $value.ToString() -notmatch 'size: 6 bytes' -or
+    if ($value.ToString() -notmatch 'Scan finished' -or $value.ToString() -notmatch 'Detailed Report:' -or $value.ToString() -notmatch 'size: 6 bytes' -or
         $value.ToString() -notmatch 'Files: 2' -or $value.ToString() -notmatch 'Folders: 1') { throw "Incorrect size results: $value" }
     [void][ZfmSmoke]::PostMessageW($sizeDialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
     for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', 'Size results') -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
@@ -808,6 +815,14 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (1).txt')) -ne 'alpha' -or
         [IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (2).csv')) -ne 'beta' -or
         (Test-Path -LiteralPath (Join-Path $renameSource 'alpha.txt'))) { throw 'Batch rename failed.' }
+    # A populated list still responds to native scrolling with the custom skin.
+    $scrollFixture = Join-Path $work 'scroll-fixture'
+    New-Item -ItemType Directory -Path $scrollFixture | Out-Null
+    for ($i = 0; $i -lt 80; $i++) { [IO.File]::WriteAllText((Join-Path $scrollFixture ("item-{0:D3}.txt" -f $i)), 'scroll') }
+    Navigate-Cut $scrollFixture 'item-079.txt'
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x0115, [UIntPtr]7, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'List scroll failed.' }
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x018e, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -eq 0) { throw 'List did not scroll to the bottom.' }
     Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.

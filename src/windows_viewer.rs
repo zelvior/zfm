@@ -108,6 +108,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             // Multiline read-only edit supports selection, copying and scrolling.
             state.edit = create("EDIT", text("").as_ptr(), WS_TABSTOP | WS_VSCROLL | 0x0010_0000 | 0x0004 | 0x0040 | 0x0080 | 0x0800, 1001);
             if !state.edit.is_null() {
+                apply_dark_scrollbar(state.edit);
                 SendMessageW(state.edit, 0x00c5, 8 * 1024 * 1024, 0); // EM_SETLIMITTEXT
                 SetWindowTextW(state.edit, content.as_ptr());
                 SendMessageW(state.edit, WM_SETFONT, (*state.theme).font as usize, 1);
