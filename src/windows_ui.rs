@@ -820,6 +820,8 @@ enum HotZone {
     None,
     AddressChip,
     Tab(usize),
+    TabPrevious,
+    TabNext,
     Sidebar(usize),
     Column(SortColumn),
     View(ViewMode),
@@ -959,34 +961,6 @@ fn tab_title(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn dynamic_tab_rects(metrics: &WindowMetrics, tab_count: usize) -> Vec<BoxRect> {
-    if tab_count == 0 {
-        return Vec::new();
-    }
-    let avail = (metrics.dynamic_tabs_right - metrics.dynamic_tabs_left).max(0);
-    if avail < 64 {
-        return Vec::new();
-    }
-    let gap = 4;
-    let per = ((avail - gap * (tab_count as i32 - 1).max(0)) / tab_count as i32).clamp(64, 136);
-    let mut rects = Vec::new();
-    let mut x = metrics.dynamic_tabs_left;
-    for _ in 0..tab_count {
-        if x + 56 > metrics.dynamic_tabs_right {
-            break;
-        }
-        let w = per.min(metrics.dynamic_tabs_right - x);
-        rects.push(BoxRect::new(
-            x,
-            metrics.new_tab.y,
-            w,
-            metrics.new_tab.height,
-        ));
-        x += w + gap;
-    }
-    rects
-}
-
 fn sidebar_row_rect(metrics: &WindowMetrics, index: usize) -> Option<BoxRect> {
     let row_h = 22;
     let y = metrics.sidebar.y + 5 + (index as i32) * row_h;
@@ -1023,12 +997,14 @@ fn hit_test_custom(app: &App, metrics: &WindowMetrics, x: i32, y: i32) -> HotZon
     if metrics.col_size.contains(x, y) {
         return HotZone::Column(SortColumn::Size);
     }
-    for (idx, rect) in dynamic_tab_rects(metrics, app.tabs.len())
-        .into_iter()
-        .enumerate()
-    {
-        if rect.contains(x, y) {
-            return HotZone::Tab(idx);
+    if app.tabs.len() > 1 {
+        let tabs = ui_theme::tab_strip_layout(metrics, app.tabs.len(), app.tabs.active());
+        if tabs.previous.map_or(false, |rect| rect.contains(x, y)) { return HotZone::TabPrevious; }
+        if tabs.next.map_or(false, |rect| rect.contains(x, y)) { return HotZone::TabNext; }
+        for (idx, rect) in tabs.tabs {
+            if rect.contains(x, y) {
+                return HotZone::Tab(idx);
+            }
         }
     }
     if metrics.sidebar.contains(x, y) {
@@ -1170,10 +1146,18 @@ unsafe fn rebuild_backdrop(hwnd: H, app: &mut App) {
 
     // Open folder tab chips when multiple tabs exist
     if app.tabs.len() > 1 {
-        for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len())
-            .into_iter()
-            .enumerate()
-        {
+        let tabs = ui_theme::tab_strip_layout(&m, app.tabs.len(), app.tabs.active());
+        for (rect, zone, direction) in [(tabs.previous, HotZone::TabPrevious, -1.0f32), (tabs.next, HotZone::TabNext, 1.0f32)] {
+            if let Some(rect) = rect {
+                let fill = if app.hot_zone == zone { Rgb(53, 62, 72) } else { ui_theme::TAB_INACTIVE_BG };
+                ui_theme::paint_rounded_box(&mut buf, w, h, rect, 5.0, fill, fill, Some(ui_theme::BORDER_SUBTLE));
+                let cx = (rect.x + rect.width / 2) as f32;
+                let cy = (rect.y + rect.height / 2) as f32;
+                ui_theme::draw_segment_aa(&mut buf, w, h, cx - direction * 2.0, cy - 4.0, cx + direction * 2.0, cy, 1.5, ui_theme::TEXT_BRIGHT);
+                ui_theme::draw_segment_aa(&mut buf, w, h, cx + direction * 2.0, cy, cx - direction * 2.0, cy + 4.0, 1.5, ui_theme::TEXT_BRIGHT);
+            }
+        }
+        for (idx, rect) in tabs.tabs {
             let active = idx == app.tabs.active();
             let hovered = app.hot_zone == HotZone::Tab(idx);
             let fill = if active {
@@ -1488,10 +1472,7 @@ unsafe fn paint_window(hwnd: H, app: &mut App) {
 
         // Open tab labels
         if app.tabs.len() > 1 {
-            for (idx, rect) in dynamic_tab_rects(&m, app.tabs.len())
-                .into_iter()
-                .enumerate()
-            {
+            for (idx, rect) in ui_theme::tab_strip_layout(&m, app.tabs.len(), app.tabs.active()).tabs {
                 if let Some(hist) = app.tabs.history(idx) {
                     let title = tab_title(hist.current());
                     let active = idx == app.tabs.active();
@@ -2490,6 +2471,15 @@ unsafe fn handle_custom_click(hwnd: H, app: &mut App, x: i32, y: i32) {
         HotZone::AddressChip => {
             SetFocus(app.address);
             SendMessageW(app.address, EM_SETSEL, 0, -1);
+        }
+        zone @ (HotZone::TabPrevious | HotZone::TabNext) => {
+            let changed = if zone == HotZone::TabPrevious { app.tabs.prev_tab() } else { app.tabs.next_tab() };
+            if changed {
+                app.hot_zone = HotZone::None;
+                rebuild_backdrop(hwnd, app);
+                InvalidateRect(hwnd, ptr::null(), 0);
+                load(hwnd, app, Destination::Refresh, false);
+            }
         }
         HotZone::Tab(idx) => {
             if app.tabs.select(idx) {

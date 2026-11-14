@@ -24,3 +24,5 @@ Both frontends expose **Save folder snapshot**, **Compare folder snapshot**, and
 previews in the selected-item menu. These are advisory first versions, not
 automatic cleanup or an execution guarantee. See the README for scope, privacy,
 limits and cancellation behavior.
+
+When Windows tabs overflow, the arrows beside the tab strip switch to the previous or next tab (and wrap at either end). Keyboard tab switching remains available on both platforms.
