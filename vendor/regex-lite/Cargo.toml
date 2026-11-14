@@ -1,0 +1,13 @@
+[package]
+name = "regex-lite"
+version = "0.1.6"
+edition = "2021"
+rust-version = "1.65"
+license = "MIT OR Apache-2.0"
+authors = ["The Rust Project Developers", "Andrew Gallant <jamslam@gmail.com>"]
+repository = "https://github.com/rust-lang/regex"
+description = "A lightweight regex engine"
+[features]
+default = ["std", "string"]
+std = []
+string = []

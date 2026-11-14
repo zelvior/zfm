@@ -52,6 +52,43 @@ pub fn plan(paths: &[PathBuf], base: &OsStr) -> io::Result<RenamePlan> {
     Ok(RenamePlan { pairs, preview })
 }
 
+/// Plan a regex replacement against the complete UTF-8 filename (including its
+/// extension). Unchanged names are skipped; no file is touched until apply.
+/// regex-lite uses bounded, non-backtracking matching and supports captures.
+pub fn plan_regex(paths: &[PathBuf], pattern: &str, replacement: &str) -> io::Result<RenamePlan> {
+    if !(1..=MAX_ITEMS).contains(&paths.len()) { return Err(invalid("Select between 1 and 100 files")); }
+    if pattern.is_empty() || pattern.len() > 512 || replacement.len() > 512 {
+        return Err(invalid("Pattern must contain 1–512 bytes and replacement at most 512 bytes"));
+    }
+    crate::operations::validate_batch_selection(paths)?;
+    let regex = regex_lite::RegexBuilder::new(pattern).size_limit(1 << 20).nest_limit(64)
+        .build().map_err(|e| invalid(format!("Invalid regular expression: {e}")))?;
+    let parent = paths[0].parent().ok_or_else(|| invalid("File has no parent"))?;
+    let parent_text = parent.to_str().ok_or_else(|| invalid("Parent folder must be UTF-8 for the preview"))?;
+    let mut pairs = Vec::new();
+    let mut targets = std::collections::HashSet::new();
+    let mut preview = format!("Regex rename — entire filename, including extension. No overwrites.\nEarlier renames remain if an error or cancellation occurs.\nFolder: {:?}\n\n", parent_text);
+    for path in paths {
+        if !path.is_absolute() || path.parent() != Some(parent)
+            || path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(invalid("All files must have the same absolute parent folder"));
+        }
+        let old = path.file_name().and_then(OsStr::to_str).ok_or_else(|| invalid("Filenames must be UTF-8"))?;
+        if old.chars().any(char::is_control) { return Err(invalid("Filenames cannot contain control characters")); }
+        let name = regex.replace_all(old, replacement);
+        if name == old { continue; }
+        if name.chars().any(char::is_control) { return Err(invalid("New names cannot contain control characters")); }
+        crate::operations::validate_name(OsStr::new(name.as_ref()))?;
+        let target = parent.join(name.as_ref());
+        if !targets.insert(target.clone()) { return Err(invalid("Two files would have the same destination")); }
+        preview.push_str(&format!("{:?} → {:?}\n", old, name));
+        if preview.encode_utf16().count() > MAX_PREVIEW_UTF16 { return Err(invalid("Preview is too long; select fewer files")); }
+        pairs.push((path.clone(), target));
+    }
+    if pairs.is_empty() { return Err(invalid("No filenames would change")); }
+    Ok(RenamePlan { pairs, preview })
+}
+
 #[derive(Debug)]
 pub struct RenameResult { pub completed: usize, pub failure: Option<(PathBuf, String)> }
 impl RenameResult {
@@ -103,6 +140,20 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp { fn new() -> Self { Self(crate::test_support::scratch_dir("zfm-rename")) } }
     impl Drop for Temp { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+    #[test]
+    fn regex_plan_previews_captures_and_rejects_unsafe_or_duplicate_targets() {
+        let t = Temp::new();
+        let paths = [t.0.join("cat-01.txt"), t.0.join("dog-02.txt")];
+        for path in &paths { fs::write(path, b"x").unwrap(); }
+        let plan = plan_regex(&paths, r"^(\w+)-(\d+)\.txt$", "${2}-${1}.txt").unwrap();
+        assert!(plan.preview().contains("01-cat.txt"));
+        assert_eq!(apply(&plan, &AtomicBool::new(false), |_| {}).unwrap().completed, 2);
+        assert!(t.0.join("01-cat.txt").exists() && t.0.join("02-dog.txt").exists());
+        assert!(plan_regex(&paths, "(", "x").is_err());
+        assert!(plan_regex(&paths, ".*", "../unsafe").is_err());
+        assert!(plan_regex(&paths, ".+", "same").is_err());
+        assert!(plan_regex(&paths, "nomatch", "x").is_err());
+    }
     #[test]
     fn previews_and_renames_in_selection_order_with_extensions() {
         let t = Temp::new();

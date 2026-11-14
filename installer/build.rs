@@ -133,6 +133,13 @@ fn main() {
         println!("cargo:rustc-env={}={}", env_key, path.display());
     }
 
+    for (name, env_key) in [("LICENSE-MIT", "ZFM_REGEX_MIT_PATH"), ("LICENSE-APACHE", "ZFM_REGEX_APACHE_PATH")] {
+        let path = root.join("vendor/regex-lite").join(name);
+        if !path.is_file() { panic!("missing regex-lite notice: {}", path.display()); }
+        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rustc-env={}={}", env_key, path.display());
+    }
+
     let version = env::var("ZFM_VERSION").unwrap_or_else(|_| "dev".to_string());
     println!("cargo:rustc-env=ZFM_VERSION={}", version);
 

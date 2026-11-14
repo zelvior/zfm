@@ -48,7 +48,10 @@ for path in ('Cargo.toml', 'installer/Cargo.toml'):
     require(fields.get('license') == 'Apache-2.0' and
             (fields.get('name'), fields.get('version')) in locked,
             f'{path} declaration drifted; review inventory')
-require(all(p['licenseDeclared'] == 'Apache-2.0' and p['filesAnalyzed'] is False for p in packages), 'review SPDX package declarations')
+licenses = {'zfm': 'Apache-2.0', 'zfm-installer': 'Apache-2.0', 'regex-lite': 'MIT OR Apache-2.0'}
+require(all(p['name'] in licenses and p['licenseDeclared'] == licenses[p['name']] and p['filesAnalyzed'] is False for p in packages), 'review SPDX package declarations')
+for name in ('LICENSE-MIT', 'LICENSE-APACHE'):
+    require((root / 'vendor/regex-lite' / name).is_file(), f'missing regex-lite {name}')
 for path in ('SECURITY.md', 'LEGAL/RELEASE_READINESS.md', 'LEGAL/THIRD_PARTY.md', 'LEGAL/PRIVACY.md'):
     require((root / path).is_file(), f'missing {path}')
 print('Legal drift checks passed (not legal approval or a full SPDX validation).')

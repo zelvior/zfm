@@ -46,6 +46,10 @@ install -m 644 "$root/packaging/zfm.svg" "$stage/usr/share/icons/hicolor/scalabl
     cat "$root/LICENSES/rust-1.77.2/LICENSE-MIT"
     printf '\n\n--- Upstream Rust 1.77.2 LICENSE-APACHE ---\n'
     cat "$root/LICENSES/rust-1.77.2/LICENSE-APACHE"
+    printf '\n\n--- regex-lite 0.1.6 LICENSE-MIT ---\n'
+    cat "$root/vendor/regex-lite/LICENSE-MIT"
+    printf '\n\n--- regex-lite 0.1.6 LICENSE-APACHE ---\n'
+    cat "$root/vendor/regex-lite/LICENSE-APACHE"
 } > "$stage/usr/share/doc/zfm/README"
 chmod 644 "$stage/usr/share/doc/zfm/README"
 install -m 644 "$root/LICENSE" "$stage/usr/share/doc/zfm/copyright"
@@ -56,7 +60,7 @@ Section: utils
 Priority: optional
 Architecture: $arch
 Maintainer: Zelvior Labs
-Depends: libc6 (>= 2.27), libgcc1, libgtk-3-0 (>= 3.22), libarchive13, xdg-utils
+Depends: libc6 (>= 2.27), libgcc1, libgtk-3-0 (>= 3.22), libarchive13, libssl3 | libssl1.1, xdg-utils
 Description: lightweight native file manager
  ZFM is a native desktop file manager with navigation and file operations.
 CONTROL

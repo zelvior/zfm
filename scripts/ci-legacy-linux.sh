@@ -8,7 +8,7 @@ export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture i386
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl build-essential gcc-multilib g++-multilib libc6-dev-i386 \
-    libarchive13 libarchive13:i386 libglib2.0-0 libglib2.0-0:i386 \
+    libarchive13 libarchive13:i386 libssl1.1 libssl1.1:i386 libglib2.0-0 libglib2.0-0:i386 \
     libgtk-3-0 libgtk-3-0:i386 librsvg2-common librsvg2-common:i386 \
     shared-mime-info adwaita-icon-theme python3 xvfb xauth xdotool xdg-utils
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh

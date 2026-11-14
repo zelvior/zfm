@@ -1,7 +1,7 @@
 <!-- Modified: document local settings retention. -->
 # Privacy: observed design and unresolved operator duties
 
-**NEEDS REVIEW.** This describes the inspected source, not a blanket guarantee for every build or external service. No explicit analytics, telemetry, remote update client, or network API was identified in the application source reviewed. This does not prove absence of all network traffic: network-mounted paths and OS facilities can communicate, and third-party software acts independently.
+**NEEDS REVIEW.** This describes the inspected source, not a blanket guarantee for every build or external service. No explicit analytics, telemetry, remote update client, or hosted service API was identified in the application source reviewed. A user can explicitly start a loopback-only local HTTP server. This does not prove absence of all network traffic: network-mounted paths and OS facilities can communicate, and third-party software acts independently.
 
 | Data / action | Destination and retention |
 |---|---|
@@ -9,6 +9,9 @@
 | User settings | Hidden-file visibility and sort direction, plus Windows folder-refresh, drive-label, startup-view and sidebar preferences, are stored in a per-user configuration file when Apply is used. The file remains after uninstall; see the README for its location. |
 | Windows drive and folder refresh | ZFM periodically queries Windows logical drives and their volume names, and by default rescans the current folder. Mapped network storage may be contacted by these OS filesystem calls; results are held in memory. |
 | Folder bookmarks | User-selected folder paths are stored in the per-user bookmarks file and retained across restarts and uninstall until removed by the user. Hex encoding is not encryption. |
+| Personal tags | Tags and absolute UTF-8 paths are stored in the per-user `tags.conf`, retained after uninstall. Hex encoding is not encryption. Paths can become stale when files are moved or renamed; concurrent instances may overwrite changes. |
+| Local static server | On explicit start, selected folder contents, including hidden files, can be read over loopback by local clients with the tokenized URL. The URL is copied to the OS clipboard; local clipboard managers may retain it. The server stops on request or app exit. |
+| Snippet/script/terminal | User-selected external processes execute without sandboxing and inherit user privileges and environment; they may read or transmit data and modify files. Snippets may be visible in command lines. Output is held in memory and displayed in ZFM. |
 | Navigation history | In process memory (`src/navigation.rs`); OS, desktop or applications may separately retain histories or logs. |
 | Clipboard | File paths and copy/cut metadata or text go to the OS clipboard (`file_clipboard_ui.rs`, `windows_actions.rs`); clipboard managers/other applications may access or retain them. |
 | PDF preview passwords | A supplied PDF password is held in application memory while the document is open and passed to PDFium; it is not guaranteed to be erased. |

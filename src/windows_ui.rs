@@ -172,6 +172,16 @@ const IMPACT_COPY: usize = 177;
 const IMPACT_MOVE: usize = 178;
 const IMPACT_RENAME: usize = 179;
 const IMPACT_ARCHIVE: usize = 180;
+const REGEX_RENAME: usize = 181;
+const EDIT_TAGS: usize = 182;
+const HASH_FILE: usize = 183;
+const VERIFY_HASH: usize = 184;
+const SERVER_START: usize = 185;
+const SERVER_COPY: usize = 186;
+const SERVER_STOP: usize = 187;
+const RUN_SNIPPET: usize = 188;
+const RUN_SCRIPT: usize = 189;
+const OPEN_TERMINAL: usize = 190;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -788,6 +798,7 @@ struct App {
     tracking_mouse: bool,
     operation_busy: bool,
     operation_cancel: Option<Arc<AtomicBool>>,
+    server: Option<zfm::local_server::Server>,
     consumed_cut_sequence: Option<u32>,
     notice: Option<String>,
     token: Arc<AtomicU64>,
@@ -2291,6 +2302,9 @@ enum Operation {
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
     CalculateSize(Vec<PathBuf>),
+    Hash(PathBuf, Option<String>),
+    Snippet(OsString, OsString, String, PathBuf),
+    Script(OsString, OsString, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
     Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
@@ -2312,7 +2326,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     app.operation_cancel = Some(cancel.clone());
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Insight(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), _ => None };
     thread::spawn(move || {
         let mut consumed_cut_sequence = None;
         let result =
@@ -2335,6 +2349,9 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 }
                 Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
                     .map(|result| result.message()),
+                Operation::Hash(path, expected) => zfm::hashing::report(&path, expected.as_deref(), &cancel),
+                Operation::Snippet(program, flag, code, dir) => zfm::tools::snippet(&program, &flag, &code, &dir, &cancel),
+                Operation::Script(program, flag, path, dir) => zfm::tools::script_file(&program, &flag, &path, &dir, &cancel),
                 Operation::Insight(job) => job.run(&cancel),
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
@@ -2398,6 +2415,114 @@ unsafe fn batch_rename(hwnd: H, app: &mut App) {
     };
     let plan = match zfm::batch_rename::plan(&paths, &base) {
         Ok(plan) => plan, Err(error) => { set_status(hwnd, app, Some(format!("Cannot plan rename: {error}"))); return; }
+    };
+    if windows_actions::question(hwnd, app.theme, "Preview batch rename", plan.preview(), "Rename", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+        set_status(hwnd, app, Some("Rename cancelled because the view changed; select the files again.".into())); return;
+    }
+    start_operation(hwnd, app, Operation::BatchRename(plan));
+}
+
+unsafe fn run_code(hwnd: H, app: &mut App, file: Option<PathBuf>) {
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let program = match windows_actions::prompt(hwnd, app.theme, "Interpreter executable (e.g. python, node, cmd.exe)", OsStr::new("cmd.exe"), false) { Some(v) => v, None => return };
+    let flag = match windows_actions::prompt(hwnd, app.theme, "Single interpreter argument (e.g. /C, -c, -e, -File)", OsStr::new("/C"), false) { Some(v) => v, None => return };
+    let code = if file.is_none() {
+        match windows_actions::prompt(hwnd, app.theme, "Single-line snippet (select a script file for multiline)", OsStr::new(""), false) {
+            Some(v) => match v.into_string() { Ok(v) => Some(v), Err(_) => { set_status(hwnd, app, Some("Snippet must be Unicode.".into())); return; } },
+            None => return,
+        }
+    } else { None };
+    let what = file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "the entered snippet".into());
+    let message = format!("Run {what} with {} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout or cancellation does not stop descendants. Run only code you trust.", program.to_string_lossy(), root.display());
+    if windows_actions::question(hwnd, app.theme, "Run external code?", &message, "Run", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(hwnd, app, Some("Run cancelled because the view changed.".into())); return; }
+    let operation = match (file, code) { (Some(file), _) => Operation::Script(program, flag, file, root), (_, Some(code)) => Operation::Snippet(program, flag, code, root), _ => return };
+    start_operation(hwnd, app, operation);
+}
+unsafe fn open_terminal(hwnd: H, app: &mut App) {
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let default = std::env::var_os("ZFM_TERMINAL").unwrap_or_else(|| OsString::from("cmd.exe"));
+    let program = match windows_actions::prompt(hwnd, app.theme, "Terminal executable", &default, false) { Some(v) => v, None => return };
+    let arg = std::env::var_os("ZFM_TERMINAL_ARG").unwrap_or_default();
+    let arg = match windows_actions::prompt(hwnd, app.theme, "Optional single literal terminal argument", &arg, false) { Some(v) => v, None => return };
+    if app.token.load(Ordering::Relaxed) != generation { set_status(hwnd, app, Some("Terminal not opened because the view changed.".into())); return; }
+    let result = zfm::tools::terminal(&program, &arg, &root);
+    set_status(hwnd, app, Some(match result { Ok(()) => "Terminal launched.".into(), Err(error) => format!("Could not launch terminal: {error}") }));
+}
+
+unsafe fn server_start(hwnd: H, app: &mut App) {
+    if app.server.is_some() { set_status(hwnd, app, Some("A local server is already running; copy its URL or stop it first.".into())); return; }
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
+    let message = format!("Serve files under {} to this computer only?\n\nAnyone with the URL on this computer can read files, including hidden files. No upload or server-side script execution; web pages may run code in the browser. Only start this for trusted folders.", root.display());
+    if windows_actions::question(hwnd, app.theme, "Start local server?", &message, "Start", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.server.is_some() { set_status(hwnd, app, Some("Server not started because the view changed.".into())); return; }
+    match zfm::local_server::Server::start(&root) {
+        Ok(server) => {
+            let url = server.url().to_string(); app.server = Some(server);
+            let copied = windows_actions::copy_text(hwnd, Path::new(&url));
+            let message = format!("Serving {} on this computer only. {}\n\n{url}\n\nUse Actions → Stop local server to stop. Anyone with this URL on this computer can read files; the clipboard may retain the URL after stopping.", root.display(), if copied { "URL copied to clipboard:" } else { "Select and copy this URL:" });
+            let _ = windows_actions::question(hwnd, app.theme, "Local server", &message, "Close", false);
+        }
+        Err(error) => set_status(hwnd, app, Some(format!("Could not start local server: {error}"))),
+    }
+}
+unsafe fn server_copy(hwnd: H, app: &mut App) {
+    let result = app.server.as_ref().map(|server| windows_actions::copy_text(hwnd, Path::new(server.url())));
+    set_status(hwnd, app, Some(match result { Some(true) => "Local server URL copied.", Some(false) => "Clipboard is unavailable.", None => "No local server is running." }.into()));
+}
+
+unsafe fn begin_hash(hwnd: H, app: &mut App, verify: bool) {
+    let selected = selected_indices(app);
+    if selected.len() != 1 || !app.entries[selected[0]].is_file { set_status(hwnd, app, Some("Select one regular file.".into())); return; }
+    let path = app.entries[selected[0]].path.clone();
+    let generation = app.token.load(Ordering::Relaxed);
+    let expected = if verify {
+        match windows_actions::prompt(hwnd, app.theme, "Verify checksum — enter MD5 or SHA-256 hex", OsStr::new(""), false) {
+            Some(value) => match value.into_string() { Ok(value) => Some(value), Err(_) => { set_status(hwnd, app, Some("Checksum must be Unicode hexadecimal.".into())); return; } },
+            None => return,
+        }
+    } else { None };
+    if app.token.load(Ordering::Relaxed) != generation { set_status(hwnd, app, Some("Hashing cancelled because the view changed.".into())); return; }
+    start_operation(hwnd, app, Operation::Hash(path, expected));
+}
+
+unsafe fn edit_tags(hwnd: H, app: &mut App) {
+    let selected = selected_indices(app);
+    if selected.len() != 1 { set_status(hwnd, app, Some("Select one item to edit tags.".into())); return; }
+    let path = app.entries[selected[0]].path.clone();
+    let file = match zfm::tags::user_path() { Ok(file) => file, Err(error) => { set_status(hwnd, app, Some(format!("Tags unavailable: {error}"))); return; } };
+    let tags = match zfm::tags::get(&file, &path) { Ok(tags) => tags, Err(error) => { set_status(hwnd, app, Some(format!("Cannot read tags: {error}"))); return; } };
+    let generation = app.token.load(Ordering::Relaxed);
+    let initial = tags.join(", ");
+    let input = match windows_actions::prompt(hwnd, app.theme, "Edit tags — comma-separated; empty clears", OsStr::new(&initial), false) { Some(input) => input, None => return };
+    if app.token.load(Ordering::Relaxed) != generation { set_status(hwnd, app, Some("Tags not saved because the view changed.".into())); return; }
+    let result = input.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Tags must be Unicode"))
+        .and_then(zfm::tags::parse_input).and_then(|tags| zfm::tags::set(&file, &path, &tags));
+    set_status(hwnd, app, Some(match result { Ok(()) => "Tags saved in ZFM's user configuration.".into(), Err(error) => format!("Tags not saved: {error}") }));
+}
+
+unsafe fn regex_rename(hwnd: H, app: &mut App) {
+    let selected = selected_indices(app);
+    if selected.is_empty() || selected.len() > zfm::batch_rename::MAX_ITEMS
+        || selected.iter().any(|i| !app.entries[*i].is_file) {
+        set_status(hwnd, app, Some("Select 1 to 100 regular files for regex rename.".into())); return;
+    }
+    let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.token.load(Ordering::Relaxed);
+    let pattern = match windows_actions::prompt(hwnd, app.theme, "Regex rename — pattern (entire filename)", OsStr::new(""), false) {
+        Some(pattern) => pattern, None => return,
+    };
+    let replacement = match windows_actions::prompt(hwnd, app.theme, "Regex replacement — use ${1}, ${2} for captures", OsStr::new(""), false) {
+        Some(replacement) => replacement, None => return,
+    };
+    let (pattern, replacement) = match (pattern.to_str(), replacement.to_str()) {
+        (Some(pattern), Some(replacement)) => (pattern, replacement),
+        _ => { set_status(hwnd, app, Some("Pattern and replacement must be Unicode.".into())); return; }
+    };
+    let plan = match zfm::batch_rename::plan_regex(&paths, pattern, replacement) {
+        Ok(plan) => plan, Err(error) => { set_status(hwnd, app, Some(format!("Cannot plan regex rename: {error}"))); return; }
     };
     if windows_actions::question(hwnd, app.theme, "Preview batch rename", plan.preview(), "Rename", true) != Some(true) { return; }
     if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
@@ -2674,6 +2799,9 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         }
         if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
             AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
+            AppendMenuW(menu, 0, HASH_FILE, text("Calculate MD5 and SHA-256…").as_ptr());
+            AppendMenuW(menu, 0, VERIFY_HASH, text("Verify checksum…").as_ptr());
+            AppendMenuW(menu, 0, RUN_SCRIPT, text("Run script with interpreter…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
             if zfm::archive_actions::can_extract(&app.entries[selected_items[0]].path) {
@@ -2704,6 +2832,10 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
                 AppendMenuW(menu, 0x10, submenu as usize, text("Compress to").as_ptr());
             }
             AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive…").as_ptr());
+        }
+        if selected_items.len() == 1 { AppendMenuW(menu, 0, EDIT_TAGS, text("Edit tags…").as_ptr()); }
+        if selected_items.len() <= zfm::batch_rename::MAX_ITEMS && selected_items.iter().all(|i| app.entries[*i].is_file) {
+            AppendMenuW(menu, 0, REGEX_RENAME, text("Regex rename…").as_ptr());
         }
         AppendMenuW(menu, 0x800, 0, ptr::null());
         for (id, title) in [
@@ -2762,6 +2894,11 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         AppendMenuW(menu, 0, PROMPT_FILE, text("New file…").as_ptr());
         AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
     }
+    AppendMenuW(menu, 0, RUN_SNIPPET, text("Run code snippet…").as_ptr());
+    AppendMenuW(menu, 0, OPEN_TERMINAL, text("Open terminal here…").as_ptr());
+    AppendMenuW(menu, 0, SERVER_START, text("Start local static server…").as_ptr());
+    AppendMenuW(menu, 0, SERVER_COPY, text("Copy local server URL").as_ptr());
+    AppendMenuW(menu, 0, SERVER_STOP, text("Stop local server").as_ptr());
     AppendMenuW(menu, 0, SNAPSHOT_SAVE, text("Save folder snapshot…").as_ptr());
     AppendMenuW(menu, 0, SNAPSHOT_COMPARE, text("Compare folder snapshot…").as_ptr());
     AppendMenuW(menu, 0, CLEANUP_REVIEW, text("Review cleanup candidates…").as_ptr());
@@ -3481,6 +3618,24 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     SetWindowTextW(app.filter_control, text("").as_ptr());
                     load(hwnd, app, Destination::Refresh, false);
                 }
+                REGEX_RENAME if code == 0 => regex_rename(hwnd, app),
+                EDIT_TAGS if code == 0 => edit_tags(hwnd, app),
+                RUN_SNIPPET if code == 0 => run_code(hwnd, app, None),
+                RUN_SCRIPT if code == 0 => {
+                    let selected = selected_indices(app);
+                    if selected.len() == 1 && app.entries[selected[0]].is_file {
+                        let path = app.entries[selected[0]].path.clone(); run_code(hwnd, app, Some(path));
+                    } else { set_status(hwnd, app, Some("Select one script file.".into())); }
+                }
+                OPEN_TERMINAL if code == 0 => open_terminal(hwnd, app),
+                SERVER_START if code == 0 => server_start(hwnd, app),
+                SERVER_COPY if code == 0 => server_copy(hwnd, app),
+                SERVER_STOP if code == 0 => {
+                    let message = if app.server.take().is_some() { "Local server stopped." } else { "No local server is running." };
+                    set_status(hwnd, app, Some(message.into()));
+                }
+                HASH_FILE if code == 0 => begin_hash(hwnd, app, false),
+                VERIFY_HASH if code == 0 => begin_hash(hwnd, app, true),
                 SETTINGS if code == 0 => {
                     let mut current = app.preferences;
                     current.show_hidden = app.show_hidden;
@@ -3956,6 +4111,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             theme.list_brush as LResult
         }
         WM_DESTROY => {
+            app.server.take();
             if let Some(cancel) = &app.operation_cancel { cancel.store(true, Ordering::Relaxed); }
             KillTimer(hwnd, SCAN_TIMER);
             app.token.fetch_add(1, Ordering::Relaxed);
@@ -4034,6 +4190,7 @@ pub fn run() -> Result<(), String> {
             tracking_mouse: false,
             operation_busy: false,
             operation_cancel: None,
+            server: None,
             consumed_cut_sequence: None,
             notice: None,
             token: Arc::new(AtomicU64::new(0)),
