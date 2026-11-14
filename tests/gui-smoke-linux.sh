@@ -2,6 +2,10 @@
 # Modified: isolate persistent settings and cover the compact layout, tabs and text preview.
 # Run under xvfb-run with GTK and xdotool installed, using the released binary.
 set -euo pipefail
+# Ubuntu's minimal container defaults to the C locale. GTK 3.22 cannot
+# represent our Unicode window titles there, and xdotool cannot find them.
+# C.UTF-8 is available without installing a generated locale on Ubuntu.
+export LC_ALL=C.UTF-8
 if [ "$#" -ne 1 ]; then echo 'Usage: gui-smoke-linux.sh /path/to/zfm' >&2; exit 2; fi
 binary=$1
 work=$(mktemp -d)
@@ -21,7 +25,7 @@ for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then
         echo 'ZFM exited before showing a window:' >&2; cat "$work/stderr" >&2; exit 1
     fi
-    window=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM' 2>/dev/null | head -n 1 || true)
+    window=$(xdotool search --all --onlyvisible --pid "$pid" --name '^ZFM' 2>/dev/null | head -n 1 || true)
     [ -z "$window" ] || break
     sleep 0.1
 done
@@ -46,14 +50,14 @@ xdotool key --window "$window" ctrl+b
 xdotool key --window "$window" ctrl+comma
 settings=''
 for _ in $(seq 1 100); do
-    settings=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Settings$' 2>/dev/null | head -n 1 || true)
+    settings=$(xdotool search --all --onlyvisible --pid "$pid" --name '^ZFM Settings$' 2>/dev/null | head -n 1 || true)
     [ -z "$settings" ] || break
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening settings:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
 if [ -z "$settings" ]; then echo 'Settings dialog did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$settings"
-xdotool key --window "$settings" Escape
+xdotool key Escape
 xdotool windowfocus --sync "$window"
 # Preview one fixture from a folder without stdout/stderr test log files.
 mkdir -p "$work/preview-fixture"
@@ -77,7 +81,19 @@ for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
-if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
+if [ -z "$preview" ]; then
+    echo "Text preview did not appear for pid $pid; title-matching windows:" >&2
+    for candidate in $(xdotool search --name '^ZFM Preview' 2>/dev/null || true); do
+        xdotool getwindowname "$candidate" >&2 || true
+        xdotool getwindowpid "$candidate" >&2 || true
+        xdotool getwindowgeometry --shell "$candidate" >&2 || true
+    done
+    echo 'All titled windows:' >&2
+    for candidate in $(xdotool search --name '.' 2>/dev/null || true); do
+        echo "Window $candidate: $(xdotool getwindowname "$candidate" 2>/dev/null || true) pid=$(xdotool getwindowpid "$candidate" 2>/dev/null || true)" >&2
+    done
+    cat "$work/stderr" >&2; exit 1
+fi
 xdotool windowfocus --sync "$preview"
 xdotool key Escape
 xdotool windowfocus --sync "$window"
@@ -107,7 +123,7 @@ xdotool key --window "$window" ctrl+n
 dialog=''
 for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening the name dialog:' >&2; cat "$work/stderr" >&2; exit 1; fi
-    dialog=$(xdotool search --onlyvisible --pid "$pid" --name '^New file$' 2>/dev/null | head -n 1 || true)
+    dialog=$(xdotool search --all --onlyvisible --pid "$pid" --name '^New file$' 2>/dev/null | head -n 1 || true)
     [ -z "$dialog" ] || break
     sleep 0.1
 done
@@ -134,14 +150,14 @@ sleep 1
 xdotool key --window "$window" Escape ctrl+a ctrl+p
 search_preview=''
 for _ in $(seq 1 100); do
-    search_preview=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Preview — needle-search.txt$' 2>/dev/null | head -n 1 || true)
+    search_preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^ZFM Preview — needle-search.txt$' 2>/dev/null | head -n 1 || true)
     [ -z "$search_preview" ] || break
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during recursive search:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
 if [ -z "$search_preview" ]; then echo 'Recursive search result did not open its preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$search_preview"
-xdotool key --window "$search_preview" Escape
+xdotool key Escape
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+f ctrl+a BackSpace Return
 sleep 1
