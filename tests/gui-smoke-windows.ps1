@@ -237,7 +237,7 @@ try {
     $settings = [IntPtr]::Zero
     for ($i = 0; $i -lt 100; $i++) {
         $settings = [ZfmSmoke]::FindWindowW('#32770', 'ZFM Settings')
-        if ($settings -ne [IntPtr]::Zero) { break }
+        if ($settings -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($settings, 1007) -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 100
     }
     if ($settings -eq [IntPtr]::Zero) { throw 'Settings dialog did not appear.' }
