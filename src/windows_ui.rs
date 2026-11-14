@@ -2249,6 +2249,7 @@ enum Operation {
     NewFolder(PathBuf, OsString),
     Delete(PathBuf),
     Rename(PathBuf, OsString),
+    BatchRename(zfm::batch_rename::RenamePlan),
     Copy(PathBuf, PathBuf, OsString),
     CutPaste(Vec<PathBuf>, PathBuf, u32),
     CopyItems(Vec<PathBuf>, PathBuf),
@@ -2283,6 +2284,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     .map(|p| format!("Created {}", p.display())),
                 Operation::Rename(path, name) => zfm::operations::rename_child(&path, &name)
                     .map(|p| format!("Renamed to {}", p.display())),
+                Operation::BatchRename(plan) => zfm::batch_rename::apply(&plan, &cancel, |_| {})
+                    .map(|result| result.message(plan.len())),
                 Operation::Delete(path) => zfm::operations::remove_one(&path)
                     .map(|_| format!("Deleted {}", path.display())),
                 Operation::Trash(paths, owner) => zfm::trash::trash_items(&paths, owner, &cancel)
@@ -2335,6 +2338,30 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
             }
         }
     });
+}
+
+unsafe fn batch_rename(hwnd: H, app: &mut App) {
+    let selected = selected_indices(app);
+    if !(2..=zfm::batch_rename::MAX_ITEMS).contains(&selected.len()) {
+        set_status(hwnd, app, Some("Select 2 to 100 regular files for batch rename.".into())); return;
+    }
+    if selected.iter().any(|i| !app.entries[*i].is_file) {
+        set_status(hwnd, app, Some("Batch rename supports regular files only.".into())); return;
+    }
+    let paths: Vec<PathBuf> = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.token.load(Ordering::Relaxed);
+    let base = match windows_actions::prompt(hwnd, app.theme, "Batch rename — base name", OsStr::new(""), false) {
+        Some(base) => base, None => return,
+    };
+    let plan = match zfm::batch_rename::plan(&paths, &base) {
+        Ok(plan) => plan, Err(error) => { set_status(hwnd, app, Some(format!("Cannot plan rename: {error}"))); return; }
+    };
+    if windows_actions::question(hwnd, app.theme, "Preview batch rename", plan.preview(), "Rename", true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+        set_status(hwnd, app, Some("Rename cancelled because the view changed; select the files again.".into())); return;
+    }
+    start_operation(hwnd, app, Operation::BatchRename(plan));
 }
 
 pub fn show_startup_error(message: &str) {
@@ -3600,6 +3627,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     }
                 }
                 PROMPT_RENAME if code == 0 => {
+                    if selected_indices(app).len() > 1 { batch_rename(hwnd, app); return 0; }
                     if let Some(path) = selected_path(hwnd, app) {
                         if let Some(name) = windows_actions::prompt(
                             hwnd,
@@ -3636,6 +3664,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     start_operation(hwnd, app, operation);
                 }
                 RENAME if code == 0 => {
+                    if selected_indices(app).len() > 1 { batch_rename(hwnd, app); return 0; }
                     let path = selected_path(hwnd, app);
                     if let Some(path) = path {
                         let name = control_value(app.name_control);

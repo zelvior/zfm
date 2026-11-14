@@ -36,3 +36,5 @@ Use Ctrl+B to bookmark the current folder, or open **Bookmarks** in the sidebar 
 Enter a filename term and use Ctrl+Shift+F or **Organize → Search subfolders** for bounded recursive search. Results show relative paths; right-click to open the containing folder. The Case and Hidden options apply. Clear exits search mode. See the README for limits and filesystem caveats.
 
 The offline converter supports uncompressed PCM WAV ↔ AIFF and WAV ↔ AU (8/16-bit mono/stereo only); metadata is not preserved. See the README for sample-rate, input-size, cancellation and safety limits.
+
+F2 or Rename on 2–100 selected regular files in the same folder opens a numbered batch-rename preview. See the README for preflight checks, no-overwrite and partial-result limitations.

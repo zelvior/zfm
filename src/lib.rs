@@ -10,6 +10,7 @@ pub mod image_convert;
 pub mod audio_convert;
 
 pub mod operations;
+pub mod batch_rename;
 
 pub mod archive;
 pub mod archive_actions;
