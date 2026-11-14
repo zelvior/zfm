@@ -1033,7 +1033,7 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     (api().gtk_box_pack_start)(layout, progress, 0, 0, 0);
     let status = label("Choose an archive and load it.");
     (api().gtk_label_set_xalign)(status, 0.0);
-    (api().gtk_label_set_ellipsize)(status, 3);
+    ellipsized_status(status);
     (api().gtk_box_pack_start)(layout, status, 0, 0, 0);
     let manager = Box::into_raw(Box::new(ArchiveManager {
         window,

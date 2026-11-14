@@ -34,6 +34,7 @@ separator { background-color: #3d434b; }
 label, checkbutton, radiobutton { color: #e2e2e2; }
 
 /* Consistent slim tracks in every GTK scrolled window, including dialogs. */
+scrollbar, scrollbar trough, scrollbar slider { background-image: none; box-shadow: none; }
 scrollbar { background-color: #1d252e; border: 0; }
 scrollbar trough { background-color: #303740; border-radius: 8px; }
 scrollbar.vertical trough { min-width: 12px; }

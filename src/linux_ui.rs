@@ -124,6 +124,7 @@ api! {
     gtk_switch_set_active: unsafe extern "C" fn(P, c_int),
     gtk_switch_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_label_set_text: unsafe extern "C" fn(P, *const c_char),
+    gtk_label_get_text: unsafe extern "C" fn(P) -> *const c_char,
     gtk_label_set_xalign: unsafe extern "C" fn(P, f32),
     gtk_label_set_line_wrap: unsafe extern "C" fn(P, c_int),
     gtk_editable_set_editable: unsafe extern "C" fn(P, c_int),
@@ -289,6 +290,15 @@ unsafe fn wrapped_label(text: &str) -> P {
     (api().gtk_label_set_line_wrap_mode)(widget, 2); // PANGO_WRAP_WORD_CHAR
     (api().gtk_label_set_max_width_chars)(widget, 72);
     widget
+}
+// Ellipsized status messages remain available in full via tooltip and a11y.
+unsafe extern "C" fn status_label_changed(widget: P, _: P, _: P) {
+    (api().gtk_widget_set_tooltip_text)(widget, (api().gtk_label_get_text)(widget));
+}
+unsafe fn ellipsized_status(widget: P) {
+    (api().gtk_label_set_ellipsize)(widget, 3);
+    connect(widget, "notify::label", status_label_changed as P, ptr::null_mut());
+    status_label_changed(widget, ptr::null_mut(), ptr::null_mut());
 }
 unsafe fn set_status(app: &App, text: &str) {
     (api().gtk_label_set_text)(app.status, c(text).as_ptr());
@@ -1363,7 +1373,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_box_pack_start)(status_box, status_icon, 0, 0, 8);
         let status = label("Ready");
         (api().gtk_label_set_xalign)(status, 0.0);
-        (api().gtk_label_set_ellipsize)(status, 3);
+        ellipsized_status(status);
         (api().gtk_box_pack_start)(status_box, status, 1, 1, 0);
         (api().gtk_box_pack_start)(outer, status_box, 0, 0, 0);
 
@@ -1870,7 +1880,7 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_box_pack_start)(layout, progress, 0, 0, 0);
     let status = label("Output must not already exist.");
     (api().gtk_label_set_xalign)(status, 0.0);
-    (api().gtk_label_set_ellipsize)(status, 3);
+    ellipsized_status(status);
     (api().gtk_box_pack_start)(layout, status, 0, 0, 0);
     let actions = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, actions, 0, 0, 0);
