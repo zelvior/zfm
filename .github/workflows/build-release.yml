@@ -47,7 +47,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset: ZFM-Linux-64bit.deb
+          - target: i686-unknown-linux-gnu
+            asset: ZFM-Linux-32bit.deb
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,8 +64,12 @@ jobs:
         run: |
           set -euxo pipefail
           # Build with Ubuntu 18.04's glibc 2.27 rather than the runner's 2.35.
-          docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:18.04 \
-            bash scripts/ci-legacy-linux.sh "$TARGET" "$TAG"
+          if ! docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:18.04 \
+            bash scripts/ci-legacy-linux.sh "$TARGET" "$TAG" 2>&1 | tee /tmp/zfm-legacy.log; then
+            message=$(tail -40 /tmp/zfm-legacy.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=Legacy Linux release build::$message"
+            exit 1
+          fi
       - name: Check shell scripts
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
@@ -75,13 +83,12 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euxo pipefail
-          name="zfm-$TARGET"
           mkdir -p dist
-          cp "build-output/$TARGET/zfm.deb" "dist/$name.deb"
+          cp "build-output/$TARGET/zfm.deb" "dist/${{ matrix.asset }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: dist/zfm-${{ matrix.target }}.deb
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
   windows:
@@ -95,7 +102,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-msvc, i686-pc-windows-msvc]
+        include:
+          - target: x86_64-pc-windows-msvc
+            asset: ZFM-Win-64bit.exe
+          - target: i686-pc-windows-msvc
+            asset: ZFM-Win-32bit.exe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -131,7 +142,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo +1.77.2 build --release --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $name = "zfm-$env:TARGET"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           & ./scripts/build-archive-engine.ps1 -Target $env:TARGET -Output "dist/zfm-archive-engine.exe"
           Copy-Item -LiteralPath "dist/zfm-archive-engine.exe" -Destination "target/$env:TARGET/release/zfm-archive-engine.exe"
@@ -146,13 +156,13 @@ jobs:
           $env:ZFM_VERSION = $env:TAG
           cargo +1.77.2 build --release --locked --target $env:TARGET -p zfm-installer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $installer = Join-Path $PWD "dist/$name-setup.exe"
+          $installer = Join-Path $PWD "dist/${{ matrix.asset }}"
           Copy-Item "target/$env:TARGET/release/zfm-setup.exe" -Destination $installer
           & ./tests/installer-windows.ps1 -Installer $installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zfm-${{ matrix.target }}
-          path: dist/zfm-${{ matrix.target }}-setup.exe
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
   release:
@@ -184,10 +194,10 @@ jobs:
           set -euxo pipefail
           cd dist
           assets=(
-            zfm-x86_64-unknown-linux-gnu.deb
-            zfm-i686-unknown-linux-gnu.deb
-            zfm-x86_64-pc-windows-msvc-setup.exe
-            zfm-i686-pc-windows-msvc-setup.exe
+            ZFM-Linux-64bit.deb
+            ZFM-Linux-32bit.deb
+            ZFM-Win-64bit.exe
+            ZFM-Win-32bit.exe
           )
           for asset in "${assets[@]}"; do test -s "$asset"; done
           sha256sum "${assets[@]}" > SHA256SUMS.txt
