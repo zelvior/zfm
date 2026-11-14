@@ -1,5 +1,5 @@
 /* Compact dark details view, inspired by a traditional file manager. */
-* { background-image: none; }
+/* Avoid overriding native glyph rendering globally. */
 window, dialog { background-color: #1d252e; color: #e4e5e6; }
 .zfm-nav { background-color: #202a34; padding: 4px 6px; }
 .zfm-tabs { background-color: #26303a; padding: 3px 6px; border-bottom: 1px solid #41464b; }
@@ -17,12 +17,15 @@ row { background-color: #1c1c1c; color: #eeeeee; }
 row:hover { background-color: #303234; }
 row:selected, row:selected box, row:selected label { background-color: #3b3b3d; color: #ffffff; }
 .zfm-file-icon { color: #9da1a4; }
-button { background-color: #303943; color: #e4e5e6; border: 1px solid #454b50; border-radius: 4px; padding: 2px 7px; min-height: 20px; box-shadow: none; }
+button { background-image: none; background-color: #303943; color: #e4e5e6; border: 1px solid #454b50; border-radius: 4px; padding: 2px 7px; min-height: 20px; box-shadow: none; }
 button:hover { background-color: #404a53; border-color: #667078; }
 button:active, button:checked { background-color: #252c32; color: #ffffff; }
+button:focus { border-color: #77b8ea; box-shadow: inset 0 0 0 1px #77b8ea; }
+button:disabled { background-color: #292e34; border-color: #383e45; color: #8d969f; }
+button:disabled label { color: #8d969f; }
 .zfm-tab-btn { border-radius: 4px; background-color: #29313a; color: #d9dcdf; padding: 2px 7px; }
 .zfm-tab-active, .zfm-tab-btn:disabled { background-color: #3c4248; color: #ffffff; }
-entry { background-color: #252d33; color: #eeeeee; border: 1px solid #454b50; border-radius: 4px; padding: 2px 6px; min-height: 20px; box-shadow: none; }
+entry { background-image: none; background-color: #252d33; color: #eeeeee; border: 1px solid #454b50; border-radius: 4px; padding: 2px 6px; min-height: 20px; box-shadow: none; }
 entry:focus { border-color: #5c94d0; }
 .zfm-status { background-color: #303132; border-top: 1px solid #494a4b; padding: 5px 12px; color: #e2e2e2; }
 menu, menuitem { background-color: #252930; color: #eeeeee; }
@@ -32,7 +35,9 @@ label, checkbutton, radiobutton { color: #e2e2e2; }
 
 /* Consistent slim tracks in every GTK scrolled window, including dialogs. */
 scrollbar { background-color: #1d252e; border: 0; }
-scrollbar trough { background-color: #303740; border-radius: 8px; min-width: 12px; min-height: 12px; }
+scrollbar trough { background-color: #303740; border-radius: 8px; }
+scrollbar.vertical trough { min-width: 12px; }
+scrollbar.horizontal trough { min-height: 12px; }
 scrollbar slider { background-color: #858d97; border: 2px solid #303740; border-radius: 8px; min-width: 8px; min-height: 32px; }
 scrollbar.horizontal slider { min-width: 32px; min-height: 8px; }
 scrollbar slider:hover { background-color: #a5adb8; }
@@ -44,9 +49,11 @@ scrollbar slider:active { background-color: #63aee7; }
 .zfm-settings-note { color: #abb2ba; }
 .zfm-settings-apply { background-color: #337fc2; color: #ffffff; border-radius: 16px; padding: 5px 22px; }
 .zfm-settings-apply:hover { background-color: #4094d9; }
-switch { background-color: #303740; border: 1px solid #6b737c; border-radius: 14px; box-shadow: none; }
-switch:checked { background-color: #4aa6e5; border-color: #4aa6e5; }
-switch slider { background-color: #d9e0e8; border: 0; border-radius: 14px; box-shadow: none; }
+switch { background-image: none; background-color: #303740; border: 1px solid #6b737c; border-radius: 14px; box-shadow: none; }
+switch:checked { background-color: #337fc2; border-color: #77b8ea; }
+switch:focus { box-shadow: 0 0 0 2px #77b8ea; }
+switch:disabled { opacity: 0.55; }
+switch slider { background-image: none; background-color: #d9e0e8; border: 0; border-radius: 14px; min-width: 18px; min-height: 18px; box-shadow: none; }
 
 /* Shared treatment for ZFM-owned dialogs; desktop-native pickers remain native. */
 .zfm-dialog { background-color: #1d252e; color: #e4e5e6; }

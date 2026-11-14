@@ -65,7 +65,7 @@ unsafe extern "C" fn office_preview_ready(data: P) -> c_int {
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 900, 650);
-    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    let scroll = scroll_window();
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), scroll, 1, 1, 0);
     let view = (api().gtk_text_view_new)();
     (api().gtk_text_view_set_editable)(view, 0);
@@ -124,7 +124,7 @@ unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 900, 650);
     let content = (api().gtk_dialog_get_content_area)(dialog);
-    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    let scroll = scroll_window();
     (api().gtk_box_pack_start)(content, scroll, 1, 1, 0);
     let mut pixbuf = ptr::null_mut();
     let mut image_widget = ptr::null_mut();

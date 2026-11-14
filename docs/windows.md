@@ -107,7 +107,8 @@ F2 or Rename on 2–100 selected regular files in the same folder opens a number
 ### Dialog and scrollbar styling
 
 ZFM's settings use native checkbox state and keyboard navigation with a custom
-switch appearance. Its file list, archive list, text preview and report dialogs
-use dark, rounded scrollbars over the native Windows scroll controls; the native
-controls still handle scrolling and accessibility. Windows-owned dialogs (such
-as system file pickers and Properties) and the installer use system styling.
+switch appearance. File lists, archive lists, text previews and reports use
+native Windows scrollbar drawing and behavior; a dark Explorer theme is requested
+where available, but scrollbar appearance depends on the Windows version and
+system theme. Windows-owned dialogs (such as system file pickers and Properties)
+and the installer use system styling.

@@ -999,7 +999,7 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let title = label(
+    let title = wrapped_label(
         "TAR, ZIP, 7z and compressed TAR · no overwrite · selecting a folder does not select its contents",
     );
     (api().gtk_label_set_xalign)(title, 0.0);
@@ -1013,22 +1013,27 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     (api().gtk_box_pack_start)(layout, engine_row, 0, 0, 0);
     let extract_row = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, extract_row, 0, 0, 0);
+    let extract_row_more = (api().gtk_box_new)(0, 4);
+    (api().gtk_box_pack_start)(layout, extract_row_more, 0, 0, 0);
     let dest_row = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, dest_row, 0, 0, 0);
     let destination = (api().gtk_entry_new)();
     (api().gtk_entry_set_placeholder_text)(destination, c("Destination folder").as_ptr());
     (api().gtk_box_pack_start)(dest_row, destination, 1, 1, 0);
-    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    let scroll = scroll_window();
     (api().gtk_box_pack_start)(layout, scroll, 1, 1, 0);
     let list = (api().gtk_list_box_new)();
     (api().gtk_list_box_set_selection_mode)(list, 3);
     (api().gtk_container_add)(scroll, list);
     let actions = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, actions, 0, 0, 0);
+    let more_actions = (api().gtk_box_new)(0, 4);
+    (api().gtk_box_pack_start)(layout, more_actions, 0, 0, 0);
     let progress = (api().gtk_progress_bar_new)();
     (api().gtk_box_pack_start)(layout, progress, 0, 0, 0);
     let status = label("Choose an archive and load it.");
     (api().gtk_label_set_xalign)(status, 0.0);
+    (api().gtk_label_set_ellipsize)(status, 3);
     (api().gtk_box_pack_start)(layout, status, 0, 0, 0);
     let manager = Box::into_raw(Box::new(ArchiveManager {
         window,
@@ -1055,19 +1060,19 @@ pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     button(engine_row, "Test with password…", archive_engine_test_password as P, manager);
     button(extract_row, "Extract all with engine…", archive_engine_extract as P, manager);
     button(extract_row, "Extract with password…", archive_engine_extract_password as P, manager);
-    button(extract_row, "Extract selected…", archive_extract_selected as P, manager);
-    button(extract_row, "Extract all (native)…", archive_extract_all as P, manager);
+    button(extract_row_more, "Extract selected…", archive_extract_selected as P, manager);
+    button(extract_row_more, "Extract all (native)…", archive_extract_all as P, manager);
     button(dest_row, "Browse…", archive_destination as P, manager);
     button(actions, "Test archive", archive_test as P, manager);
     button(actions, "Select all", archive_select_all as P, manager);
     button(actions, "Deselect", archive_select_none as P, manager);
     button(
-        actions,
+        more_actions,
         "Create TAR/ZIP/7z from file…",
         archive_create as P,
         manager,
     );
-    button(actions, "Cancel", archive_cancel as P, manager);
+    button(more_actions, "Cancel", archive_cancel as P, manager);
     connect(window, "delete-event", converter_hide as P, manager);
     manager
 }
