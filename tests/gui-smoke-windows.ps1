@@ -280,6 +280,15 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($hashDialog -eq [IntPtr]::Zero) { throw 'File hash report did not appear.' }
+    $reportRect = New-Object ZfmSmoke+Rect
+    $beforeReport = New-Object ZfmSmoke+Rect
+    $afterReport = New-Object ZfmSmoke+Rect
+    if (-not [ZfmSmoke]::GetWindowRect($hashDialog, [ref]$reportRect) -or -not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($hashDialog, 1002), [ref]$beforeReport)) { throw 'Cannot inspect report layout.' }
+    if (-not [ZfmSmoke]::SetWindowPos($hashDialog, [IntPtr]::Zero, 0, 0, ($reportRect.right - $reportRect.left + 100), ($reportRect.bottom - $reportRect.top + 80), 0x0016)) { throw 'Cannot resize report.' }
+    Start-Sleep -Milliseconds 300
+    if (-not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($hashDialog, 1002), [ref]$afterReport)) { throw 'Cannot inspect resized report.' }
+    if (($afterReport.right - $afterReport.left) -le ($beforeReport.right - $beforeReport.left) -or ($afterReport.bottom - $afterReport.top) -le ($beforeReport.bottom - $beforeReport.top)) { throw 'Report did not expand on resize.' }
+
     $hashText = New-Object System.Text.StringBuilder 4096
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($hashDialog, 1002), 0x000D, [UIntPtr]$hashText.Capacity, $hashText, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read file hash report.' }
