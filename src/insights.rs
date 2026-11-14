@@ -9,8 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ENTRIES: usize = 5000;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_REPORT: usize = 250;
+const MAX_REPORT: usize = 50;
 static NEXT: AtomicU64 = AtomicU64::new(0);
+fn short(s: &str) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(200).collect();
+    if chars.next().is_some() { format!("{prefix}… [truncated]") } else { prefix }
+}
 fn invalid(s: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, s) }
 fn cancelled(cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) { Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled")) } else { Ok(()) }
@@ -93,10 +98,12 @@ fn load(path: &Path) -> io::Result<Snapshot> {
 }
 /// Stores one baseline per user. The caller must explicitly confirm replacement.
 pub fn save_snapshot(root: &Path, cancel: &AtomicBool) -> io::Result<String> {
+    save_to(root, &snapshot_path()?, cancel)
+}
+fn save_to(root: &Path, path: &Path, cancel: &AtomicBool) -> io::Result<String> {
     let snapshot = scan(root, cancel)?;
     let contents = encode(&snapshot);
     if contents.len() as u64 > MAX_BYTES { return Err(invalid("Snapshot exceeds storage limit")); }
-    let path = snapshot_path()?;
     let dir = path.parent().ok_or_else(|| invalid("Invalid snapshot location"))?;
     if !crate::settings::check_directory(dir)? {
         #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?; }
@@ -127,14 +134,17 @@ pub fn save_snapshot(root: &Path, cancel: &AtomicBool) -> io::Result<String> {
     Err(invalid("Could not create a snapshot staging file"))
 }
 pub fn compare_snapshot(root: &Path, cancel: &AtomicBool) -> io::Result<String> {
-    let saved = load(&snapshot_path()?)?;
+    compare_with(root, &snapshot_path()?, cancel)
+}
+fn compare_with(root: &Path, path: &Path, cancel: &AtomicBool) -> io::Result<String> {
+    let saved = load(path)?;
     let now = scan(root, cancel)?;
     if saved.root != now.root { return Err(invalid("The saved baseline belongs to a different folder. Open that folder or save a new baseline.")); }
     let mut changes = Vec::new();
     for (name, item) in &saved.entries {
-        match now.entries.get(name) { None => changes.push(format!("Removed: {name:?}")), Some(new) if new != item => changes.push(format!("Metadata changed: {name:?}")), _ => () }
+        match now.entries.get(name) { None => changes.push(format!("Removed: {}", short(&format!("{name:?}")))), Some(new) if new != item => changes.push(format!("Metadata changed: {}", short(&format!("{name:?}")))), _ => () }
     }
-    for name in now.entries.keys() { if !saved.entries.contains_key(name) { changes.push(format!("Added: {name:?}")); } }
+    for name in now.entries.keys() { if !saved.entries.contains_key(name) { changes.push(format!("Added: {}", short(&format!("{name:?}")))); } }
     let total = changes.len();
     let mut result = format!("Folder comparison: {}\n{total} change(s) among immediate entries.\n\n", root.display());
     if total == 0 { result.push_str("No metadata changes detected.\n"); }
@@ -155,7 +165,7 @@ pub fn cleanup_report(root: &Path, cancel: &AtomicBool) -> io::Result<String> {
         if item.size == 0 { reasons.push("empty file"); }
         if lower.ends_with(".tmp") || lower.ends_with(".bak") || lower.ends_with('~') { reasons.push("temporary/backup-like name"); }
         if item.size >= 100 * 1024 * 1024 && now.saturating_sub(item.modified) >= old { reasons.push("at least 100 MiB and not modified for 180 days"); }
-        if !reasons.is_empty() { suggestions.push(format!("{name:?} — {} bytes — {}", item.size, reasons.join(", "))); }
+        if !reasons.is_empty() { suggestions.push(format!("{} — {} bytes — {}", short(&format!("{name:?}")), item.size, reasons.join(", "))); }
     }
     let total = suggestions.len();
     let mut out = format!("Cleanup review: {}\n{total} possible candidate(s), from immediate entries only.\n\n", root.display());
@@ -176,8 +186,15 @@ pub fn impact(kind: PreviewKind, paths: &[PathBuf], destination: &Path, cancel: 
     let parent_meta = fs::symlink_metadata(parent)?;
     if link(&parent_meta) || !parent_meta.is_dir() { return Err(invalid("Destination folder must be an existing real directory")); }
     if matches!(kind, PreviewKind::Rename | PreviewKind::Archive) { crate::operations::validate_name(destination.file_name().ok_or_else(|| invalid("Missing destination name"))?)?; }
-    if matches!(kind, PreviewKind::Archive) && !crate::archive_actions::Format::ALL.iter().any(|f| f.matches(destination)) { out.push_str("Warning: unsupported archive extension.\n"); }
+    if matches!(kind, PreviewKind::Archive) {
+        match crate::archive_actions::Format::ALL.iter().find(|f| f.matches(destination)) {
+            None => out.push_str("Warning: unsupported archive extension.\n"),
+            Some(format) if format.single_file() && (paths.len() != 1 || fs::symlink_metadata(&paths[0]).map_or(true, |m| link(&m) || !m.is_file())) => out.push_str("Warning: this format requires exactly one regular file.\n"),
+            _ => ()
+        }
+    }
     let mut seen = BTreeSet::new();
+    let mut warning_count = 0usize;
     for (i, path) in paths.iter().enumerate() {
         cancelled(cancel)?;
         let target = if matches!(kind, PreviewKind::Copy | PreviewKind::Move) { parent.join(path.file_name().ok_or_else(|| invalid("Source has no name"))?) } else { destination.to_owned() };
@@ -189,9 +206,11 @@ pub fn impact(kind: PreviewKind, paths: &[PathBuf], destination: &Path, cancel: 
         if path == &target || (matches!(kind, PreviewKind::Copy | PreviewKind::Move) && target.starts_with(path)) { warnings.push("destination is the source or inside it"); }
         if !matches!(kind, PreviewKind::Archive) && !seen.insert(target.clone()) { warnings.push("multiple sources have the same destination"); }
         match fs::symlink_metadata(&target) { Ok(_) => warnings.push("destination already exists; no overwrite"), Err(e) if e.kind() == io::ErrorKind::NotFound => (), Err(_) => warnings.push("destination cannot be inspected") }
-        if i < MAX_REPORT { out.push_str(&format!("{:?} → {:?}{}\n", path, target, if warnings.is_empty() { String::new() } else { format!("  ⚠ {}", warnings.join("; ")) })); }
+        if !warnings.is_empty() { warning_count += 1; }
+        if i < MAX_REPORT { out.push_str(&format!("{} → {}{}\n", short(&format!("{path:?}")), short(&format!("{target:?}")), if warnings.is_empty() { String::new() } else { format!("  ⚠ {}", warnings.join("; ")) })); }
     }
     if paths.len() > MAX_REPORT { out.push_str(&format!("… {} additional mappings not shown.\n", paths.len()-MAX_REPORT)); }
+    out.push_str(&format!("\n{warning_count} selected item(s) have warnings; check omitted mappings too. Long names may be truncated.\n"));
     out.push_str("\nAdvisory only: does not inspect folder contents, test permissions, free space, archive limits, cross-volume moves or predict all failures. Files may change after this preview. Use the normal action to proceed; nothing was executed.");
     Ok(out)
 }
@@ -212,6 +231,23 @@ mod tests {
         assert!(preview.contains("destination already exists") && preview.contains("no changes made"));
         cancel.store(true, Ordering::Relaxed);
         assert_eq!(scan(&root, &cancel).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test] fn snapshot_saved_compare_and_corruption_safe() {
+        let root = crate::test_support::scratch_dir("insight-diff");
+        let folder = root.join("files"); fs::create_dir(&folder).unwrap();
+        let path = root.join("config").join("baseline");
+        fs::write(folder.join("old"), b"old").unwrap();
+        let cancel = AtomicBool::new(false);
+        save_to(&folder, &path, &cancel).unwrap();
+        fs::remove_file(folder.join("old")).unwrap();
+        fs::write(folder.join("new"), b"new").unwrap();
+        let report = compare_with(&folder, &path, &cancel).unwrap();
+        assert!(report.contains("Removed: \"old\"") && report.contains("Added: \"new\""));
+        assert!(compare_with(&root, &path, &cancel).is_err());
+        fs::write(&path, b"invalid").unwrap();
+        assert!(save_to(&folder, &path, &cancel).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"invalid");
         fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)] #[test] fn refuses_root_symlink() {

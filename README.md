@@ -263,3 +263,37 @@ See [development phases and conversion matrix](docs/development-plan.md) for cur
 ## Legal, privacy and security
 
 ZFM is distributed under [Apache License 2.0](LICENSE). Read the [release-readiness audit](LEGAL/RELEASE_READINESS.md), [third-party and runtime inventory](LEGAL/THIRD_PARTY.md), [privacy notes](LEGAL/PRIVACY.md), [operational terms](LEGAL/TERMS.md), and [security reporting policy](SECURITY.md). The [source-workspace SBOM](SBOM.spdx.json) is not a complete binary inventory. Ownership, trademark clearance, private security reporting and release-specific third-party obligations require further action; these materials are not legal advice or certification. Installed README copies include Rust 1.77.2 upstream reference notices; links to repository documents may require visiting the [source repository](https://github.com/zelvior/zfm).
+
+## Review-first folder insights
+
+ZFM now has three early, offline review tools (they are not claimed to be unique
+among file managers):
+
+- Select items and choose **Preview copy/move/rename/archive impact** from the
+  selection menu. Choose a proposed destination or name to see mappings and
+  obvious conflicts. This does **not** execute the operation; use the ordinary
+  action separately. It checks only immediate paths, not folder contents,
+  permissions, free space, cross-volume moves, archive limits or every failure.
+- From **Organize** (Linux) or **Actions** (Windows), **Save folder snapshot**
+  saves one baseline for the current folder, replacing any previous baseline
+  only after confirmation. **Compare folder snapshot** compares the same
+  folder with that baseline. It records immediate entry names, type, file size
+  and modification time, including hidden entries, but not content or subtrees.
+  Renames appear as removal plus addition. It is not a backup and can miss
+  content changes. The baseline contains sensitive names and metadata and is
+  stored as `folder-snapshot-v1` in ZFM's user configuration directory; delete
+  that file to remove it. Folder and filenames must be Unicode.
+- **Review cleanup candidates** reports immediate regular files that are empty,
+  have `.tmp`, `.bak` or `~` names, or are at least 100 MiB and not modified
+  for 180 days. Each suggestion states the rule. These are **not** proof an item
+  is disposable; nothing is deleted or changed. Inspect each item yourself.
+
+These reports scan at most 5,000 immediate entries (including hidden entries),
+show at most 50 report lines and may truncate long display names. A scan error or
+limit stops the operation instead of saving an incomplete baseline. Scans run
+on a worker and can be cancelled between entries via **Cancel operation**; a
+blocked filesystem call cannot be interrupted. Metadata can change during or
+after scanning; links/reparse points are not followed as entries, but parent
+path replacement is not secured against hostile concurrent changes. Use trusted
+folders. Snapshot writes use a private staging file and replace the baseline;
+a crash may leave a staging file. Filesystem and permission errors are reported.

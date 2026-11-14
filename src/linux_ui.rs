@@ -2214,9 +2214,9 @@ unsafe fn preview_impact(data: P, kind: zfm::insights::PreviewKind) {
         zfm::insights::PreviewKind::Copy | zfm::insights::PreviewKind::Move => choose_folder(parent),
         zfm::insights::PreviewKind::Rename => {
             let initial = paths[0].file_name().and_then(|s| s.to_str()).unwrap_or("");
-            prompt(parent, "Preview rename impact", "Enter a proposed new name (nothing will be changed):", Some(initial)).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(paths[0].parent().unwrap_or(&root).join(name)) } else { set_status(&*(data as *mut App), "Invalid proposed filename."); None })
+            prompt(parent, "Preview rename impact", "Enter a proposed new name (nothing will be changed):", Some(initial)).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(paths[0].parent().unwrap_or(&root).join(name)) } else { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), "Invalid proposed filename."); } None })
         }
-        zfm::insights::PreviewKind::Archive => prompt(parent, "Preview archive impact", "Enter a proposed archive filename (nothing will be created):", Some("archive.zip")).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(root.join(name)) } else { set_status(&*(data as *mut App), "Invalid proposed filename."); None }),
+        zfm::insights::PreviewKind::Archive => prompt(parent, "Preview archive impact", "Enter a proposed archive filename (nothing will be created):", Some("archive.zip")).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(root.join(name)) } else { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), "Invalid proposed filename."); } None }),
     };
     if let Some(target) = target { if alive.load(Ordering::Relaxed) {
         let app = &*(data as *mut App);

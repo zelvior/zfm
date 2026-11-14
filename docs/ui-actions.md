@@ -16,3 +16,11 @@ ZFM exposes its implemented end-user operations in its native Linux and Windows 
 | Package uninstall | Organize → Uninstall ZFM (Debian package via system tools) | Installed uninstaller via Windows settings/Start Menu |
 
 The conversion matrix and archive, preview, cancellation, clipboard and filesystem safety limitations are detailed in the [README](../README.md). Availability depends on platform, file type and installed/bundled components. For example, Office text preview is limited, the experimental layout bridge is not packaged, and external tools may be required. Low-level libraries are not independently exposed as UI commands, nor are unimplemented features such as drag-and-drop, cross-volume moves or general undo. Do not treat this map as a compatibility or completeness guarantee.
+
+## Review-first insights
+
+Both frontends expose **Save folder snapshot**, **Compare folder snapshot**, and
+**Review cleanup candidates** from Organize/Actions, plus operation impact
+previews in the selected-item menu. These are advisory first versions, not
+automatic cleanup or an execution guarantee. See the README for scope, privacy,
+limits and cancellation behavior.
