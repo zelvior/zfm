@@ -323,5 +323,33 @@ fi
 grep -q alpha "$work/rename-test/Holiday (1).txt"
 grep -q beta "$work/rename-test/Holiday (2).csv"
 [ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
+# Permanent delete defaults to Cancel and requires explicit confirmation.
+mkdir -p "$work/delete-fixture"
+printf 'delete test\n' > "$work/delete-fixture/delete-me.txt"
+cut_navigate "$work/delete-fixture"
+open_delete() {
+    xdotool windowfocus --sync "$window"
+    xdotool key --window "$window" Escape ctrl+a shift+Delete
+    delete_dialog=''
+    for _ in $(seq 1 100); do
+        delete_dialog=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Confirm permanent deletion$' 2>/dev/null | head -n 1 || true)
+        [ -z "$delete_dialog" ] || break
+        sleep 0.1
+    done
+    [ -n "$delete_dialog" ] || { echo 'Deletion confirmation did not appear.' >&2; cat "$work/stderr" >&2; exit 1; }
+    xdotool windowfocus --sync "$delete_dialog"
+    sleep 0.3
+}
+open_delete
+xdotool key Return
+sleep 0.5
+[ -f "$work/delete-fixture/delete-me.txt" ] || { echo 'Default deletion action was not Cancel.' >&2; exit 1; }
+open_delete
+xdotool key Tab space
+for _ in $(seq 1 100); do
+    [ -e "$work/delete-fixture/delete-me.txt" ] || break
+    sleep 0.1
+done
+[ ! -e "$work/delete-fixture/delete-me.txt" ] || { echo 'Confirmed deletion did not remove the file.' >&2; exit 1; }
 if grep -q 'ZFM theme CSS could not be loaded' "$work/stderr"; then cat "$work/stderr" >&2; exit 1; fi
 echo "GTK navigation, multi-item clipboard copy/cut, size scan, trash, batch rename and name dialog smoke tests passed (window $window)."

@@ -1612,12 +1612,16 @@ unsafe fn draw_dialog_button(theme: *const Theme, item: &DrawItem) -> LResult {
     let focused = item.item_state & 0x10 != 0;
     let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
     let caption = control_value(item.hwnd).to_string_lossy().into_owned();
+    let destructive = matches!(caption.as_str(), "Delete" | "Delete permanently" | "Uninstall");
+    let primary = matches!(caption.as_str(), "Apply" | "OK" | "Create" | "Rename" | "Extract");
     let (top, bottom) = if disabled { (Rgb(38, 42, 48), Rgb(34, 38, 44)) }
-        else if caption == "Apply" { if pressed { (Rgb(38, 101, 158), Rgb(38, 101, 158)) } else { (Rgb(51, 132, 205), Rgb(42, 112, 179)) } }
+        else if destructive { if pressed { (Rgb(88, 37, 42), Rgb(68, 30, 35)) } else { (Rgb(50, 39, 44), Rgb(37, 33, 39)) } }
+        else if primary { if pressed { (Rgb(38, 101, 158), Rgb(38, 101, 158)) } else { (Rgb(51, 132, 205), Rgb(42, 112, 179)) } }
         else if pressed { (ui_theme::BTN_PRESS_TOP, ui_theme::BTN_PRESS_BOTTOM) }
         else { (ui_theme::BTN_TOP, ui_theme::BTN_BOTTOM) };
-    ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(0, 0, w, h), 6.0,
-        top, bottom, Some(if focused { ui_theme::BORDER_FOCUS } else { ui_theme::BORDER_STRONG }));
+    let border = if focused { ui_theme::BORDER_FOCUS } else if destructive && !disabled { Rgb(192, 76, 83) } else { ui_theme::BORDER_STRONG };
+    ui_theme::paint_rounded_box(&mut pixels, w, h, BoxRect::new(0, 0, w, h), h as f32 / 2.0,
+        top, bottom, Some(border));
     blit_pixels(item.dc, item.rect.left, item.rect.top, w, h, &pixels, |dc| {
         draw_text_in(dc, (*theme).font, if disabled { ui_theme::TEXT_DIM } else { ui_theme::TEXT_PRIMARY },
             BoxRect::new(4, 0, (w - 8).max(1), h), &caption,
@@ -3817,11 +3821,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 DELETE if code == 0 => {
                     let path = selected_path(hwnd, app);
                     if let Some(path) = path {
-                        let message = format!(
-                            "Permanently delete {}? This cannot be undone. Only files or empty folders can be deleted.",
-                            path.display()
-                        );
-                        if windows_actions::question(hwnd, app.theme, "Confirm permanent deletion", &message, "Delete", true) == Some(true) {
+                        if windows_actions::confirm_delete(hwnd, app.theme, &path) == Some(true) {
                             start_operation(hwnd, app, Operation::Delete(path));
                         }
                     } else {

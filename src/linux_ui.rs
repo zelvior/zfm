@@ -125,6 +125,8 @@ api! {
     gtk_switch_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_label_set_text: unsafe extern "C" fn(P, *const c_char),
     gtk_label_set_xalign: unsafe extern "C" fn(P, f32),
+    gtk_label_set_line_wrap: unsafe extern "C" fn(P, c_int),
+    gtk_editable_set_editable: unsafe extern "C" fn(P, c_int),
     gtk_label_set_ellipsize: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_new: unsafe extern "C" fn(P, P) -> P,
     gtk_scrolled_window_set_policy: unsafe extern "C" fn(P, c_int, c_int),
@@ -777,6 +779,7 @@ unsafe extern "C" fn properties(_: P, data: P) {
         Err(e) => format!("{}\n{}", path.display(), e),
     };
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("Properties").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, (*(data as *mut App)).window);
     (api().gtk_window_set_modal)(dialog, 1);
@@ -1162,6 +1165,7 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
 unsafe extern "C" fn show_settings(_: P, data: P) {
     let app = &*(data as *mut App);
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("ZFM Settings").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
@@ -1797,6 +1801,7 @@ unsafe extern "C" fn show_converter_wav_to_au(_: P, data: P) {
 }
 unsafe fn create_converter(parent: P) -> P {
     let window = (api().gtk_window_new)(0);
+    add_class(window, "zfm-tool");
     (api().gtk_window_set_title)(window, c("ZFM — File converter").as_ptr());
     (api().gtk_window_set_transient_for)(window, parent);
     (api().gtk_window_set_default_size)(window, 600, 240);
@@ -1874,12 +1879,13 @@ unsafe fn create_converter(parent: P) -> P {
 /// across gtk_dialog_run, because another callback may run during the dialog.
 unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -> Option<String> {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c(title).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
-    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(
+    let cancel_button = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let action = (api().gtk_dialog_add_button)(
         dialog,
         c(if initial.is_some() {
             "OK"
@@ -1889,8 +1895,15 @@ unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -
         .as_ptr(),
         -3,
     );
+    add_class(action, if initial.is_some() { "zfm-primary" } else { "zfm-destructive" });
+    (api().gtk_window_set_default_size)(dialog, 520, 240);
     let area = (api().gtk_dialog_get_content_area)(dialog);
+    let heading = label("✓   Action required.");
+    add_class(heading, "zfm-dialog-heading");
+    (api().gtk_label_set_xalign)(heading, 0.0);
+    (api().gtk_box_pack_start)(area, heading, 0, 0, 8);
     let description = label(message);
+    (api().gtk_label_set_line_wrap)(description, 1);
     (api().gtk_label_set_xalign)(description, 0.0);
     (api().gtk_widget_set_margin_start)(description, 12);
     (api().gtk_widget_set_margin_end)(description, 12);
@@ -1905,8 +1918,9 @@ unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -
     } else {
         ptr::null_mut()
     };
-    (api().gtk_dialog_set_default_response)(dialog, -3);
+    (api().gtk_dialog_set_default_response)(dialog, if entry.is_null() { -6 } else { -3 });
     (api().gtk_widget_show_all)(dialog);
+    if entry.is_null() { (api().gtk_widget_grab_focus)(cancel_button); }
     if !entry.is_null() {
         (api().gtk_entry_set_activates_default)(entry, 1);
         (api().gtk_widget_grab_focus)(entry);
@@ -2139,6 +2153,7 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
 }
 unsafe fn show_size_result(parent: P, text: &str) {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("Size results").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
@@ -2224,13 +2239,15 @@ unsafe extern "C" fn rename(_: P, data: P) {
 // Preview every name in a scrollable, read-only widget. Cancel is the default.
 unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("Preview batch rename").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 640, 400);
     let cancel_button = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(dialog, c("_Rename").as_ptr(), -3);
+    let rename_button = (api().gtk_dialog_add_button)(dialog, c("_Rename").as_ptr(), -3);
+    add_class(rename_button, "zfm-primary");
     (api().gtk_dialog_set_default_response)(dialog, -6);
     let area = (api().gtk_dialog_get_content_area)(dialog);
     let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
@@ -2395,6 +2412,45 @@ unsafe extern "C" fn move_to_trash(_: P, data: P) {
     let dir = app.tabs.current().current().to_path_buf();
     start_operation(data, dir, Operation::Trash(paths));
 }
+unsafe fn confirm_permanent_delete(parent: P, path: &std::path::Path) -> bool {
+    let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Confirm permanent deletion").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 600, 270);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let delete = (api().gtk_dialog_add_button)(dialog, c("Delete").as_ptr(), -3);
+    add_class(delete, "zfm-destructive");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let area = (api().gtk_dialog_get_content_area)(dialog);
+    let heading = label("✓   Action required.");
+    add_class(heading, "zfm-dialog-heading");
+    (api().gtk_label_set_xalign)(heading, 0.0);
+    (api().gtk_box_pack_start)(area, heading, 0, 0, 8);
+    let description = label("You are about to permanently delete:");
+    (api().gtk_label_set_xalign)(description, 0.0);
+    (api().gtk_box_pack_start)(area, description, 0, 0, 8);
+    let field = (api().gtk_entry_new)();
+    let display = match path.to_str() {
+        Some(value) => value.escape_debug().to_string(),
+        None => format!("{path:?}"),
+    };
+    (api().gtk_entry_set_text)(field, c(&display).as_ptr());
+    (api().gtk_editable_set_editable)(field, 0);
+    (api().gtk_box_pack_start)(area, field, 0, 0, 8);
+    let warning = label("⚠  This action is permanent and cannot be undone. Only files or empty folders can be deleted.");
+    (api().gtk_label_set_xalign)(warning, 0.0);
+    (api().gtk_label_set_line_wrap)(warning, 1);
+    (api().gtk_box_pack_start)(area, warning, 0, 0, 8);
+    (api().gtk_widget_show_all)(dialog);
+    (api().gtk_widget_grab_focus)(cancel);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    response == -3
+}
+
 unsafe extern "C" fn delete_permanently(_: P, data: P) {
     let path = match selected_path(data) {
         Some(p) => p,
@@ -2405,17 +2461,7 @@ unsafe extern "C" fn delete_permanently(_: P, data: P) {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/"))
         .to_path_buf();
-    if prompt(
-        parent,
-        "Permanently delete?",
-        &format!(
-            "Permanently delete {}?\nThis cannot be undone. Only empty folders can be deleted.",
-            path.display()
-        ),
-        None,
-    )
-    .is_some()
-    {
+    if confirm_permanent_delete(parent, &path) {
         start_operation(data, dir, Operation::Delete(path));
     }
 }
