@@ -587,16 +587,21 @@ try {
     [IO.File]::WriteAllText((Join-Path $cutSource 'z-conflict.txt'), 'original cut')
     [IO.File]::WriteAllText((Join-Path $cutTarget 'z-conflict.txt'), 'existing')
     function Navigate-Cut([string]$path, [string]$expected) {
-        [void][ZfmSmoke]::SendMessageW($address, 0x000c, [UIntPtr]::Zero, $path)
-        $r = [UIntPtr]::Zero
-        [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]105, [IntPtr]::Zero, 2, 3000, [ref]$r)
-        for ($i = 0; $i -lt 100; $i++) {
-            $status = New-Object System.Text.StringBuilder 1024
-            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
-            if ($status.ToString() -notmatch '^Loading ' -and [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $expected).ToInt64() -ge 0) { return }
-            Start-Sleep -Milliseconds 100
+        # A pending refresh may reset the address between WM_SETTEXT and GO.
+        # Retry until the completed listing explicitly reports the target path.
+        for ($attempt = 0; $attempt -lt 4; $attempt++) {
+            [void][ZfmSmoke]::SendMessageW($address, 0x000c, [UIntPtr]::Zero, $path)
+            $r = [UIntPtr]::Zero
+            [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]105, [IntPtr]::Zero, 2, 3000, [ref]$r)
+            for ($i = 0; $i -lt 100; $i++) {
+                $status = New-Object System.Text.StringBuilder 1024
+                [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+                if ($status.ToString().EndsWith("  |  $path") -and [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $expected).ToInt64() -ge 0) { return }
+                if ($status.ToString() -notmatch '^Loading ') { break }
+                Start-Sleep -Milliseconds 100
+            }
         }
-        throw "Cut fixture $expected was not listed."
+        throw "Cut fixture $expected was not listed in $path (status: $($status.ToString()))."
     }
     function Select-Cut([string[]]$names) {
         $r = [UIntPtr]::Zero
