@@ -150,6 +150,52 @@ if [ ! -f "$work/folder-test/source copy/nested/file.txt" ]; then cat "$work/std
 cmp "$work/folder-test/source/nested/file.txt" "$work/folder-test/source copy/nested/file.txt"
 cmp "$work/folder-test/companion.txt" "$work/folder-test/companion copy.txt"
 [ -d "$work/folder-test/source copy/nested/empty" ]
+# Cut two items, including a directory, into a different folder.
+mkdir -p "$work/cut-source/a-folder" "$work/cut-target" "$work/cut-other"
+printf 'nested cut\n' > "$work/cut-source/a-folder/nested.txt"
+printf 'original cut\n' > "$work/cut-source/z-conflict.txt"
+printf 'existing\n' > "$work/cut-target/z-conflict.txt"
+cut_navigate() {
+    xdotool windowfocus --sync "$window"
+    xdotool key --window "$window" ctrl+l ctrl+a
+    xdotool type --clearmodifiers "$1"
+    xdotool key --window "$window" Return
+    sleep 1
+}
+cut_navigate "$work/cut-source"
+xdotool key --window "$window" Escape ctrl+a ctrl+x
+cut_navigate "$work/cut-target"
+xdotool key --window "$window" Escape ctrl+v
+for _ in $(seq 1 100); do
+    [ ! -f "$work/cut-target/a-folder/nested.txt" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during cut/paste:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+grep -q 'nested cut' "$work/cut-target/a-folder/nested.txt"
+grep -q 'existing' "$work/cut-target/z-conflict.txt"
+grep -q 'original cut' "$work/cut-source/z-conflict.txt"
+[ ! -e "$work/cut-source/a-folder" ]
+# Recreated source must not be moved by reusing a partially consumed cut.
+sleep 1
+mkdir "$work/cut-source/a-folder"
+printf 'replacement\n' > "$work/cut-source/a-folder/new.txt"
+cut_navigate "$work/cut-other"
+xdotool key --window "$window" Escape ctrl+v
+sleep 1
+[ -f "$work/cut-source/a-folder/new.txt" ] && [ ! -e "$work/cut-other/a-folder" ] && [ ! -e "$work/cut-other/z-conflict.txt" ]
+# An explicit new cut allows both remaining/recreated items to be moved.
+cut_navigate "$work/cut-source"
+xdotool key --window "$window" Escape ctrl+a ctrl+x
+cut_navigate "$work/cut-other"
+xdotool key --window "$window" Escape ctrl+v
+for _ in $(seq 1 100); do
+    if [ -f "$work/cut-other/a-folder/new.txt" ] && [ -f "$work/cut-other/z-conflict.txt" ]; then break; fi
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during recut:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+grep -q 'replacement' "$work/cut-other/a-folder/new.txt"
+grep -q 'original cut' "$work/cut-other/z-conflict.txt"
+[ ! -e "$work/cut-source/a-folder" ] && [ ! -e "$work/cut-source/z-conflict.txt" ]
 # Trash multiple items through Delete, isolated from the user's real trash.
 mkdir -p "$work/trash-test/batch-folder"
 printf 'trash file\n' > "$work/trash-test/batch-file.txt"
@@ -226,4 +272,4 @@ fi
 grep -q alpha "$work/rename-test/Holiday (1).txt"
 grep -q beta "$work/rename-test/Holiday (2).csv"
 [ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
-echo "GTK navigation, clipboard, trash, batch rename and name dialog smoke tests passed (window $window)."
+echo "GTK navigation, multi-item clipboard copy/cut, trash, batch rename and name dialog smoke tests passed (window $window)."
