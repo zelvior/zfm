@@ -172,6 +172,7 @@ pub struct WindowMetrics {
     pub nav_go: BoxRect,
     pub tab_strip_top: i32,
     pub deck_top: i32,
+    pub actions_btn: BoxRect,
     pub new_tab: BoxRect,
     pub close_tab: BoxRect,
     pub dynamic_tabs_left: i32,
@@ -250,7 +251,8 @@ impl WindowMetrics {
         let deck_top = 61;
         let tab_y = 35;
         let tab_h = deck_top - tab_y;
-        let new_tab = BoxRect::new(margin, tab_y, 90, tab_h);
+        let actions_btn = BoxRect::new(margin, tab_y, 84, tab_h);
+        let new_tab = BoxRect::new(actions_btn.right() + 4, tab_y, 90, tab_h);
         let close_tab = BoxRect::new(new_tab.right() + 4, tab_y, 92, tab_h);
         let dynamic_tabs_left = close_tab.right() + 8;
         let dynamic_tabs_right = right;
@@ -319,6 +321,7 @@ impl WindowMetrics {
             nav_go,
             tab_strip_top,
             deck_top,
+            actions_btn,
             new_tab,
             close_tab,
             dynamic_tabs_left,
@@ -1399,6 +1402,10 @@ mod tests {
     fn window_metrics_preserve_toolbar_and_list_clearance() {
         for (w, h) in [(720, 480), (1024, 600), (1440, 900)] {
             let m = WindowMetrics::new(w, h);
+            assert!(m.actions_btn.right() <= m.new_tab.x);
+            assert!(m.new_tab.right() <= m.close_tab.x);
+            assert!(m.close_tab.right() <= m.dynamic_tabs_left);
+            assert!(m.dynamic_tabs_left < m.dynamic_tabs_right);
             assert!(m.list.y > m.name_edit.bottom());
             assert!(m.address_frame.right() <= m.nav_go.x);
             assert!(m.nav_go.right() <= m.filter_frame.x);

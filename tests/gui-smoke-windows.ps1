@@ -24,6 +24,10 @@ public static class ZfmSmoke {
     public static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="FindWindowW", ExactSpelling=true)]
+    public static extern IntPtr FindWindowAnyTitle(string cls, IntPtr title);
+    [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
     [DllImport("user32.dll", ExactSpelling=true)]
@@ -105,7 +109,8 @@ try {
         @{ Id = 112; Class = 'Edit'; Label = $null },
         @{ Id = 115; Class = 'Button'; Label = 'Show hidden' },
         @{ Id = 116; Class = 'Edit'; Label = $null },
-        @{ Id = 121; Class = 'Button'; Label = 'Root' }
+        @{ Id = 121; Class = 'Button'; Label = 'Root' },
+        @{ Id = 172; Class = 'Button'; Label = 'Actions ▾' }
     )
     foreach ($control in $controls) {
         $handle = [ZfmSmoke]::GetDlgItem($window, $control.Id)
@@ -160,6 +165,22 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $populated) { throw 'ZFM did not list the fixture file within 10 seconds.' }
+    # The visible Actions button opens the same file-list command menu.
+    $actions = [ZfmSmoke]::GetDlgItem($window, 172)
+    [void][ZfmSmoke]::PostMessageW($actions, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero) # BM_CLICK
+    $popup = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $popup = [ZfmSmoke]::FindWindowAnyTitle('#32768', [IntPtr]::Zero)
+        $ownerPid = [uint32]0
+        if ($popup -ne [IntPtr]::Zero) { [void][ZfmSmoke]::GetWindowThreadProcessId($popup, [ref]$ownerPid) }
+        if ($popup -ne [IntPtr]::Zero -and $ownerPid -eq $process.Id -and [ZfmSmoke]::IsWindowVisible($popup)) { break }
+        $popup = [IntPtr]::Zero
+        Start-Sleep -Milliseconds 100
+    }
+    if ($popup -eq [IntPtr]::Zero) { throw 'Actions menu did not open.' }
+    [void][ZfmSmoke]::PostMessageW($popup, 0x100, [UIntPtr]27, [IntPtr]::Zero) # Escape
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($popup); $i++) { Start-Sleep -Milliseconds 100 }
+    if ([ZfmSmoke]::IsWindowVisible($popup)) { throw 'Actions menu did not close.' }
     # External changes appear without pressing Reload; selection survives the update.
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result)
@@ -676,6 +697,31 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $cutTarget 'a.txt')) -ne 'a' -or
         [IO.File]::ReadAllText((Join-Path $cutTarget 'b.txt')) -ne 'b' -or
         [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Multi-item cut/paste failed.' }
+    # Case-sensitive filtering uses the same core for current and recursive views.
+    $caseSource = Join-Path $configRoot 'case-source'
+    New-Item -ItemType Directory -Path (Join-Path $caseSource 'sub') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $caseSource 'MiXeD.txt'), 'case')
+    [IO.File]::WriteAllText((Join-Path $caseSource 'sub\MiXeD.txt'), 'nested')
+    Navigate-Cut $caseSource 'MiXeD.txt'
+    [void][ZfmSmoke]::SendMessageW($filter, 0x000c, [UIntPtr]::Zero, 'mixed.txt')
+    function Wait-CaseStatus([string]$pattern) {
+        for ($i = 0; $i -lt 100; $i++) {
+            $state = New-Object System.Text.StringBuilder 2048
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $state, $state.Capacity)
+            if ($state.ToString() -match $pattern) { return }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Case-sensitive search did not report $pattern; status=$state"
+    }
+    Invoke-CutCommand 113
+    Wait-CaseStatus '^1 items  \|'
+    Invoke-CutCommand 173
+    Wait-CaseStatus '^0 items  \|'
+    Invoke-CutCommand 168
+    Wait-CaseStatus '^Recursive search: 0 results'
+    Invoke-CutCommand 173
+    Wait-CaseStatus '^Recursive search: 2 results'
+    Invoke-CutCommand 114
     # Calculate apparent size across a folder (including hidden data) and a file.
     $sizeSource = Join-Path $configRoot 'size-source'
     New-Item -ItemType Directory -Path (Join-Path $sizeSource 'folder') -Force | Out-Null

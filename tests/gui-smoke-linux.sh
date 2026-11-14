@@ -58,17 +58,20 @@ xdotool windowfocus --sync "$window"
 # Preview the only fixture from the file list.
 # Wait for the asynchronous directory load before selecting it.
 sleep 1
-xdotool key --window "$window" Escape ctrl+a ctrl+p
+xdotool key --window "$window" Escape ctrl+a ctrl+shift+o
+# Organize → Selected items → Preview in ZFM.
+sleep 0.5
+xdotool key Home Right Down Return
 preview=''
 for _ in $(seq 1 100); do
-    preview=$(xdotool search --onlyvisible --pid "$pid" --name '^ZFM Preview — example.txt$' 2>/dev/null | head -n 1 || true)
+    preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^ZFM Preview — example.txt$' 2>/dev/null | head -n 1 || true)
     [ -z "$preview" ] || break
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
 if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$preview"
-xdotool key --window "$preview" Escape
+xdotool key Escape
 xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
