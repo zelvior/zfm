@@ -2117,7 +2117,7 @@ unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 640, 400);
-    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let cancel_button = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
     (api().gtk_dialog_add_button)(dialog, c("_Rename").as_ptr(), -3);
     (api().gtk_dialog_set_default_response)(dialog, -6);
     let area = (api().gtk_dialog_get_content_area)(dialog);
@@ -2131,6 +2131,7 @@ unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     (api().gtk_container_add)(scroll, view);
     (api().gtk_box_pack_start)(area, scroll, 1, 1, 8);
     (api().gtk_widget_show_all)(dialog);
+    (api().gtk_widget_grab_focus)(cancel_button);
     let response = (api().gtk_dialog_run)(dialog);
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     response == -3

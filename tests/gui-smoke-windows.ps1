@@ -684,7 +684,7 @@ try {
         $preview = [IntPtr]::Zero; $previewText = [IntPtr]::Zero
         for ($i = 0; $i -lt 100; $i++) {
             $preview = [ZfmSmoke]::FindWindowW('#32770', 'Preview batch rename')
-            if ($preview -ne [IntPtr]::Zero) { $previewText = [ZfmSmoke]::FindWindowExW($preview, [IntPtr]::Zero, 'Edit', $null) }
+            if ($preview -ne [IntPtr]::Zero) { $previewText = [ZfmSmoke]::GetDlgItem($preview, 1002) }
             if ($previewText -ne [IntPtr]::Zero) { break }
             Start-Sleep -Milliseconds 100
         }
