@@ -190,6 +190,8 @@ const ADB_DEVICES: usize = 195;
 const ADB_CONNECT: usize = 196;
 const ADB_PUSH: usize = 197;
 const SCRATCHPAD: usize = 198;
+const ISO_MOUNT: usize = 199;
+const ISO_DISMOUNT: usize = 200;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2315,6 +2317,7 @@ enum Operation {
     Script(OsString, OsString, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
     Mobile(zfm::mobile::Job),
+    DiskImage(PathBuf, zfm::disk_mount::Action),
     Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
@@ -2335,7 +2338,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     app.operation_cancel = Some(cancel.clone());
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), Operation::DiskImage(..) => Some("Windows ISO mount"), _ => None };
     thread::spawn(move || {
         let mut consumed_cut_sequence = None;
         let result =
@@ -2362,7 +2365,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 Operation::Snippet(program, flag, code, dir) => zfm::tools::snippet(&program, &flag, &code, &dir, &cancel),
                 Operation::Script(program, flag, path, dir) => zfm::tools::script_file(&program, &flag, &path, &dir, &cancel),
                 Operation::Insight(job) => job.run(&cancel),
-            Operation::Mobile(job) => job.run(&cancel),
+                Operation::Mobile(job) => job.run(&cancel),
+                Operation::DiskImage(path, action) => zfm::disk_mount::run(&path, action, &cancel),
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
                 Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
@@ -2449,6 +2453,23 @@ unsafe fn scratchpad(hwnd: H, app: &mut App) {
             Err(error) => { windows_actions::question(hwnd, app.theme, "Scratchpad not saved", &format!("{error}\n\nYour text remains in the editor."), "Close", false); }
         }
     }
+}
+
+unsafe fn iso_action(hwnd: H, app: &mut App, mount: bool) {
+    let selected = selected_indices(app);
+    if selected.len() != 1 || !app.entries[selected[0]].is_file || !app.entries[selected[0]].path.extension().and_then(|s| s.to_str()).map_or(false, |s| s.eq_ignore_ascii_case("iso")) {
+        set_status(hwnd, app, Some("Select one regular ISO image.".into())); return;
+    }
+    let path = app.entries[selected[0]].path.clone(); let root = app.tabs.current().current().to_path_buf();
+    let generation = app.token.load(Ordering::Relaxed);
+    let (title, label, warning, action) = if mount {
+        ("Mount ISO?", "Mount", format!("Mount {} read-only using Windows PowerShell and the Storage module? The OS may assign a drive and the mount can persist after ZFM exits or a timeout. OS autoplay policies may apply. Only mount images you trust.", path.display()), zfm::disk_mount::Action::Mount)
+    } else {
+        ("Dismount ISO?", "Dismount", format!("Dismount {} using the Windows Storage module? This can detach an image mounted by another program and affect programs using it.", path.display()), zfm::disk_mount::Action::Dismount)
+    };
+    if windows_actions::question(hwnd, app.theme, title, &warning, label, true) != Some(true) { return; }
+    if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(hwnd, app, Some("ISO action cancelled because the view changed.".into())); return; }
+    start_operation(hwnd, app, Operation::DiskImage(path, action));
 }
 
 unsafe fn adb_devices(hwnd: H, app: &mut App) {
@@ -2887,6 +2908,10 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
             AppendMenuW(menu, 0, VERIFY_HASH, text("Verify checksum…").as_ptr());
             AppendMenuW(menu, 0, RUN_SCRIPT, text("Run script with interpreter…").as_ptr());
             AppendMenuW(menu, 0, ADB_PUSH, text("Send file to Android via ADB…").as_ptr());
+            if app.entries[selected_items[0]].path.extension().and_then(|s| s.to_str()).map_or(false, |s| s.eq_ignore_ascii_case("iso")) {
+                AppendMenuW(menu, 0, ISO_MOUNT, text("Mount ISO read-only (Windows)…").as_ptr());
+                AppendMenuW(menu, 0, ISO_DISMOUNT, text("Dismount ISO (Windows)…").as_ptr());
+            }
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
             AppendMenuW(menu, 0, ARCHIVE, text("Open as archive…").as_ptr());
             if zfm::archive_actions::can_extract(&app.entries[selected_items[0]].path) {
@@ -3721,6 +3746,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 ADB_CONNECT if code == 0 => adb_connect(hwnd, app),
                 ADB_PUSH if code == 0 => adb_push(hwnd, app),
                 SCRATCHPAD if code == 0 => scratchpad(hwnd, app),
+                ISO_MOUNT | ISO_DISMOUNT if code == 0 => iso_action(hwnd, app, id == ISO_MOUNT),
                 RUN_SNIPPET if code == 0 => run_code(hwnd, app, None),
                 RUN_SCRIPT if code == 0 => {
                     let selected = selected_indices(app);

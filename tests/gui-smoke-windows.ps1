@@ -1059,6 +1059,24 @@ try {
     Submit-Destination 179 'Preview rename impact' 'after.tmp'
     Read-InsightReport 'Operation impact preview' 'destination already exists'
     if (-not (Test-Path -LiteralPath (Join-Path $insightFolder 'after.tmp'))) { throw 'Impact preview changed files.' }
+    # Mount/dismount confirmations must be cancellable without invoking the OS.
+    $isoFolder = Join-Path $work 'iso-smoke'
+    New-Item -ItemType Directory -Path $isoFolder | Out-Null
+    [IO.File]::WriteAllText((Join-Path $isoFolder 'fixture.iso'), 'not a real image')
+    Navigate-Cut $isoFolder 'fixture.iso'
+    Select-Cut @('fixture.iso')
+    foreach ($item in @(@{ Id = 199; Title = 'Mount ISO?' }, @{ Id = 200; Title = 'Dismount ISO?' })) {
+        [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$item.Id, [IntPtr]::Zero)
+        $dialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', $item.Title)
+            if ($dialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($dialog, 2) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($dialog -eq [IntPtr]::Zero) { throw "ISO confirmation missing: $($item.Title)" }
+        [void][ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+        for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    }
     Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.
