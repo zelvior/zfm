@@ -296,6 +296,42 @@ try {
     if (-not $tagText.ToString().Contains((Join-Path $work 'example.txt'))) { throw "Tag search omitted the fixture: $tagText" }
     [void][ZfmSmoke]::PostMessageW($tagReport, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)
     for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($tagReport); $i++) { Start-Sleep -Milliseconds 100 }
+    # Scratchpad preview must preserve text when returning to the editor.
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]198, [IntPtr]::Zero)
+    $scratch = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $scratch = [ZfmSmoke]::FindWindowW('#32770', 'Markdown / code scratchpad')
+        if ($scratch -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($scratch, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($scratch -eq [IntPtr]::Zero) { throw 'Scratchpad did not appear.' }
+    [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($scratch, 1001), 0x000c, [UIntPtr]::Zero, "# Smoke heading`r`n- first item")
+    [void][ZfmSmoke]::PostMessageW($scratch, 0x111, [UIntPtr]3, [IntPtr]::Zero)
+    $scratchPreview = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $scratchPreview = [ZfmSmoke]::FindWindowW('#32770', 'Scratchpad preview')
+        if ($scratchPreview -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($scratchPreview, 1002) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($scratchPreview -eq [IntPtr]::Zero) { throw 'Scratchpad preview did not appear.' }
+    $previewValue = New-Object System.Text.StringBuilder 4096
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($scratchPreview, 1002), 0x000d, [UIntPtr]$previewValue.Capacity, $previewValue, 2, 3000, [ref]$result)
+    if ($previewValue.ToString() -notmatch 'Smoke heading') { throw 'Scratchpad preview did not contain the text.' }
+    [void][ZfmSmoke]::PostMessageW($scratchPreview, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    $scratch = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $scratch = [ZfmSmoke]::FindWindowW('#32770', 'Markdown / code scratchpad')
+        if ($scratch -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($scratch, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($scratch -eq [IntPtr]::Zero) { throw 'Scratchpad did not reopen.' }
+    $scratchValue = New-Object System.Text.StringBuilder 256
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($scratch, 1001), 0x000d, [UIntPtr]$scratchValue.Capacity, $scratchValue, 2, 3000, [ref]$result)
+    if ($scratchValue.ToString() -notmatch 'Smoke heading') { throw 'Scratchpad lost its text after preview.' }
+    [void][ZfmSmoke]::PostMessageW($scratch, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($scratch); $i++) { Start-Sleep -Milliseconds 100 }
     # Reach the multiline editor and cancel at the final confirmation: no code runs.
     [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]188, [IntPtr]::Zero)
     foreach ($title in @('Interpreter executable (e.g. python, node, cmd.exe)', 'Single interpreter argument (e.g. /C, -c, -e, -File)')) {

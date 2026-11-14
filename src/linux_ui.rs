@@ -1105,6 +1105,7 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
             menu_action(menu, "Calculate MD5 and SHA-256…", hash_selected as P, data);
             menu_action(menu, "Verify checksum…", verify_selected as P, data);
             menu_action(menu, "Run script with interpreter…", run_script as P, data);
+            menu_action(menu, "Send file to Android via ADB…", adb_push as P, data);
         }
     }
     menu_action(
@@ -1210,9 +1211,13 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Save folder snapshot…", snapshot_save as P),
         ("Compare folder snapshot…", snapshot_compare as P),
         ("Review cleanup candidates…", cleanup_review as P),
+        ("Find duplicates and junk…", find_duplicates as P),
+        ("List Android devices (ADB)…", adb_devices as P),
+        ("Connect Android over Wi-Fi (ADB)…", adb_connect as P),
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
         ("Find saved paths by tag…", find_tags as P),
+        ("Markdown / code scratchpad…", scratchpad as P),
         ("Run code snippet…", run_snippet as P),
         ("Open terminal here…", open_terminal as P),
         ("Start local static server…", server_start as P),
@@ -2063,6 +2068,7 @@ enum Operation {
     Snippet(String, String, String, PathBuf),
     Script(String, String, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
+    Mobile(zfm::mobile::Job),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -2130,7 +2136,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
     let id = app.operation_id;
     let generation = app.generation.load(Ordering::Relaxed);
     let app_ptr = data as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), _ => None };
     set_status(app, "Working…");
     thread::spawn(move || {
         use std::ffi::OsStr;
@@ -2157,6 +2163,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             Operation::Snippet(program, flag, code, dir) => zfm::tools::snippet(OsStr::new(&program), OsStr::new(&flag), &code, &dir, &cancel),
             Operation::Script(program, flag, path, dir) => zfm::tools::script_file(OsStr::new(&program), OsStr::new(&flag), &path, &dir, &cancel),
             Operation::Insight(job) => job.run(&cancel),
+            Operation::Mobile(job) => job.run(&cancel),
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
             }
@@ -2232,6 +2239,10 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
 unsafe fn launch_insight(data: P, job: zfm::insights::Job) {
     let dir = (*(data as *mut App)).tabs.current().current().to_path_buf();
     start_operation(data, dir, Operation::Insight(job));
+}
+unsafe extern "C" fn find_duplicates(_: P, data: P) {
+    let root = (*(data as *mut App)).tabs.current().current().to_path_buf();
+    launch_insight(data, zfm::insights::Job::Duplicates(root));
 }
 unsafe extern "C" fn snapshot_save(_: P, data: P) {
     let app = &*(data as *mut App);
@@ -2471,12 +2482,12 @@ unsafe fn begin_hash(data: P, verify: bool) {
     if app.generation.load(Ordering::Relaxed) != generation { set_status(app, "Hashing cancelled because the view changed."); return; }
     start_operation(data, root, Operation::Hash(path, expected));
 }
-unsafe fn confirm_run(parent: P, message: &str) -> bool {
+unsafe fn confirm_action(parent: P, title: &str, message: &str, affirmative: &str) -> bool {
     let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
-    (api().gtk_window_set_title)(dialog, c("Run external code?").as_ptr());
+    (api().gtk_window_set_title)(dialog, c(title).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent); (api().gtk_window_set_modal)(dialog, 1); (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    let run = (api().gtk_dialog_add_button)(dialog, c("Run").as_ptr(), -3); add_class(run, "zfm-primary");
+    let run = (api().gtk_dialog_add_button)(dialog, c(affirmative).as_ptr(), -3); add_class(run, "zfm-primary");
     (api().gtk_dialog_set_default_response)(dialog, -6);
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), wrapped_label(message), 0, 0, 12);
     (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(cancel);
@@ -2491,43 +2502,50 @@ struct GtkTextIter {
     dummy6: c_int, dummy7: c_int, dummy8: c_int, dummy9: P, dummy10: P,
     dummy11: c_int, dummy12: c_int, dummy13: c_int, dummy14: P,
 }
-unsafe fn snippet_editor(parent: P) -> Result<Option<String>, String> {
+unsafe fn text_editor(parent: P, scratch: bool, initial: &str) -> Result<Option<(String, bool)>, String> {
     let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
-    (api().gtk_window_set_title)(dialog, c("Code snippet").as_ptr());
+    (api().gtk_window_set_title)(dialog, c(if scratch { "Markdown / code scratchpad" } else { "Code snippet" }).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 650, 400);
-    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    let next = (api().gtk_dialog_add_button)(dialog, c("Continue").as_ptr(), -3); add_class(next, "zfm-primary");
+    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    if scratch { (api().gtk_dialog_add_button)(dialog, c("Preview" ).as_ptr(), 1); }
+    let next = (api().gtk_dialog_add_button)(dialog, c(if scratch { "Save as…" } else { "Continue" }).as_ptr(), -3); add_class(next, "zfm-primary");
     (api().gtk_dialog_set_default_response)(dialog, -6);
     let area = (api().gtk_dialog_get_content_area)(dialog);
-    (api().gtk_box_pack_start)(area, wrapped_label("Enter code (up to 16 KiB). You will be asked to confirm before it runs."), 0, 0, 8);
+    let notice = wrapped_label(if scratch { "Markdown or code text (up to 16 KiB). Save creates a new file; nothing runs." } else { "Enter code (up to 16 KiB). You will be asked to confirm before it runs." });
+    (api().gtk_box_pack_start)(area, notice, 0, 0, 8);
     let scroll = scroll_window(); (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
     (api().gtk_widget_set_size_request)(scroll, 480, 240);
     let view = (api().gtk_text_view_new)();
+    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(initial).as_ptr(), -1);
     (api().gtk_container_add)(scroll, view); (api().gtk_box_pack_start)(area, scroll, 1, 1, 0);
     (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(view);
-    let response = (api().gtk_dialog_run)(dialog);
-    let result = if response == -3 {
+    loop {
+        let response = (api().gtk_dialog_run)(dialog);
+        if response != -3 && !(scratch && response == 1) {
+            if response != -1 { (api().gtk_widget_destroy)(dialog); }
+            return Ok(None);
+        }
         let buffer = (api().gtk_text_view_get_buffer)(view);
         if (api().gtk_text_buffer_get_char_count)(buffer) > 16 * 1024 {
-            Err("Snippet exceeds 16 KiB.".to_string())
-        } else {
-            let mut start = std::mem::MaybeUninit::<GtkTextIter>::uninit();
-            let mut end = std::mem::MaybeUninit::<GtkTextIter>::uninit();
-            (api().gtk_text_buffer_get_bounds)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P);
-            let raw = (api().gtk_text_buffer_get_text)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P, 1);
-            if raw.is_null() { Err("Could not read the snippet.".to_string()) }
-            else {
-                let code = CStr::from_ptr(raw).to_string_lossy().into_owned(); (api().g_free)(raw as P);
-                if code.len() > 16 * 1024 { Err("Snippet exceeds 16 KiB.".to_string()) } else { Ok(Some(code)) }
-            }
+            (api().gtk_label_set_text)(notice, c("Text exceeds 16 KiB; shorten it before continuing.").as_ptr());
+            continue;
         }
-    } else { Ok(None) };
-    if response != -1 { (api().gtk_widget_destroy)(dialog); }
-    let _ = cancel;
-    result
+        let mut start = std::mem::MaybeUninit::<GtkTextIter>::uninit();
+        let mut end = std::mem::MaybeUninit::<GtkTextIter>::uninit();
+        (api().gtk_text_buffer_get_bounds)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P);
+        let raw = (api().gtk_text_buffer_get_text)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P, 1);
+        if raw.is_null() { (api().gtk_widget_destroy)(dialog); return Err("Could not read the text.".to_string()); }
+        let code = CStr::from_ptr(raw).to_string_lossy().into_owned(); (api().g_free)(raw as P);
+        if code.len() > 16 * 1024 {
+            (api().gtk_label_set_text)(notice, c("Text exceeds 16 KiB in UTF-8; shorten it before continuing.").as_ptr());
+            continue;
+        }
+        (api().gtk_widget_destroy)(dialog);
+        return Ok(Some((code, response == 1)));
+    }
 }
 
 unsafe fn run_code(data: P, file: Option<PathBuf>) {
@@ -2540,20 +2558,82 @@ unsafe fn run_code(data: P, file: Option<PathBuf>) {
     let flag = match prompt(parent, "Interpreter argument", "One literal argument before the code or filename (for example -c, -e, or -File). Leave empty if not needed:", Some(&default_flag)) { Some(v) => v, None => return };
     if !alive.load(Ordering::Relaxed) { return; }
     let code = if file.is_none() {
-        match snippet_editor(parent) {
-            Ok(Some(code)) => Some(code), Ok(None) => return,
+        match text_editor(parent, false, "") {
+            Ok(Some((code, _))) => Some(code), Ok(None) => return,
             Err(error) => { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), &error); } return; }
         }
     } else { None };
     if !alive.load(Ordering::Relaxed) { return; }
     let what = file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "the entered snippet".into());
     let message = format!("Run {what} with executable {program:?} and literal argument {flag:?} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout/cancellation does not stop descendants. Run only code you trust.", root.display());
-    if !confirm_run(parent, &message) || !alive.load(Ordering::Relaxed) { return; }
+    if !confirm_action(parent, "Run external code?", &message, "Run") || !alive.load(Ordering::Relaxed) { return; }
     let app = &*(data as *mut App);
     if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Run cancelled because the view changed."); return; }
     let operation = match (file, code) { (Some(file), _) => Operation::Script(program, flag, file, root.clone()), (_, Some(code)) => Operation::Snippet(program, flag, code, root.clone()), _ => return };
     start_operation(data, root, operation);
 }
+unsafe extern "C" fn scratchpad(_: P, data: P) {
+    let app = &*(data as *mut App); let parent = app.window; let alive = app.alive.clone();
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.generation.load(Ordering::Relaxed);
+    let mut text = String::new();
+    loop {
+        let (value, preview) = match text_editor(parent, true, &text) {
+            Ok(Some(value)) => value, Ok(None) => return,
+            Err(error) => { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), &error); } return; }
+        };
+        if !alive.load(Ordering::Relaxed) { return; }
+        text = value;
+        if preview { show_report(parent, "Scratchpad preview", &zfm::scratchpad::preview(&text)); if !alive.load(Ordering::Relaxed) { return; } continue; }
+        let name = match prompt(parent, "Save scratchpad", "New filename in the current folder (existing files are never replaced):", Some("scratch.md")) { Some(name) => name, None => continue };
+        if !alive.load(Ordering::Relaxed) { return; }
+        let app = &*(data as *mut App);
+        if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+            show_report(parent, "Scratchpad not saved — copy your text", &text); return;
+        }
+        match zfm::scratchpad::save_new(&root, std::ffi::OsStr::new(&name), &text) {
+            Ok(path) => { set_status(app, &format!("Saved scratchpad to {}", path.display())); navigate(&mut *(data as *mut App), Destination::Refresh); return; }
+            Err(error) => { show_report(parent, "Scratchpad not saved", &format!("{error}\n\nYour text remains in the editor.")); if !alive.load(Ordering::Relaxed) { return; } }
+        }
+    }
+}
+
+unsafe extern "C" fn adb_devices(_: P, data: P) {
+    let root = (*(data as *mut App)).tabs.current().current().to_path_buf();
+    start_operation(data, root.clone(), Operation::Mobile(zfm::mobile::Job::Devices(root)));
+}
+unsafe extern "C" fn adb_connect(_: P, data: P) {
+    let app = &*(data as *mut App); let parent = app.window; let alive = app.alive.clone();
+    let root = app.tabs.current().current().to_path_buf(); let generation = app.generation.load(Ordering::Relaxed);
+    let input = match prompt(parent, "Connect Android over Wi-Fi", "Enter the device IP address and ADB port (IP:port or [IPv6]:port). Pair separately when required.", Some("")) { Some(value) => value, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let address = match zfm::mobile::parse_address(&input) { Ok(value) => value, Err(error) => { set_status(&*(data as *mut App), &format!("Invalid ADB address: {error}")); return; } };
+    let warning = format!("Connect ADB to {address}? This starts or uses the installed ADB server. Legacy wireless debugging may be unencrypted and can expose device control on the network. Use only trusted networks and devices.");
+    if !confirm_action(parent, "Connect Android?", &warning, "Connect") || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "ADB connection cancelled because the view changed."); return; }
+    start_operation(data, root.clone(), Operation::Mobile(zfm::mobile::Job::Connect(root, address)));
+}
+unsafe extern "C" fn adb_push(_: P, data: P) {
+    let app = &*(data as *mut App); let rows = selected_rows(app.list);
+    if rows.len() != 1 { set_status(app, "Select one regular file to send."); return; }
+    let index = (api().gtk_list_box_row_get_index)(rows[0]);
+    let path = match if index >= 0 { app.entries.get(index as usize) } else { None } {
+        Some(entry) if entry.is_file => entry.path.clone(), _ => { set_status(app, "Select one regular file to send."); return; }
+    };
+    let parent = app.window; let alive = app.alive.clone(); let root = app.tabs.current().current().to_path_buf(); let generation = app.generation.load(Ordering::Relaxed);
+    let serial = match prompt(parent, "Android device serial", "Enter an authorized device serial exactly as shown by List Android devices:", Some("")) { Some(value) => value, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    if let Err(error) = zfm::mobile::validate_serial(&serial) { set_status(&*(data as *mut App), &format!("Invalid serial: {error}")); return; }
+    let remote = match prompt(parent, "Android destination filename", "Absolute Android destination filename, e.g. /sdcard/Download/file.txt (simple ASCII names only):", Some("")) { Some(value) => value, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    if let Err(error) = zfm::mobile::validate_remote(&remote) { set_status(&*(data as *mut App), &format!("Invalid Android path: {error}")); return; }
+    let warning = format!("Send {} to {serial}:{remote}? ADB can overwrite existing remote files and leave partial data on failure or cancellation. The file is limited to 1 GiB. Use trusted source folders and devices.", path.display());
+    if !confirm_action(parent, "Send file to Android?", &warning, "Send") || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "ADB transfer cancelled because the view changed."); return; }
+    start_operation(data, root.clone(), Operation::Mobile(zfm::mobile::Job::Push(root, serial, path, remote)));
+}
+
 unsafe extern "C" fn run_snippet(_: P, data: P) { run_code(data, None); }
 unsafe extern "C" fn run_script(_: P, data: P) {
     let app = &*(data as *mut App); let rows = selected_rows(app.list);

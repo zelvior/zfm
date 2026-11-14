@@ -262,13 +262,14 @@ pub enum Job {
     Save(PathBuf),
     Compare(PathBuf),
     Cleanup(PathBuf),
+    Duplicates(PathBuf),
     Impact(PreviewKind, Vec<PathBuf>, PathBuf),
 }
 impl Job {
     pub fn title(&self) -> &'static str {
-        match self { Self::Save(_) => "Folder snapshot", Self::Compare(_) => "Folder changes", Self::Cleanup(_) => "Cleanup review", Self::Impact(..) => "Operation impact preview" }
+        match self { Self::Save(_) => "Folder snapshot", Self::Compare(_) => "Folder changes", Self::Cleanup(_) => "Cleanup review", Self::Duplicates(_) => "Duplicate and junk review", Self::Impact(..) => "Operation impact preview" }
     }
     pub fn run(self, cancel: &AtomicBool) -> io::Result<String> {
-        match self { Self::Save(p) => save_snapshot(&p, cancel), Self::Compare(p) => compare_snapshot(&p, cancel), Self::Cleanup(p) => cleanup_report(&p, cancel), Self::Impact(kind, paths, target) => impact(kind, &paths, &target, cancel) }
+        match self { Self::Save(p) => save_snapshot(&p, cancel), Self::Compare(p) => compare_snapshot(&p, cancel), Self::Cleanup(p) => cleanup_report(&p, cancel), Self::Duplicates(p) => crate::duplicate_finder::report(&p, cancel), Self::Impact(kind, paths, target) => impact(kind, &paths, &target, cancel) }
     }
 }

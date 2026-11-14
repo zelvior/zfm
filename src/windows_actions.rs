@@ -400,33 +400,39 @@ unsafe fn prompt_inner(
 struct SnippetEditor {
     theme: *const Theme,
     edit: H,
-    result: Option<OsString>,
+    heading: H,
+    initial: Vec<u16>,
+    scratch: bool,
+    result: Option<(OsString, bool)>,
 }
 unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 {
         let state = &mut *(lp as *mut SnippetEditor);
         set_data(hwnd, lp);
-        SetWindowTextW(hwnd, text("Code snippet").as_ptr());
+        SetWindowTextW(hwnd, text(if state.scratch { "Markdown / code scratchpad" } else { "Code snippet" }).as_ptr());
         apply_dark_window_chrome(hwnd);
         let instance = GetModuleHandleW(ptr::null());
         let mut rect: Rect = std::mem::zeroed(); GetClientRect(hwnd, &mut rect);
         let width = rect.right; let height = rect.bottom;
-        let heading = CreateWindowExW(0, text("STATIC").as_ptr(), text("Enter code (up to 16 KiB). Confirm before running.").as_ptr(),
+        let heading = CreateWindowExW(0, text("STATIC").as_ptr(), text(if state.scratch { "Markdown or code, up to 16 KiB. Save creates a new file." } else { "Enter code (up to 16 KiB). Confirm before running." }).as_ptr(),
             WS_CHILD | WS_VISIBLE, 18, 16, width - 36, 25, hwnd, 1002usize as H, instance, ptr::null_mut());
-        state.edit = CreateWindowExW(0x200, text("EDIT").as_ptr(), text("").as_ptr(),
+        state.heading = heading;
+        state.edit = CreateWindowExW(0x200, text("EDIT").as_ptr(), state.initial.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x1000,
             18, 48, width - 36, height - 110, hwnd, 1001usize as H, instance, ptr::null_mut());
-        let next = CreateWindowExW(0, text("BUTTON").as_ptr(), text("Continue").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        let next = CreateWindowExW(0, text("BUTTON").as_ptr(), text(if state.scratch { "Save as…" } else { "Continue" }).as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 210, height - 48, 90, 30, hwnd, 1usize as H, instance, ptr::null_mut());
+        let preview = if state.scratch { CreateWindowExW(0, text("BUTTON").as_ptr(), text("Preview").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            width - 312, height - 48, 90, 30, hwnd, 3usize as H, instance, ptr::null_mut()) } else { ptr::null_mut() };
         let cancel = CreateWindowExW(0, text("BUTTON").as_ptr(), text("Cancel").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 108, height - 48, 90, 30, hwnd, 2usize as H, instance, ptr::null_mut());
-        for control in [heading, state.edit, next, cancel] {
-            if control.is_null() { EndDialog(hwnd, -1); return 1; }
-            SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
+        if heading.is_null() || state.edit.is_null() || next.is_null() || cancel.is_null() || (state.scratch && preview.is_null()) { EndDialog(hwnd, -1); return 1; }
+        for control in [heading, state.edit, next, cancel, preview] {
+            if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }
         }
         SendMessageW(state.edit, 0x00c5, 16 * 1024, 0); // EM_SETLIMITTEXT in UTF-16 code units
         apply_dark_scrollbar(state.edit);
-        style_dialog_button(next); style_dialog_button(cancel);
+        style_dialog_button(next); style_dialog_button(cancel); if !preview.is_null() { style_dialog_button(preview); }
         SendMessageW(hwnd, 0x0401, 2, 0); // Cancel is the default action.
         SetFocus(state.edit);
         return 0;
@@ -434,7 +440,13 @@ unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp:
     let state = get_data(hwnd) as *mut SnippetEditor;
     if state.is_null() { return 0; }
     match msg {
-        WM_COMMAND if wp & 0xffff == 1 => { (*state).result = Some(control_value((*state).edit)); EndDialog(hwnd, 1); 1 }
+        WM_COMMAND if wp & 0xffff == 1 || ((*state).scratch && wp & 0xffff == 3) => {
+            let value = control_value((*state).edit);
+            if value.to_str().map_or(true, |v| v.len() > 16 * 1024) {
+                SetWindowTextW((*state).heading, text("Text must be valid Unicode and no more than 16 KiB in UTF-8.").as_ptr()); return 1;
+            }
+            (*state).result = Some((value, wp & 0xffff == 3)); EndDialog(hwnd, 1); 1
+        }
         WM_COMMAND if wp & 0xffff == 2 => { EndDialog(hwnd, 0); 1 }
         0x0010 => { EndDialog(hwnd, 0); 1 }
         WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button((*state).theme, &*(lp as *const DrawItem)),
@@ -445,11 +457,14 @@ unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp:
     }
 }
 pub(super) unsafe fn snippet_editor(hwnd: H, theme: *const Theme) -> Option<OsString> {
+    text_editor(hwnd, theme, false, OsStr::new("")).map(|(text, _)| text)
+}
+pub(super) unsafe fn text_editor(hwnd: H, theme: *const Theme, scratch: bool, initial: &OsStr) -> Option<(OsString, bool)> {
     let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
     let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 480, 280, 0, 0, 0];
-    let mut state = SnippetEditor { theme, edit: ptr::null_mut(), result: None };
+    let mut state = SnippetEditor { theme, edit: ptr::null_mut(), heading: ptr::null_mut(), initial: wide(initial), scratch, result: None };
     let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(snippet_editor_proc), &mut state as *mut _ as isize);
-    if result == -1 { show_error(hwnd, "Could not open the snippet editor."); }
+    if result == -1 { show_error(hwnd, "Could not open the text editor."); }
     state.result
 }
 

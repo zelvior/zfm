@@ -61,9 +61,20 @@ pub fn script_file(program: &OsStr, flag: &OsStr, path: &Path, directory: &Path,
 fn execute(program: &OsStr, flag: &OsStr, argument: &OsStr, directory: &Path, cancel: &AtomicBool) -> io::Result<String> {
     if cancel.load(Ordering::Relaxed) { return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled")); }
     let mut cmd = Command::new(program);
-    cmd.current_dir(directory).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.current_dir(directory);
     if !flag.is_empty() { cmd.arg(flag); }
     cmd.arg(argument);
+    run_command(cmd, cancel)
+}
+
+/// Run an explicitly configured command without shell expansion. Cancellation
+/// and timeout affect the direct process only. Results may contain sensitive data.
+pub(crate) fn run_command(cmd: Command, cancel: &AtomicBool) -> io::Result<String> {
+    run_command_with_timeout(cmd, cancel, TIME_LIMIT)
+}
+pub(crate) fn run_command_with_timeout(mut cmd: Command, cancel: &AtomicBool, limit: Duration) -> io::Result<String> {
+    if cancel.load(Ordering::Relaxed) { return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled")); }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)] { use std::os::windows::process::CommandExt; cmd.creation_flags(0x0800_0000); }
     let mut child = cmd.spawn()?;
     let stdout = collect(child.stdout.take().ok_or_else(|| invalid("Could not capture stdout"))?);
@@ -71,8 +82,8 @@ fn execute(program: &OsStr, flag: &OsStr, argument: &OsStr, directory: &Path, ca
     let started = Instant::now();
     let (status, reason) = loop {
         if let Some(status) = child.try_wait()? { break (status, None); }
-        if cancel.load(Ordering::Relaxed) || started.elapsed() >= TIME_LIMIT {
-            let reason = if cancel.load(Ordering::Relaxed) { "Cancelled" } else { "Timed out after 30 seconds" };
+        if cancel.load(Ordering::Relaxed) || started.elapsed() >= limit {
+            let reason = if cancel.load(Ordering::Relaxed) { "Cancelled" } else { "Timed out" };
             child.kill()?; break (child.wait()?, Some(reason));
         }
         std::thread::sleep(Duration::from_millis(50));
