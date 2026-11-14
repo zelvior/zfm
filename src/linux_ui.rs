@@ -211,6 +211,7 @@ struct App {
     tabs: Tabs,
     tab_strip: P,
     tab_scroll: P,
+    server: Option<zfm::local_server::Server>,
     generation: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     office_cancels: Vec<Arc<AtomicBool>>,
@@ -550,6 +551,7 @@ unsafe extern "C" fn quit(_: P, data: P) {
     let app = &mut *(data as *mut App);
     app.generation.fetch_add(1, Ordering::Relaxed);
     app.alive.store(false, Ordering::Relaxed);
+    app.server.take();
     for cancel in &app.office_cancels { cancel.store(true, Ordering::Relaxed); }
     if let Some(cancel) = &app.operation {
         cancel.store(true, Ordering::Relaxed);
@@ -1089,7 +1091,15 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
-    if selected_count == 1 { menu_action(menu, "Copy path", copy_path as P, data); }
+    if selected_count == 1 {
+        menu_action(menu, "Copy path", copy_path as P, data);
+        menu_action(menu, "Edit tags…", edit_tags as P, data);
+        if entry.is_file {
+            menu_action(menu, "Calculate MD5 and SHA-256…", hash_selected as P, data);
+            menu_action(menu, "Verify checksum…", verify_selected as P, data);
+            menu_action(menu, "Run script with interpreter…", run_script as P, data);
+        }
+    }
     menu_action(
         menu,
         "Paste into current folder",
@@ -1097,6 +1107,12 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
         data,
     );
     menu_action(menu, "Rename…", rename as P, data);
+    if selection.iter().all(|row| {
+        let index = (api().gtk_list_box_row_get_index)(*row);
+        index >= 0 && app.entries.get(index as usize).map_or(false, |entry| entry.is_file)
+    }) && !selection.is_empty() && selection.len() <= zfm::batch_rename::MAX_ITEMS {
+        menu_action(menu, "Regex rename…", regex_rename as P, data);
+    }
     menu_action(menu, "Move to…", move_to as P, data);
     if copy_selection { menu_action(menu, "Copy to…", copy_to as P, data); }
     if selection.len() == 1 && can_copy { menu_action(menu, "Duplicate…", duplicate as P, data); }
@@ -1189,6 +1205,11 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Review cleanup candidates…", cleanup_review as P),
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
+        ("Run code snippet…", run_snippet as P),
+        ("Open terminal here…", open_terminal as P),
+        ("Start local static server…", server_start as P),
+        ("Copy local server URL", server_copy as P),
+        ("Stop local server", server_stop as P),
         ("Converter…", show_converter as P), ("Archive manager…", show_archive as P),
         ("Settings…", show_settings as P),
         ("Uninstall ZFM…", show_uninstaller as P),
@@ -1397,6 +1418,7 @@ pub fn run() -> Result<(), String> {
             tabs: Tabs::new(initial),
             tab_strip: ptr::null_mut(),
             tab_scroll: ptr::null_mut(),
+            server: None,
             generation: Arc::new(AtomicU64::new(0)),
             alive: Arc::new(AtomicBool::new(true)),
             office_cancels: Vec::new(),
@@ -2029,6 +2051,9 @@ enum Operation {
     MoveItems(Vec<PathBuf>, PathBuf),
     ClipboardMove(Vec<PathBuf>, PathBuf),
     CalculateSize(Vec<PathBuf>),
+    Hash(PathBuf, Option<String>),
+    Snippet(String, String, String, PathBuf),
+    Script(String, String, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
@@ -2097,7 +2122,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
     let id = app.operation_id;
     let generation = app.generation.load(Ordering::Relaxed);
     let app_ptr = data as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Insight(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), _ => None };
     set_status(app, "Working…");
     thread::spawn(move || {
         use std::ffi::OsStr;
@@ -2120,6 +2145,9 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
                 .map(|result| result.message()),
+            Operation::Hash(path, expected) => zfm::hashing::report(&path, expected.as_deref(), &cancel),
+            Operation::Snippet(program, flag, code, dir) => zfm::tools::snippet(OsStr::new(&program), OsStr::new(&flag), &code, &dir, &cancel),
+            Operation::Script(program, flag, path, dir) => zfm::tools::script_file(OsStr::new(&program), OsStr::new(&flag), &path, &dir, &cancel),
             Operation::Insight(job) => job.run(&cancel),
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
@@ -2414,6 +2442,181 @@ unsafe fn batch_rename(data: P) {
     }
     start_operation(data, root, Operation::BatchRename(plan));
 }
+unsafe fn begin_hash(data: P, verify: bool) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.len() != 1 { set_status(app, "Select one regular file."); return; }
+    let index = (api().gtk_list_box_row_get_index)(rows[0]);
+    let path = match if index >= 0 { app.entries.get(index as usize) } else { None } {
+        Some(entry) if entry.is_file => entry.path.clone(),
+        _ => { set_status(app, "Select one regular file."); return; }
+    };
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let alive = app.alive.clone();
+    let parent = app.window;
+    let expected = if verify {
+        match prompt(parent, "Verify checksum", "Paste a bare MD5 (32 hex characters) or SHA-256 (64 hex characters) digest:", Some("")) { Some(value) => Some(value), None => return }
+    } else { None };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation { set_status(app, "Hashing cancelled because the view changed."); return; }
+    start_operation(data, root, Operation::Hash(path, expected));
+}
+unsafe fn confirm_run(parent: P, message: &str) -> bool {
+    let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Run external code?").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent); (api().gtk_window_set_modal)(dialog, 1); (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let run = (api().gtk_dialog_add_button)(dialog, c("Run").as_ptr(), -3); add_class(run, "zfm-primary");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), wrapped_label(message), 0, 0, 12);
+    (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(cancel);
+    let response = (api().gtk_dialog_run)(dialog); if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    response == -3
+}
+unsafe fn run_code(data: P, file: Option<PathBuf>) {
+    let app = &*(data as *mut App); let parent = app.window; let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed); let alive = app.alive.clone();
+    let program = match prompt(parent, "Interpreter", "Installed executable name or absolute path (for example python3, node, or /bin/sh):", Some("/bin/sh")) { Some(v) => v, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let flag = match prompt(parent, "Interpreter argument", "One literal argument before the code or filename (for example -c, -e, or -File). Leave empty if not needed:", Some(if file.is_some() { "" } else { "-c" })) { Some(v) => v, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let code = if file.is_none() {
+        match prompt(parent, "Code snippet", "Enter a single-line snippet. For multiline code, select a script file instead:", Some("")) { Some(v) => Some(v), None => return }
+    } else { None };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let what = file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "the entered snippet".into());
+    let message = format!("Run {what} with {program} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout/cancellation does not stop descendants. Run only code you trust.", root.display());
+    if !confirm_run(parent, &message) || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Run cancelled because the view changed."); return; }
+    let operation = match (file, code) { (Some(file), _) => Operation::Script(program, flag, file, root.clone()), (_, Some(code)) => Operation::Snippet(program, flag, code, root.clone()), _ => return };
+    start_operation(data, root, operation);
+}
+unsafe extern "C" fn run_snippet(_: P, data: P) { run_code(data, None); }
+unsafe extern "C" fn run_script(_: P, data: P) {
+    let app = &*(data as *mut App); let rows = selected_rows(app.list);
+    if rows.len() != 1 { set_status(app, "Select one script file."); return; }
+    let idx = (api().gtk_list_box_row_get_index)(rows[0]);
+    let path = match if idx >= 0 { app.entries.get(idx as usize) } else { None } { Some(entry) if entry.is_file => entry.path.clone(), _ => { set_status(app, "Select one script file."); return; } };
+    run_code(data, Some(path));
+}
+unsafe extern "C" fn open_terminal(_: P, data: P) {
+    let app = &*(data as *mut App); let parent = app.window; let root = app.tabs.current().current().to_path_buf();
+    let alive = app.alive.clone(); let generation = app.generation.load(Ordering::Relaxed);
+    let default = std::env::var("ZFM_TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".into());
+    let program = match prompt(parent, "Open terminal here", "Terminal executable name or absolute path:", Some(&default)) { Some(v) => v, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let default_arg = std::env::var("ZFM_TERMINAL_ARG").unwrap_or_default();
+    let arg = match prompt(parent, "Terminal argument", "Optional single literal terminal argument (leave empty if not needed):", Some(&default_arg)) { Some(v) => v, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation { set_status(app, "Terminal not opened because the view changed."); return; }
+    let result = zfm::tools::terminal(std::ffi::OsStr::new(&program), std::ffi::OsStr::new(&arg), &root);
+    set_status(app, &match result { Ok(()) => "Terminal launched.".to_string(), Err(error) => format!("Could not launch terminal: {error}") });
+}
+
+unsafe extern "C" fn server_start(_: P, data: P) {
+    let app = &*(data as *mut App);
+    if app.server.is_some() { set_status(app, "A local server is already running; use Copy local server URL or stop it first."); return; }
+    let root = app.tabs.current().current().to_path_buf();
+    let parent = app.window; let alive = app.alive.clone(); let generation = app.generation.load(Ordering::Relaxed);
+    let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Start local server?").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent); (api().gtk_window_set_modal)(dialog, 1); (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let start = (api().gtk_dialog_add_button)(dialog, c("Start").as_ptr(), -3); add_class(start, "zfm-primary");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let message = wrapped_label(&format!("Serve files under {} to this computer only?\n\nAnyone with the URL on this computer can read files, including hidden files. No upload or server-side script execution; web pages may run code in the browser. Only start this for trusted folders.", root.display()));
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), message, 0, 0, 12);
+    (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(cancel);
+    let response = (api().gtk_dialog_run)(dialog); if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    if response != -3 || !alive.load(Ordering::Relaxed) { return; }
+    let app = &mut *(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.server.is_some() { set_status(app, "Server not started because the view changed."); return; }
+    match zfm::local_server::Server::start(&root) {
+        Ok(server) => {
+            let url = server.url().to_string(); app.server = Some(server);
+            let clip = (api().gtk_clipboard_get)((api().gdk_atom_intern)(c("CLIPBOARD").as_ptr(), 0));
+            (api().gtk_clipboard_set_text)(clip, c(&url).as_ptr(), -1);
+            let parent = app.window; set_status(app, "Local server started; URL copied.");
+            show_report(parent, "Local server", &format!("Serving {} on this computer only. URL copied to clipboard:\n\n{url}\n\nUse Organize → Stop local server to stop. Anyone with this URL on this computer can read files; the clipboard retains the URL after stopping.", root.display()));
+        }
+        Err(error) => set_status(app, &format!("Could not start local server: {error}")),
+    }
+}
+unsafe extern "C" fn server_copy(_: P, data: P) {
+    let app = &*(data as *mut App);
+    if let Some(server) = &app.server {
+        let clip = (api().gtk_clipboard_get)((api().gdk_atom_intern)(c("CLIPBOARD").as_ptr(), 0));
+        (api().gtk_clipboard_set_text)(clip, c(server.url()).as_ptr(), -1);
+        set_status(app, "Local server URL copied to clipboard.");
+    } else { set_status(app, "No local server is running."); }
+}
+unsafe extern "C" fn server_stop(_: P, data: P) {
+    let app = &mut *(data as *mut App);
+    if app.server.take().is_some() { set_status(app, "Local server stopped."); } else { set_status(app, "No local server is running."); }
+}
+
+unsafe extern "C" fn hash_selected(_: P, data: P) { begin_hash(data, false); }
+unsafe extern "C" fn verify_selected(_: P, data: P) { begin_hash(data, true); }
+
+unsafe extern "C" fn edit_tags(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let path = match selected_path(data) { Some(path) => path, None => return };
+    let file = match zfm::tags::user_path() { Ok(file) => file, Err(error) => { set_status(app, &format!("Tags unavailable: {error}")); return; } };
+    let tags = match zfm::tags::get(&file, &path) { Ok(tags) => tags, Err(error) => { set_status(app, &format!("Cannot read tags: {error}")); return; } };
+    let parent = app.window;
+    let alive = app.alive.clone();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let input = match prompt(parent, "Edit tags", "Comma-separated personal tags. Empty clears all tags; the file is not modified.", Some(&tags.join(", "))) { Some(input) => input, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation { set_status(app, "Tags not saved because the view changed."); return; }
+    let result = zfm::tags::parse_input(&input).and_then(|tags| zfm::tags::set(&file, &path, &tags));
+    set_status(app, &match result { Ok(()) => "Tags saved in ZFM's user configuration.".to_string(), Err(error) => format!("Tags not saved: {error}") });
+}
+
+unsafe extern "C" fn regex_rename(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::batch_rename::MAX_ITEMS {
+        set_status(app, "Select 1 to 100 regular files for regex rename."); return;
+    }
+    let mut selected = Vec::new();
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) if entry.is_file => selected.push((index, entry.path.clone())),
+            _ => { set_status(app, "Regex rename supports regular files only."); return; }
+        }
+    }
+    selected.sort_by_key(|(index, _)| *index);
+    let paths: Vec<PathBuf> = selected.into_iter().map(|(_, path)| path).collect();
+    let parent = app.window;
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let alive = app.alive.clone();
+    let pattern = match prompt(parent, "Regex rename — pattern", "Regular expression against the entire filename, including extension:", Some("")) {
+        Some(pattern) => pattern, None => return,
+    };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let replacement = match prompt(parent, "Regex rename — replacement", "Replacement for every match; captures use ${1}, ${2}, etc. Empty replacement removes matches.", Some("")) {
+        Some(replacement) => replacement, None => return,
+    };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let plan = match zfm::batch_rename::plan_regex(&paths, &pattern, &replacement) {
+        Ok(plan) => plan, Err(error) => { set_status(&*(data as *mut App), &format!("Cannot plan regex rename: {error}")); return; }
+    };
+    if !confirm_numbered_rename(parent, plan.preview()) || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+        set_status(app, "Rename cancelled because the view changed; select the files again."); return;
+    }
+    start_operation(data, root, Operation::BatchRename(plan));
+}
+
 unsafe extern "C" fn duplicate(_: P, data: P) {
     let path = match selected_path(data) {
         Some(p) => p,

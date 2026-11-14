@@ -45,3 +45,11 @@ pub mod office_render;
 pub mod settings;
 
 pub mod insights;
+
+pub mod tags;
+
+pub mod hashing;
+
+pub mod local_server;
+
+pub mod tools;

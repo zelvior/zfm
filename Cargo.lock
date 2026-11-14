@@ -3,8 +3,15 @@
 version = 3
 
 [[package]]
+name = "regex-lite"
+version = "0.1.6"
+
+[[package]]
 name = "zfm"
 version = "0.1.0"
+dependencies = [
+ "regex-lite",
+]
 
 [[package]]
 name = "zfm-installer"

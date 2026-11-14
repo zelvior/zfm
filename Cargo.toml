@@ -1,5 +1,6 @@
 [workspace]
 members = ["installer"]
+exclude = ["vendor/regex-lite"]
 
 [package]
 name = "zfm"
@@ -9,6 +10,9 @@ rust-version = "1.70"
 description = "A lightweight native file manager"
 authors = ["Zelvior Labs"]
 license = "Apache-2.0"
+
+[dependencies]
+regex-lite = { path = "vendor/regex-lite", version = "=0.1.6" }
 
 [profile.release]
 opt-level = "s"

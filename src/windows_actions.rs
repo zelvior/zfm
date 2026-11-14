@@ -441,9 +441,13 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
             }
             warning
         } else {
-            let edit = CreateWindowExW(0, text("EDIT").as_ptr(), state.message.as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x0800,
+            let edit = CreateWindowExW(0, text("EDIT").as_ptr(), text("").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x0800,
                 48, 52, width - 66, height - 110, hwnd, 1002usize as H, instance, ptr::null_mut());
-            apply_dark_scrollbar(edit);
+            if !edit.is_null() {
+                SendMessageW(edit, 0x00c5, 512 * 1024, 0); // EM_SETLIMITTEXT
+                SetWindowTextW(edit, state.message.as_ptr());
+                apply_dark_scrollbar(edit);
+            }
             edit
         };
         let yes = CreateWindowExW(0, text("BUTTON").as_ptr(), text(state.affirmative).as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,

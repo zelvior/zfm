@@ -118,6 +118,17 @@
       "licenseDeclared": "NOASSERTION",
       "copyrightText": "NOASSERTION",
       "sourceInfo": "Vendored PyPI wheel with PDFium build 8149; only its PDFium binary and notices are shipped. See vendor/pdfium/README.md."
+    },
+    {
+      "name": "regex-lite",
+      "SPDXID": "SPDXRef-RegexLite",
+      "versionInfo": "0.1.6",
+      "downloadLocation": "https://github.com/rust-lang/regex/tree/regex-lite-0.1.6/regex-lite",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "MIT OR Apache-2.0",
+      "copyrightText": "The Rust Project Developers and Andrew Gallant",
+      "sourceInfo": "Vendored source of regex-lite 0.1.6; Cargo.toml was simplified for an offline path dependency. See vendor/regex-lite for upstream notices."
     }
   ],
   "relationships": [
@@ -155,6 +166,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relatedSpdxElement": "SPDXRef-PDFium-windows-x86",
       "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-ZFM",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-RegexLite"
     }
   ]
 }

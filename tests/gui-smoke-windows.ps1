@@ -243,6 +243,22 @@ try {
     if ([ZfmSmoke]::GetControlText($previewEdit, 0x000D, [UIntPtr]$previewText.Capacity, $previewText, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read preview text.' }
     if ($previewText.ToString() -notmatch 'GUI smoke fixture') { throw "Preview text is incorrect: $previewText" }
     if (-not [ZfmSmoke]::PostMessageW($preview, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close preview.' }
+    # Hash the still-selected fixture and check the actual displayed digest.
+    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]183, [IntPtr]::Zero)) { throw 'Could not request file hashes.' }
+    $hashDialog = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $hashDialog = [ZfmSmoke]::FindWindowW('#32770', 'File hashes')
+        if ($hashDialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($hashDialog, 1002) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($hashDialog -eq [IntPtr]::Zero) { throw 'File hash report did not appear.' }
+    $hashText = New-Object System.Text.StringBuilder 4096
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($hashDialog, 1002), 0x000D, [UIntPtr]$hashText.Capacity, $hashText, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read file hash report.' }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $expected = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $work 'example.txt')))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+    if (-not $hashText.ToString().Contains($expected)) { throw "File hash report did not contain the expected SHA-256: $hashText" }
+    if (-not [ZfmSmoke]::PostMessageW($hashDialog, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close file hash report.' }
     # Clear the selection after the preview.
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
