@@ -171,6 +171,7 @@ grep -q 'trash file' "$config/data/Trash/files/batch-file.txt"
 grep -q 'trash nested' "$config/data/Trash/files/batch-folder/nested.txt"
 [ -f "$config/data/Trash/info/batch-file.txt.trashinfo" ] && [ -f "$config/data/Trash/info/batch-folder.trashinfo" ]
 # F2 on multiple files previews a numbered rename; cancelling changes nothing.
+set -x
 mkdir -p "$work/rename-test"
 printf 'alpha\n' > "$work/rename-test/alpha.txt"
 printf 'beta\n' > "$work/rename-test/beta.csv"
