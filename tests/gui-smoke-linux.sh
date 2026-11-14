@@ -169,4 +169,61 @@ done
 grep -q 'trash file' "$config/data/Trash/files/batch-file.txt"
 grep -q 'trash nested' "$config/data/Trash/files/batch-folder/nested.txt"
 [ -f "$config/data/Trash/info/batch-file.txt.trashinfo" ] && [ -f "$config/data/Trash/info/batch-folder.trashinfo" ]
-echo "GTK navigation, clipboard, trash and name dialog smoke tests passed (window $window)."
+# F2 on multiple files previews a numbered rename; cancelling changes nothing.
+mkdir -p "$work/rename-test"
+printf 'alpha\n' > "$work/rename-test/alpha.txt"
+printf 'beta\n' > "$work/rename-test/beta.csv"
+xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+l ctrl+a
+xdotool type --clearmodifiers "$work/rename-test"
+xdotool key --window "$window" Return
+sleep 1
+batch_dialog() {
+    xdotool windowfocus --sync "$window"
+    xdotool key --window "$window" Escape ctrl+a F2
+    local dialog=''
+    for _ in $(seq 1 100); do
+        dialog=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Batch rename$' 2>/dev/null | head -n 1 || true)
+        [ -z "$dialog" ] || break
+        sleep 0.1
+    done
+    [ -n "$dialog" ] || { echo 'Batch rename dialog did not appear.' >&2; exit 1; }
+    xdotool windowfocus --sync "$dialog"
+    xdotool type --clearmodifiers 'Holiday'
+    xdotool key Return
+    preview=''
+    for _ in $(seq 1 100); do
+        preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' 2>/dev/null | head -n 1 || true)
+        [ -z "$preview" ] || break
+        sleep 0.1
+    done
+    [ -n "$preview" ] || { echo 'Batch rename preview did not appear.' >&2; exit 1; }
+    xdotool windowfocus --sync "$preview"
+    sleep 0.5
+}
+batch_dialog
+xdotool key Escape
+for _ in $(seq 1 100); do
+    if ! xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
+[ -f "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/Holiday (1).txt" ]
+batch_dialog
+# Focus starts on Cancel; Tab moves to Rename, and Space activates it.
+xdotool key Tab space
+for _ in $(seq 1 100); do
+    if [ -f "$work/rename-test/Holiday (1).txt" ] && [ -f "$work/rename-test/Holiday (2).csv" ]; then break; fi
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during batch rename:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+if [ ! -f "$work/rename-test/Holiday (1).txt" ]; then
+    echo 'Batch rename did not create expected files; directory and windows:' >&2
+    find "$work/rename-test" -print >&2
+    xdotool search --onlyvisible --pid "$pid" 2>/dev/null | while read -r id; do xdotool getwindowname "$id" >&2 || true; done
+    cat "$work/stderr" >&2
+    exit 1
+fi
+grep -q alpha "$work/rename-test/Holiday (1).txt"
+grep -q beta "$work/rename-test/Holiday (2).csv"
+[ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
+echo "GTK navigation, clipboard, trash, batch rename and name dialog smoke tests passed (window $window)."

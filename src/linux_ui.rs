@@ -1914,6 +1914,7 @@ enum Operation {
     CreateFile(PathBuf, String),
     CreateDirectory(PathBuf, String),
     Rename(PathBuf, String),
+    BatchRename(zfm::batch_rename::RenamePlan),
     Duplicate(PathBuf, String),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
@@ -1989,6 +1990,8 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::Rename(path, name) => operations::rename_child(&path, OsStr::new(&name))
                 .map(|p| format!("Renamed to {}", p.display())),
+            Operation::BatchRename(plan) => zfm::batch_rename::apply(&plan, &cancel, |_| {})
+                .map(|result| result.message(plan.len())),
             Operation::Duplicate(path, name) => {
                 let dir = path.parent().unwrap_or_else(|| std::path::Path::new("/"));
                 operations::copy_item(&path, dir, OsStr::new(&name), &cancel, |_| {})
@@ -2079,6 +2082,10 @@ unsafe extern "C" fn new_folder(_: P, data: P) {
     }
 }
 unsafe extern "C" fn rename(_: P, data: P) {
+    if selected_rows((*(data as *mut App)).list).len() > 1 {
+        batch_rename(data);
+        return;
+    }
     let path = match selected_path(data) {
         Some(p) => p,
         None => return,
@@ -2101,6 +2108,67 @@ unsafe extern "C" fn rename(_: P, data: P) {
     ) {
         start_operation(data, dir, Operation::Rename(path, name));
     }
+}
+// Preview every name in a scrollable, read-only widget. Cancel is the default.
+unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c("Preview batch rename").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 640, 400);
+    let cancel_button = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    (api().gtk_dialog_add_button)(dialog, c("_Rename").as_ptr(), -3);
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let area = (api().gtk_dialog_get_content_area)(dialog);
+    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
+    (api().gtk_widget_set_size_request)(scroll, 580, 300);
+    let view = (api().gtk_text_view_new)();
+    (api().gtk_text_view_set_editable)(view, 0);
+    (api().gtk_text_view_set_cursor_visible)(view, 0);
+    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(preview).as_ptr(), -1);
+    (api().gtk_container_add)(scroll, view);
+    (api().gtk_box_pack_start)(area, scroll, 1, 1, 8);
+    (api().gtk_widget_show_all)(dialog);
+    (api().gtk_widget_grab_focus)(cancel_button);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    response == -3
+}
+unsafe fn batch_rename(data: P) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if !(2..=zfm::batch_rename::MAX_ITEMS).contains(&rows.len()) {
+        set_status(app, "Select 2 to 100 regular files for batch rename."); return;
+    }
+    let mut selected = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) if entry.is_file => selected.push((index, entry.path.clone())),
+            _ => { set_status(app, "Batch rename supports regular files only."); return; }
+        }
+    }
+    selected.sort_by_key(|(index, _)| *index);
+    let paths: Vec<PathBuf> = selected.into_iter().map(|(_, path)| path).collect();
+    let parent = app.window;
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let alive = app.alive.clone();
+    let base = match prompt(parent, "Batch rename", "Base name for selected files (their final extensions are preserved):", Some("")) {
+        Some(base) => base, None => return,
+    };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let plan = match zfm::batch_rename::plan(&paths, std::ffi::OsStr::new(&base)) {
+        Ok(plan) => plan, Err(error) => { set_status(&*(data as *mut App), &format!("Cannot plan rename: {error}")); return; }
+    };
+    if !confirm_numbered_rename(parent, plan.preview()) || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
+        set_status(app, "Rename cancelled because the view changed; select the files again."); return;
+    }
+    start_operation(data, root, Operation::BatchRename(plan));
 }
 unsafe extern "C" fn duplicate(_: P, data: P) {
     let path = match selected_path(data) {

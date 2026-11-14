@@ -410,7 +410,7 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
         GetClientRect(hwnd, &mut rect);
         let width = rect.right.max(360);
         let message = CreateWindowExW(0, text("EDIT").as_ptr(), state.message.as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | 0x0004 | 0x0040 | 0x0800,
-            18, 16, width - 36, 98, hwnd, ptr::null_mut(), instance, ptr::null_mut());
+            18, 16, width - 36, 98, hwnd, 1002usize as H, instance, ptr::null_mut());
         let yes = CreateWindowExW(0, text("BUTTON").as_ptr(), text(state.affirmative).as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             width - 192, 125, 82, 28, hwnd, 1usize as H, instance, ptr::null_mut());
         let cancel = if state.has_cancel { CreateWindowExW(0, text("BUTTON").as_ptr(), text("Cancel").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,

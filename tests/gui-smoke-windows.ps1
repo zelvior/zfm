@@ -24,6 +24,8 @@ public static class ZfmSmoke {
     public static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool IsClipboardFormatAvailable(uint format);
     [DllImport("user32.dll", ExactSpelling=true)]
@@ -660,6 +662,55 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $cutTarget 'a.txt')) -ne 'a' -or
         [IO.File]::ReadAllText((Join-Path $cutTarget 'b.txt')) -ne 'b' -or
         [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Multi-item cut/paste failed.' }
+    # Numbered batch rename shows every mapping before any change.
+    $renameSource = Join-Path $configRoot 'rename-source'
+    New-Item -ItemType Directory -Path $renameSource | Out-Null
+    [IO.File]::WriteAllText((Join-Path $renameSource 'alpha.txt'), 'alpha')
+    [IO.File]::WriteAllText((Join-Path $renameSource 'beta.csv'), 'beta')
+    Navigate-Cut $renameSource 'alpha.txt'
+    function Open-BatchRename {
+        Select-Cut @('alpha.txt', 'beta.csv')
+        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]138, [IntPtr]::Zero)) { throw 'Could not request batch rename.' }
+        $dialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', 'Batch rename — base name')
+            if ($dialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($dialog, 1001) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($dialog -eq [IntPtr]::Zero) { throw 'Batch rename base dialog did not appear.' }
+        $edit = [ZfmSmoke]::GetDlgItem($dialog, 1001)
+        [void][ZfmSmoke]::SendMessageW($edit, 0x000c, [UIntPtr]::Zero, 'Holiday')
+        [void][ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+        $preview = [IntPtr]::Zero; $previewText = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $preview = [ZfmSmoke]::FindWindowW('#32770', 'Preview batch rename')
+            if ($preview -ne [IntPtr]::Zero) { $previewText = [ZfmSmoke]::GetDlgItem($preview, 1002) }
+            if ($previewText -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($previewText -eq [IntPtr]::Zero) {
+            $status = New-Object System.Text.StringBuilder 2048
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+            $selectedCount = [UIntPtr]::Zero
+            [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$selectedCount)
+            throw "Batch rename preview did not appear: preview=$preview status=$($status.ToString()) selection=$($selectedCount.ToUInt64())."
+        }
+        $value = New-Object System.Text.StringBuilder 8192
+        $r = [UIntPtr]::Zero
+        [void][ZfmSmoke]::GetControlText($previewText, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$r)
+        if ($value.ToString() -notmatch 'alpha.txt.*Holiday \(1\).txt' -or $value.ToString() -notmatch 'beta.csv.*Holiday \(2\).csv') { throw "Batch preview omitted a mapping: $($value.ToString())" }
+        return $preview
+    }
+    $preview = Open-BatchRename
+    [void][ZfmSmoke]::PostMessageW($preview, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', 'Preview batch rename') -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath (Join-Path $renameSource 'alpha.txt')) -or (Test-Path -LiteralPath (Join-Path $renameSource 'Holiday (1).txt'))) { throw 'Cancelling preview changed files.' }
+    $preview = Open-BatchRename
+    [void][ZfmSmoke]::PostMessageW($preview, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    Wait-CutStatus 'Renamed 2 files'
+    if ([IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (1).txt')) -ne 'alpha' -or
+        [IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (2).csv')) -ne 'beta' -or
+        (Test-Path -LiteralPath (Join-Path $renameSource 'alpha.txt'))) { throw 'Batch rename failed.' }
     Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.

@@ -99,3 +99,5 @@ The Computer sidebar enumerates Windows logical drive letters, rather than a fix
 The current folder is polled in the background roughly every three seconds by default. It can be disabled in Settings; Reload still works. Selection and scroll position are preserved where possible. A slow or blocked filesystem can delay background updates, and a blocked poll may prevent later automatic folder scans until it returns. These updates are not guaranteed to be instantaneous. The new behavior should be verified on the target Windows system, including its removable and mapped drives.
 
 Windows cut/paste moves up to 1,024 items on the same volume without replacement. A partial failure leaves earlier moves in place and clears the original cut clipboard if unchanged; reselect remaining items to retry. A clipboard changed by another app is left alone. If clearing fails, a warning is shown and ZFM blocks reusing that clipboard in the current process. See the README for limitations.
+
+F2 or Rename on 2–100 selected regular files in the same folder opens a numbered batch-rename preview. See the README for preflight checks, no-overwrite and partial-result limitations.
