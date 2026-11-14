@@ -399,6 +399,7 @@ struct ConfirmDialog {
     affirmative: &'static str,
     has_cancel: bool,
     report: bool,
+    report_complete: bool,
 }
 unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 { // WM_INITDIALOG
@@ -414,7 +415,7 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
         let message_top = if state.report { 22 } else { 16 };
         let message_height = if state.report { height - 80 } else { 98 };
         if state.report {
-            let mark = CreateWindowExW(0, text("STATIC").as_ptr(), text("✓").as_ptr(), WS_CHILD | WS_VISIBLE,
+            let mark = CreateWindowExW(0, text("STATIC").as_ptr(), text(if state.report_complete { "✓" } else { "!" }).as_ptr(), WS_CHILD | WS_VISIBLE,
                 18, 22, 22, 24, hwnd, 1003usize as H, instance, ptr::null_mut());
             if !mark.is_null() { SendMessageW(mark, WM_SETFONT, (*state.theme).semibold_font as usize, 1); }
         }
@@ -465,7 +466,7 @@ pub(super) unsafe fn question(hwnd: H, theme: *const Theme, title: &str, message
             None => message.to_owned(),
         }
     } else { message.to_owned() };
-    let mut state = ConfirmDialog { theme, title: text(title), message: text(&formatted.replace("\n", "\r\n")), accepted: false, affirmative, has_cancel, report };
+    let mut state = ConfirmDialog { theme, title: text(title), message: text(&formatted.replace("\n", "\r\n")), accepted: false, affirmative, has_cancel, report, report_complete: message.starts_with("Scan finished.") };
     let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(confirm_proc), &mut state as *mut _ as isize);
     if result == -1 { None } else { Some(state.accepted) }
 }

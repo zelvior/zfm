@@ -815,6 +815,14 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (1).txt')) -ne 'alpha' -or
         [IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (2).csv')) -ne 'beta' -or
         (Test-Path -LiteralPath (Join-Path $renameSource 'alpha.txt'))) { throw 'Batch rename failed.' }
+    # A populated list still responds to native scrolling with the custom skin.
+    $scrollFixture = Join-Path $work 'scroll-fixture'
+    New-Item -ItemType Directory -Path $scrollFixture | Out-Null
+    for ($i = 0; $i -lt 80; $i++) { [IO.File]::WriteAllText((Join-Path $scrollFixture ("item-{0:D3}.txt" -f $i)), 'scroll') }
+    Navigate-Cut $scrollFixture 'item-079.txt'
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x0115, [UIntPtr]7, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'List scroll failed.' }
+    if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x018e, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -eq 0) { throw 'List did not scroll to the bottom.' }
     Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.

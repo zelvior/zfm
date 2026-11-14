@@ -118,6 +118,11 @@ api! {
     gtk_entry_set_placeholder_text: unsafe extern "C" fn(P, *const c_char),
     gtk_entry_get_text: unsafe extern "C" fn(P) -> *const c_char,
     gtk_label_new: unsafe extern "C" fn(*const c_char) -> P,
+    gtk_label_new_with_mnemonic: unsafe extern "C" fn(*const c_char) -> P,
+    gtk_label_set_mnemonic_widget: unsafe extern "C" fn(P, P),
+    gtk_switch_new: unsafe extern "C" fn() -> P,
+    gtk_switch_set_active: unsafe extern "C" fn(P, c_int),
+    gtk_switch_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_label_set_text: unsafe extern "C" fn(P, *const c_char),
     gtk_label_set_xalign: unsafe extern "C" fn(P, f32),
     gtk_label_set_ellipsize: unsafe extern "C" fn(P, c_int),
@@ -1161,21 +1166,41 @@ unsafe extern "C" fn show_settings(_: P, data: P) {
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
-    (api().gtk_window_set_default_size)(dialog, 360, 180);
+    (api().gtk_window_set_default_size)(dialog, 500, 260);
     let content = (api().gtk_dialog_get_content_area)(dialog);
-    let hidden = (api().gtk_check_button_new_with_label)(c("Show hidden files").as_ptr());
-    let ascending = (api().gtk_check_button_new_with_label)(c("Sort ascending").as_ptr());
-    (api().gtk_toggle_button_set_active)(hidden, (api().gtk_toggle_button_get_active)(app.hidden));
-    (api().gtk_toggle_button_set_active)(ascending, app.sort_ascending as c_int);
-    (api().gtk_box_pack_start)(content, hidden, 0, 0, 8);
-    (api().gtk_box_pack_start)(content, ascending, 0, 0, 8);
-    (api().gtk_box_pack_start)(content, label("Apply saves these settings for future sessions."), 0, 0, 8);
+    add_class(content, "zfm-settings");
+    let card = (api().gtk_box_new)(1, 8);
+    add_class(card, "zfm-settings-card");
+    let heading = label("File list");
+    add_class(heading, "zfm-settings-heading");
+    (api().gtk_label_set_xalign)(heading, 0.0);
+    (api().gtk_box_pack_start)(card, heading, 0, 0, 0);
+    let make_switch = |caption: &str| {
+        let row = (api().gtk_box_new)(0, 12);
+        let toggle = (api().gtk_switch_new)();
+        let caption = (api().gtk_label_new_with_mnemonic)(c(caption).as_ptr());
+        (api().gtk_label_set_mnemonic_widget)(caption, toggle);
+        (api().gtk_label_set_xalign)(caption, 0.0);
+        (api().gtk_box_pack_start)(row, toggle, 0, 0, 0);
+        (api().gtk_box_pack_start)(row, caption, 1, 1, 0);
+        (api().gtk_box_pack_start)(card, row, 0, 0, 0);
+        toggle
+    };
+    let hidden = make_switch("Show _hidden files");
+    let ascending = make_switch("Sort _ascending");
+    (api().gtk_switch_set_active)(hidden, (api().gtk_toggle_button_get_active)(app.hidden));
+    (api().gtk_switch_set_active)(ascending, app.sort_ascending as c_int);
+    (api().gtk_box_pack_start)(content, card, 0, 0, 8);
+    let note = label("Apply saves these preferences for future sessions.");
+    add_class(note, "zfm-settings-note");
+    (api().gtk_box_pack_start)(content, note, 0, 0, 8);
     (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(dialog, c("Apply").as_ptr(), -5);
+    let apply = (api().gtk_dialog_add_button)(dialog, c("Apply").as_ptr(), -5);
+    add_class(apply, "zfm-settings-apply");
     (api().gtk_widget_show_all)(dialog);
     let response = (api().gtk_dialog_run)(dialog);
     let values = if response == -5 {
-        Some(((api().gtk_toggle_button_get_active)(hidden), (api().gtk_toggle_button_get_active)(ascending) != 0))
+        Some(((api().gtk_switch_get_active)(hidden), (api().gtk_switch_get_active)(ascending) != 0))
     } else { None };
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     if let Some((hidden, ascending)) = values {
@@ -2124,7 +2149,11 @@ unsafe fn show_size_result(parent: P, text: &str) {
     let view = (api().gtk_text_view_new)();
     (api().gtk_text_view_set_editable)(view, 0);
     (api().gtk_text_view_set_cursor_visible)(view, 0);
-    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(text).as_ptr(), -1);
+    let report = match text.split_once('\n') {
+        Some((headline, rest)) => format!("{headline}\n\nDetailed Report:\n{rest}"),
+        None => text.to_owned(),
+    };
+    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(&report).as_ptr(), -1);
     (api().gtk_container_add)(scroll, view);
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), scroll, 1, 1, 8);
     (api().gtk_widget_show_all)(dialog);
