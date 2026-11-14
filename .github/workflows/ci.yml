@@ -127,3 +127,24 @@ jobs:
             Write-Output "::error::Installer smoke test failed: $message"
             throw
           }
+
+  legacy-linux:
+    name: Legacy Linux ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Exercise release build and packaged GUI on Ubuntu 18.04
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if ! docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:18.04 \
+            bash scripts/ci-legacy-linux.sh "$TARGET" v0.0.0-ci 2>&1 | tee /tmp/zfm-legacy.log; then
+            message=$(tail -40 /tmp/zfm-legacy.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=Legacy Linux release build::$message"
+            exit 1
+          fi
