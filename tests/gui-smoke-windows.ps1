@@ -662,6 +662,29 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $cutTarget 'a.txt')) -ne 'a' -or
         [IO.File]::ReadAllText((Join-Path $cutTarget 'b.txt')) -ne 'b' -or
         [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Multi-item cut/paste failed.' }
+    # Calculate apparent size across a folder (including hidden data) and a file.
+    $sizeSource = Join-Path $configRoot 'size-source'
+    New-Item -ItemType Directory -Path (Join-Path $sizeSource 'folder') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sizeSource 'folder\nested.txt'), 'abc')
+    [IO.File]::WriteAllText((Join-Path $sizeSource 'second.txt'), 'xyz')
+    Navigate-Cut $sizeSource 'folder'
+    Select-Cut @('folder', 'second.txt')
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]171, [IntPtr]::Zero)
+    $sizeDialog = [IntPtr]::Zero; $sizeText = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $sizeDialog = [ZfmSmoke]::FindWindowW('#32770', 'Size results')
+        if ($sizeDialog -ne [IntPtr]::Zero) { $sizeText = [ZfmSmoke]::GetDlgItem($sizeDialog, 1002) }
+        if ($sizeText -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($sizeText -eq [IntPtr]::Zero) { throw 'Size results did not appear.' }
+    $value = New-Object System.Text.StringBuilder 4096
+    $r = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText($sizeText, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$r)
+    if ($value.ToString() -notmatch 'Scan finished' -or $value.ToString() -notmatch 'size: 6 bytes' -or
+        $value.ToString() -notmatch 'Files: 2' -or $value.ToString() -notmatch 'Folders: 1') { throw "Incorrect size results: $value" }
+    [void][ZfmSmoke]::PostMessageW($sizeDialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', 'Size results') -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
     # Numbered batch rename shows every mapping before any change.
     $renameSource = Join-Path $configRoot 'rename-source'
     New-Item -ItemType Directory -Path $renameSource | Out-Null

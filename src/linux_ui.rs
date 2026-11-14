@@ -641,6 +641,7 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0x6e, 5) | (0x4e, 5) => new_folder(ptr::null_mut(), p),
         (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
         (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
+        (0x69, 5) | (0x49, 5) if list_has_focus(p) => calculate_size(ptr::null_mut(), p),
         (0x2c, 4) => show_settings(ptr::null_mut(), p),
         (0x62, 4) | (0x42, 4) => bookmark_current(ptr::null_mut(), p),
         (0x70, 4) | (0x50, 4) if list_has_focus(p) => preview_selected(ptr::null_mut(), p),
@@ -1046,6 +1047,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     menu_action(menu, "Move to trash", move_to_trash as P, data);
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
+    menu_action(menu, "Calculate size…", calculate_size as P, data);
     menu_action(menu, "Properties", properties as P, data);
     connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
     (api().gtk_widget_show_all)(menu);
@@ -1121,6 +1123,7 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Delete permanently…", delete_permanently as P),
         ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
         ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
+        ("Calculate size… (Ctrl+Shift+I)", calculate_size as P),
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
         ("Converter…", show_converter as P), ("Archive manager…", show_archive as P),
@@ -1921,6 +1924,7 @@ enum Operation {
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
     ClipboardMove(Vec<PathBuf>, PathBuf),
+    CalculateSize(Vec<PathBuf>),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -1930,6 +1934,7 @@ struct OperationResult {
     id: u64,
     directory: PathBuf,
     generation: u64,
+    details: bool,
     result: Result<String, String>,
 }
 unsafe extern "C" fn operation_result(data: P) -> c_int {
@@ -1939,6 +1944,14 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
         return 0;
     }
     app.operation = None;
+    if message.details {
+        let text = match message.result { Ok(text) => text, Err(error) => format!("Could not calculate size: {error}") };
+        set_status(app, "Size scan finished; see results.");
+        let parent = app.window;
+        // The modal dialog runs a nested loop; do not retain an App reference.
+        show_size_result(parent, &text);
+        return 0;
+    }
     match message.result {
         Ok(result) => {
             if (app.tabs.current().current() == message.directory
@@ -1979,6 +1992,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
     let id = app.operation_id;
     let generation = app.generation.load(Ordering::Relaxed);
     let app_ptr = data as usize;
+    let details = matches!(&operation, Operation::CalculateSize(_));
     set_status(app, "Working…");
     thread::spawn(move || {
         use std::ffi::OsStr;
@@ -1999,6 +2013,8 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
                 operations::copy_item(&path, dir, OsStr::new(&name), &cancel, |_| {})
                     .map(|p| format!("Created {}", p.display()))
             }
+            Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
+                .map(|result| result.message()),
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
             }
@@ -2025,6 +2041,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             id,
             directory,
             generation,
+            details,
             result,
         });
         unsafe {
@@ -2069,6 +2086,44 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
     } else {
         set_status(app, "No operation is running.");
     }
+}
+unsafe fn show_size_result(parent: P, text: &str) {
+    let dialog = (api().gtk_dialog_new)();
+    (api().gtk_window_set_title)(dialog, c("Size results").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 600, 300);
+    (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
+    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
+    (api().gtk_widget_set_size_request)(scroll, 520, 200);
+    let view = (api().gtk_text_view_new)();
+    (api().gtk_text_view_set_editable)(view, 0);
+    (api().gtk_text_view_set_cursor_visible)(view, 0);
+    (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(text).as_ptr(), -1);
+    (api().gtk_container_add)(scroll, view);
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), scroll, 1, 1, 8);
+    (api().gtk_widget_show_all)(dialog);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+}
+unsafe extern "C" fn calculate_size(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS {
+        set_status(app, "Select between 1 and 1024 items to calculate size."); return;
+    }
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } {
+            Some(entry) => paths.push(entry.path.clone()),
+            None => { set_status(app, "The selection changed; select the items again."); return; }
+        }
+    }
+    let root = app.tabs.current().current().to_path_buf();
+    start_operation(data, root, Operation::CalculateSize(paths));
 }
 unsafe extern "C" fn new_file(_: P, data: P) {
     let parent = (*(data as *mut App)).window;

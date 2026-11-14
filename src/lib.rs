@@ -11,6 +11,7 @@ pub mod audio_convert;
 
 pub mod operations;
 pub mod batch_rename;
+pub mod size_scan;
 
 pub mod archive;
 pub mod archive_actions;
