@@ -76,7 +76,6 @@ pub(super) unsafe fn copy_text(hwnd: H, path: &Path) -> bool {
 pub(super) unsafe fn copy_files(hwnd: H, paths: &[PathBuf], cut: bool) -> bool {
     if paths.is_empty()
         || paths.len() > zfm::operations::MAX_COPY_ITEMS
-        || (cut && paths.len() != 1)
     {
         return false;
     }
@@ -125,7 +124,7 @@ pub(super) unsafe fn copy_files(hwnd: H, paths: &[PathBuf], cut: bool) -> bool {
     ok
 }
 
-pub(super) unsafe fn read_files(hwnd: H) -> Result<(Vec<PathBuf>, bool), &'static str> {
+pub(super) unsafe fn read_files(hwnd: H) -> Result<(Vec<PathBuf>, bool, u32), &'static str> {
     if OpenClipboard(hwnd) == 0 {
         return Err("Cannot open clipboard.");
     }
@@ -175,13 +174,31 @@ pub(super) unsafe fn read_files(hwnd: H) -> Result<(Vec<PathBuf>, bool), &'stati
             cut = ptr::read_unaligned(p as *const u32) & 2 != 0;
             GlobalUnlock(effect);
         }
-        if cut && count != 1 {
-            return Err("Cut and paste supports one item only.");
-        }
-        Ok((paths, cut))
+        // Capture this while the clipboard is open, after any delayed rendering.
+        let sequence = GetClipboardSequenceNumber();
+        if cut && sequence == 0 { return Err("Cannot track the cut clipboard safely."); }
+        Ok((paths, cut, sequence))
     })();
     CloseClipboard();
     result
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum ClearCut { Cleared, Changed, Unavailable }
+
+/// Check and clear while holding the clipboard lock. A newer clipboard must
+/// never be overwritten merely because a previous paste has finished.
+pub(super) unsafe fn clear_cut_if_unchanged(hwnd: H, expected: u32) -> ClearCut {
+    if OpenClipboard(hwnd) == 0 { return ClearCut::Unavailable; }
+    let outcome = if GetClipboardSequenceNumber() != expected {
+        ClearCut::Changed
+    } else if EmptyClipboard() != 0 {
+        ClearCut::Cleared
+    } else {
+        ClearCut::Unavailable
+    };
+    CloseClipboard();
+    outcome
 }
 
 struct Prompt {
