@@ -11,6 +11,7 @@ ZFM exposes its implemented end-user operations in its native Linux and Windows 
 | Preview and properties | Selected-item menu, Ctrl+P / Alt+Enter | Actions or selection menu, Ctrl+P / Alt+Enter |
 | Calculate selected size; cancel work | Selected-item menu / Ctrl+Shift+I; Organize → Cancel operation | Actions / Ctrl+Shift+I; Actions → Cancel current operation while busy |
 | Built-in file conversion | Selected supported file menu, or Converter sidebar/Organize window with mode selector | Select a supported file → Actions → Convert; WAV has separate AIFF and AU options |
+| Optional read-only mounts | Selected archive → FUSE mount; selected folder → dismount | Selected ISO → Windows mount/dismount |
 | Archive browse, test, create and extract | Selected archive/item menu and Archives sidebar/Archive manager | Select archive/item → Actions; archive browser has test, extract one and extract all |
 | Markdown / code scratchpad (plain-text preview) | Organize → Markdown / code scratchpad | Actions → Markdown / code scratchpad |
 | Android ADB list / wireless connect / send one file | Organize; send from selected file menu | Actions; send from selected file menu |

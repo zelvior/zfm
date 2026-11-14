@@ -1106,7 +1106,9 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
             menu_action(menu, "Verify checksum…", verify_selected as P, data);
             menu_action(menu, "Run script with interpreter…", run_script as P, data);
             menu_action(menu, "Send file to Android via ADB…", adb_push as P, data);
+            if zfm::archive_actions::can_extract(&entry.path) { menu_action(menu, "Mount archive read-only (FUSE)…", mount_archive as P, data); }
         }
+        if entry.is_dir { menu_action(menu, "Dismount ZFM archive (FUSE)…", unmount_archive as P, data); }
     }
     menu_action(
         menu,
@@ -2069,6 +2071,7 @@ enum Operation {
     Script(String, String, PathBuf, PathBuf),
     Insight(zfm::insights::Job),
     Mobile(zfm::mobile::Job),
+    ArchiveMount(zfm::archive_mount::Job),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -2136,7 +2139,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
     let id = app.operation_id;
     let generation = app.generation.load(Ordering::Relaxed);
     let app_ptr = data as usize;
-    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), _ => None };
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Hash(_, _) => Some("File hashes"), Operation::Snippet(_, _, _, _) | Operation::Script(_, _, _, _) => Some("Script results"), Operation::Insight(job) => Some(job.title()), Operation::Mobile(job) => Some(job.title()), Operation::ArchiveMount(job) => Some(job.title()), _ => None };
     set_status(app, "Working…");
     thread::spawn(move || {
         use std::ffi::OsStr;
@@ -2164,6 +2167,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             Operation::Script(program, flag, path, dir) => zfm::tools::script_file(OsStr::new(&program), OsStr::new(&flag), &path, &dir, &cancel),
             Operation::Insight(job) => job.run(&cancel),
             Operation::Mobile(job) => job.run(&cancel),
+            Operation::ArchiveMount(job) => job.run(&cancel),
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
             }
@@ -2572,6 +2576,42 @@ unsafe fn run_code(data: P, file: Option<PathBuf>) {
     let operation = match (file, code) { (Some(file), _) => Operation::Script(program, flag, file, root.clone()), (_, Some(code)) => Operation::Snippet(program, flag, code, root.clone()), _ => return };
     start_operation(data, root, operation);
 }
+unsafe extern "C" fn mount_archive(_: P, data: P) {
+    let app = &*(data as *mut App); let rows = selected_rows(app.list);
+    if rows.len() != 1 { set_status(app, "Select one archive to mount."); return; }
+    let index = (api().gtk_list_box_row_get_index)(rows[0]);
+    let archive = match if index >= 0 { app.entries.get(index as usize) } else { None } {
+        Some(entry) if entry.is_file && zfm::archive_actions::can_extract(&entry.path) => entry.path.clone(),
+        _ => { set_status(app, "Select one supported regular archive."); return; }
+    };
+    let parent = app.window; let alive = app.alive.clone(); let generation = app.generation.load(Ordering::Relaxed);
+    let root = app.tabs.current().current().to_path_buf();
+    let name = match prompt(parent, "Archive mountpoint", "Absolute path to an existing, empty folder owned by you. Do not use a system or shared folder:", Some("")) { Some(value) => value, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let point = PathBuf::from(name);
+    let message = format!("Mount {} at {} using the separately installed archivemount and FUSE? The mount is requested read-only, but the external tool is not sandboxed. It may remain after ZFM exits or cancellation. Mount only trusted archives and folders; dismount explicitly when done.", archive.display(), point.display());
+    if !confirm_action(parent, "Mount archive?", &message, "Mount") || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Archive mount cancelled because the view changed."); return; }
+    start_operation(data, root, Operation::ArchiveMount(zfm::archive_mount::Job::Mount { archive, point }));
+}
+unsafe extern "C" fn unmount_archive(_: P, data: P) {
+    let app = &*(data as *mut App); let rows = selected_rows(app.list);
+    if rows.len() != 1 { set_status(app, "Select the mounted folder to dismount."); return; }
+    let index = (api().gtk_list_box_row_get_index)(rows[0]);
+    let point = match if index >= 0 { app.entries.get(index as usize) } else { None } {
+        Some(entry) if entry.is_dir => entry.path.clone(),
+        _ => { set_status(app, "Select the mounted folder to dismount."); return; }
+    };
+    let parent = app.window; let alive = app.alive.clone(); let generation = app.generation.load(Ordering::Relaxed);
+    let root = app.tabs.current().current().to_path_buf();
+    let message = format!("Dismount {} using the installed fusermount? Only mounts marked as ZFM archive FUSE mounts are accepted, but this can affect other applications using it.", point.display());
+    if !confirm_action(parent, "Dismount archive?", &message, "Dismount") || !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Archive dismount cancelled because the view changed."); return; }
+    start_operation(data, root, Operation::ArchiveMount(zfm::archive_mount::Job::Unmount(point)));
+}
+
 unsafe extern "C" fn scratchpad(_: P, data: P) {
     let app = &*(data as *mut App); let parent = app.window; let alive = app.alive.clone();
     let root = app.tabs.current().current().to_path_buf(); let generation = app.generation.load(Ordering::Relaxed);

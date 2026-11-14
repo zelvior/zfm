@@ -48,6 +48,9 @@ pub mod insights;
 pub mod duplicate_finder;
 pub mod mobile;
 pub mod scratchpad;
+pub mod disk_mount;
+#[cfg(target_os = "linux")]
+pub mod archive_mount;
 
 pub mod tags;
 
