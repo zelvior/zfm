@@ -111,6 +111,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
             if control.is_null() { EndDialog(hwnd, -1); return 1; }
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
         }
+        apply_dark_scrollbar(state.list);
         SendMessageW(hwnd, 0x0401, 2, 0); // DM_SETDEFID: Close
         layout(hwnd, state);
         EnableWindow(state.test, 0);

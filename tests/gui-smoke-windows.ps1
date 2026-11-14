@@ -258,6 +258,13 @@ try {
     foreach ($id in @(1001, 1002, 1004, 1005, 1006, 1007)) {
         if ([ZfmSmoke]::GetDlgItem($settings, $id) -eq [IntPtr]::Zero) { throw "Settings control $id is missing." }
     }
+    # The custom-painted switches retain native checkbox state and activation.
+    $switch = [ZfmSmoke]::GetDlgItem($settings, 1001)
+    $result = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not read settings switch.' }
+    $before = $result.ToUInt64()
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not activate settings switch.' }
+    if ([ZfmSmoke]::SendMessageTimeoutW($switch, 0x00f0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -eq $before) { throw 'Settings switch did not toggle.' }
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($settings, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Could not cancel settings.' }
     $configFile = Join-Path $configRoot 'zfm\settings.conf'
@@ -755,7 +762,7 @@ try {
     $value = New-Object System.Text.StringBuilder 4096
     $r = [UIntPtr]::Zero
     [void][ZfmSmoke]::GetControlText($sizeText, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$r)
-    if ($value.ToString() -notmatch 'Scan finished' -or $value.ToString() -notmatch 'size: 6 bytes' -or
+    if ($value.ToString() -notmatch 'Scan finished' -or $value.ToString() -notmatch 'Detailed Report:' -or $value.ToString() -notmatch 'size: 6 bytes' -or
         $value.ToString() -notmatch 'Files: 2' -or $value.ToString() -notmatch 'Folders: 1') { throw "Incorrect size results: $value" }
     [void][ZfmSmoke]::PostMessageW($sizeDialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
     for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', 'Size results') -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
