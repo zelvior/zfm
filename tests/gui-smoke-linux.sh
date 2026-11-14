@@ -68,8 +68,7 @@ for _ in $(seq 1 100); do
 done
 if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$preview"
-xdotool key Escape
-sleep 0.5
+xdotool key --window "$preview" Escape
 xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
@@ -171,7 +170,6 @@ grep -q 'trash file' "$config/data/Trash/files/batch-file.txt"
 grep -q 'trash nested' "$config/data/Trash/files/batch-folder/nested.txt"
 [ -f "$config/data/Trash/info/batch-file.txt.trashinfo" ] && [ -f "$config/data/Trash/info/batch-folder.trashinfo" ]
 # F2 on multiple files previews a numbered rename; cancelling changes nothing.
-set -x
 mkdir -p "$work/rename-test"
 printf 'alpha\n' > "$work/rename-test/alpha.txt"
 printf 'beta\n' > "$work/rename-test/beta.csv"
@@ -204,7 +202,7 @@ batch_dialog() {
     sleep 0.5
 }
 batch_dialog
-xdotool key --window "$preview" Escape
+xdotool key Escape
 for _ in $(seq 1 100); do
     if ! xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' >/dev/null 2>&1; then break; fi
     sleep 0.1
