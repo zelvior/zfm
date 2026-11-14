@@ -183,6 +183,8 @@ const RUN_SNIPPET: usize = 188;
 const RUN_SCRIPT: usize = 189;
 const OPEN_TERMINAL: usize = 190;
 const FIND_TAGS: usize = 191;
+const ADD_TAGS: usize = 192;
+const REMOVE_TAGS: usize = 193;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2501,6 +2503,22 @@ unsafe fn find_tags(hwnd: H, app: &mut App) {
     }
 }
 
+unsafe fn batch_tags(hwnd: H, app: &mut App, mode: zfm::tags::BatchMode) {
+    let selected = selected_indices(app);
+    if selected.is_empty() || selected.len() > zfm::tags::MAX_BATCH { set_status(hwnd, app, Some("Select 1 to 1024 items for batch tagging.".into())); return; }
+    let paths: Vec<PathBuf> = selected.iter().map(|index| app.entries[*index].path.clone()).collect();
+    let generation = app.token.load(Ordering::Relaxed);
+    let title = match mode {
+        zfm::tags::BatchMode::Add => format!("Add tags to {} selected path(s) — comma-separated", paths.len()),
+        zfm::tags::BatchMode::Remove => format!("Remove tags from {} selected path(s) — comma-separated", paths.len()),
+    };
+    let input = match windows_actions::prompt(hwnd, app.theme, &title, OsStr::new(""), false) { Some(input) => input, None => return };
+    if app.token.load(Ordering::Relaxed) != generation { set_status(hwnd, app, Some("Tags not saved because the view changed.".into())); return; }
+    let result = input.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Tags must be Unicode"))
+        .and_then(zfm::tags::parse_input).and_then(|tags| zfm::tags::user_path().and_then(|file| zfm::tags::edit_batch(&file, &paths, &tags, mode)));
+    set_status(hwnd, app, Some(match result { Ok(count) => format!("Tags updated for {count} of {} selected path(s).", paths.len()), Err(error) => format!("Tags not saved: {error}") }));
+}
+
 unsafe fn edit_tags(hwnd: H, app: &mut App) {
     let selected = selected_indices(app);
     if selected.len() != 1 { set_status(hwnd, app, Some("Select one item to edit tags.".into())); return; }
@@ -2848,6 +2866,10 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
             AppendMenuW(menu, 0, ARCHIVE_CREATE_ENCRYPTED, text("Create encrypted archive…").as_ptr());
         }
         if selected_items.len() == 1 { AppendMenuW(menu, 0, EDIT_TAGS, text("Edit tags…").as_ptr()); }
+        if selected_items.len() <= zfm::tags::MAX_BATCH {
+            AppendMenuW(menu, 0, ADD_TAGS, text("Add tags to selected…").as_ptr());
+            AppendMenuW(menu, 0, REMOVE_TAGS, text("Remove tags from selected…").as_ptr());
+        }
         if selected_items.len() <= zfm::batch_rename::MAX_ITEMS && selected_items.iter().all(|i| app.entries[*i].is_file) {
             AppendMenuW(menu, 0, REGEX_RENAME, text("Regex rename…").as_ptr());
         }
@@ -3635,6 +3657,8 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 REGEX_RENAME if code == 0 => regex_rename(hwnd, app),
                 EDIT_TAGS if code == 0 => edit_tags(hwnd, app),
+                ADD_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Add),
+                REMOVE_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Remove),
                 FIND_TAGS if code == 0 => find_tags(hwnd, app),
                 RUN_SNIPPET if code == 0 => run_code(hwnd, app, None),
                 RUN_SCRIPT if code == 0 => {

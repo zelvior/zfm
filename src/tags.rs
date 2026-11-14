@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PATHS: usize = 5000;
 const MAX_TAGS: usize = 32;
+/// Maximum number of paths accepted by a batch tag action.
+pub const MAX_BATCH: usize = 1024;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 type Entries = BTreeMap<PathBuf, Vec<String>>;
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
@@ -80,18 +82,57 @@ pub fn set(file: &Path, path: &Path, tags: &[String]) -> io::Result<()> {
     if !valid_path(path) || tags.len() > MAX_TAGS || distinct.len() != tags.len() || tags.iter().any(|tag| !valid_tag(tag)) {
         return Err(invalid("Invalid path or tags; use up to 32 unique comma-free tags of at most 64 bytes"));
     }
+    let mut entries = load(file)?;
+    if tags.is_empty() { entries.remove(path); } else { entries.insert(path.to_path_buf(), tags.to_vec()); }
+    save(file, &entries)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchMode { Add, Remove }
+
+/// Add or remove labels from all selected path records. Changes are validated
+/// together and published as one database replacement. File contents are never
+/// modified; as with single-item edits, concurrent processes can overwrite one
+/// another's updates.
+pub fn edit_batch(file: &Path, paths: &[PathBuf], tags: &[String], mode: BatchMode) -> io::Result<usize> {
+    let distinct_paths: BTreeSet<_> = paths.iter().collect();
+    let distinct_tags: BTreeSet<_> = tags.iter().collect();
+    if paths.is_empty() || paths.len() > MAX_BATCH || distinct_paths.len() != paths.len() || paths.iter().any(|path| !valid_path(path)) {
+        return Err(invalid("Select 1–1024 distinct absolute UTF-8 paths without control characters"));
+    }
+    if tags.is_empty() || tags.len() > MAX_TAGS || distinct_tags.len() != tags.len() || tags.iter().any(|tag| !valid_tag(tag)) {
+        return Err(invalid("Enter 1–32 distinct nonempty tags of at most 64 bytes"));
+    }
+    let mut entries = load(file)?;
+    let mut changed = 0;
+    for path in paths {
+        let mut values = entries.get(path).cloned().unwrap_or_default();
+        let before = values.clone();
+        match mode {
+            BatchMode::Add => for tag in tags { if !values.contains(tag) { values.push(tag.clone()); } },
+            BatchMode::Remove => values.retain(|tag| !distinct_tags.contains(tag)),
+        }
+        if values.len() > MAX_TAGS { return Err(invalid("An item would exceed the 32-tag limit; no tags were saved")); }
+        if values != before {
+            changed += 1;
+            if values.is_empty() { entries.remove(path); } else { entries.insert(path.clone(), values); }
+        }
+    }
+    if changed != 0 { save(file, &entries)?; }
+    Ok(changed)
+}
+
+fn save(file: &Path, entries: &Entries) -> io::Result<()> {
+    if entries.len() > MAX_PATHS { return Err(invalid("Tag database has too many paths")); }
+    let mut text = String::from("version=1\n");
+    for (path, tags) in entries { text.push_str(&encode(path.to_str().unwrap())); text.push('\t'); text.push_str(&tags.iter().map(|s| encode(s)).collect::<Vec<_>>().join(",")); text.push('\n'); }
+    if text.len() as u64 > MAX_BYTES { return Err(invalid("Tag database is too large")); }
     let dir = file.parent().ok_or_else(|| invalid("Invalid tag file path"))?;
     if !crate::settings::check_directory(dir)? {
         #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?; }
         #[cfg(not(unix))] fs::create_dir_all(dir)?;
         if !crate::settings::check_directory(dir)? { return Err(invalid("Tag directory is missing")); }
     }
-    let mut entries = load(file)?;
-    if tags.is_empty() { entries.remove(path); } else { entries.insert(path.to_path_buf(), tags.to_vec()); }
-    if entries.len() > MAX_PATHS { return Err(invalid("Tag database has too many paths")); }
-    let mut text = String::from("version=1\n");
-    for (path, tags) in entries { text.push_str(&encode(path.to_str().unwrap())); text.push('\t'); text.push_str(&tags.iter().map(|s| encode(s)).collect::<Vec<_>>().join(",")); text.push('\n'); }
-    if text.len() as u64 > MAX_BYTES { return Err(invalid("Tag database is too large")); }
     for _ in 0..100 {
         let temp = dir.join(format!(".tags-{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let mut options = OpenOptions::new(); options.write(true).create_new(true);
@@ -117,6 +158,35 @@ pub fn parse_input(input: &str) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_changes_are_atomic_and_preserve_other_labels() {
+        let root = crate::test_support::scratch_dir("tag-batch");
+        let file = root.join("config/tags.conf"); let a = root.join("a"); let b = root.join("b");
+        assert_eq!(edit_batch(&file, &[a.clone()], &["missing".into()], BatchMode::Remove).unwrap(), 0);
+        assert!(!file.parent().unwrap().exists());
+        assert!(edit_batch(&file, &vec![a.clone(); MAX_BATCH + 1], &["x".into()], BatchMode::Add).is_err());
+        set(&file, &a, &["old".into(), "shared".into()]).unwrap();
+        set(&file, &b, &["other".into()]).unwrap();
+        let paths = vec![a.clone(), b.clone()];
+        assert_eq!(edit_batch(&file, &paths, &["shared".into(), "new".into()], BatchMode::Add).unwrap(), 2);
+        assert_eq!(get(&file, &a).unwrap(), vec!["old", "shared", "new"]);
+        assert_eq!(get(&file, &b).unwrap(), vec!["other", "shared", "new"]);
+        assert_eq!(edit_batch(&file, &paths, &["shared".into()], BatchMode::Add).unwrap(), 0);
+        assert_eq!(edit_batch(&file, &paths, &["shared".into(), "other".into()], BatchMode::Remove).unwrap(), 2);
+        assert_eq!(get(&file, &a).unwrap(), vec!["old", "new"]);
+        assert_eq!(get(&file, &b).unwrap(), vec!["new"]);
+        let full: Vec<String> = (0..32).map(|i| format!("tag{i}")).collect();
+        set(&file, &b, &full).unwrap(); let before = fs::read(&file).unwrap();
+        assert!(edit_batch(&file, &paths, &["overflow".into()], BatchMode::Add).is_err());
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert!(edit_batch(&file, &[a.clone(), a.clone()], &["x".into()], BatchMode::Add).is_err());
+        assert!(edit_batch(&file, &paths, &[], BatchMode::Remove).is_err());
+        assert!(edit_batch(&file, &[a.clone(), PathBuf::from("relative")], &["x".into()], BatchMode::Add).is_err());
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(edit_batch(&file, &[b.clone()], &full, BatchMode::Remove).unwrap(), 1);
+        assert!(get(&file, &b).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn roundtrip_and_reject_corruption() {
         let root = crate::test_support::scratch_dir("tags"); let file = root.join("config/tags.conf"); let path = root.join("file ü.txt");
