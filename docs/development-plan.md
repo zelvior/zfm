@@ -76,8 +76,8 @@ performance guarantee. Windows and Mint 19 measurements remain outstanding.
    multi-file/folder creation, conflict resolution, encryption, and standalone
    compression are not implemented yet.
 3. Expand beyond bounded multi-item copying and same-filesystem Move to with bulk permanent deletes,
-   cross-volume moves, broader batch rename options, improved clipboard behavior, drag-and-drop, recent files, directory
-   sizes and previews with cancellation and safe partial-failure handling.
+   cross-volume moves, broader batch rename options, improved clipboard behavior, drag-and-drop, recent files, richer directory
+   size calculations and previews with cancellation and safe partial-failure handling.
 4. Measure and address directory virtualization, worker limits and notifications.
 5. Close UI parity gaps, test on actual Windows 7 and Mint 19 in both
    architectures, and validate packaging before preparing a release.

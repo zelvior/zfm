@@ -196,6 +196,26 @@ done
 grep -q 'replacement' "$work/cut-other/a-folder/new.txt"
 grep -q 'original cut' "$work/cut-other/z-conflict.txt"
 [ ! -e "$work/cut-source/a-folder" ] && [ ! -e "$work/cut-source/z-conflict.txt" ]
+# Calculate apparent sizes for multiple selected entries without blocking the UI.
+mkdir -p "$work/size-test/folder"
+printf 'abc' > "$work/size-test/folder/.hidden"
+printf 'xyz' > "$work/size-test/second.txt"
+cut_navigate "$work/size-test"
+xdotool key --window "$window" Escape ctrl+a ctrl+shift+i
+size_dialog=''
+for _ in $(seq 1 100); do
+    size_dialog=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Size results$' 2>/dev/null | head -n 1 || true)
+    [ -z "$size_dialog" ] || break
+    if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during size calculation:' >&2; cat "$work/stderr" >&2; exit 1; fi
+    sleep 0.1
+done
+[ -n "$size_dialog" ] || { echo 'Size result dialog did not appear.' >&2; cat "$work/stderr" >&2; exit 1; }
+xdotool windowfocus --sync "$size_dialog"
+xdotool key Escape
+for _ in $(seq 1 100); do
+    if ! xdotool search --all --onlyvisible --pid "$pid" --name '^Size results$' >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
 # Trash multiple items through Delete, isolated from the user's real trash.
 mkdir -p "$work/trash-test/batch-folder"
 printf 'trash file\n' > "$work/trash-test/batch-file.txt"
@@ -272,4 +292,4 @@ fi
 grep -q alpha "$work/rename-test/Holiday (1).txt"
 grep -q beta "$work/rename-test/Holiday (2).csv"
 [ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
-echo "GTK navigation, multi-item clipboard copy/cut, trash, batch rename and name dialog smoke tests passed (window $window)."
+echo "GTK navigation, multi-item clipboard copy/cut, size scan, trash, batch rename and name dialog smoke tests passed (window $window)."

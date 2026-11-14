@@ -162,6 +162,7 @@ const BOOKMARK_ADD: usize = 167;
 const SEARCH_RECURSIVE: usize = 168;
 const OPEN_CONTAINING: usize = 169;
 const CONVERT_WAV_TO_AU: usize = 170;
+const CALCULATE_SIZE: usize = 171;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -788,6 +789,7 @@ struct App {
 struct OperationMessage {
     result: Result<String, String>,
     consumed_cut_sequence: Option<u32>,
+    details: bool,
 }
 
 struct ResultMessage {
@@ -2254,6 +2256,7 @@ enum Operation {
     CutPaste(Vec<PathBuf>, PathBuf, u32),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
+    CalculateSize(Vec<PathBuf>),
     Trash(Vec<PathBuf>, usize),
     Convert(PathBuf, PathBuf, u8),
     ArchiveCreate(Vec<PathBuf>, PathBuf, Option<String>),
@@ -2274,6 +2277,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     app.operation_cancel = Some(cancel.clone());
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
+    let details = matches!(&operation, Operation::CalculateSize(_));
     thread::spawn(move || {
         let mut consumed_cut_sequence = None;
         let result =
@@ -2294,6 +2298,8 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     zfm::operations::copy_item(&path, &dir, &name, &cancel, |_| {})
                         .map(|p| format!("Copied to {}", p.display()))
                 }
+                Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
+                    .map(|result| result.message()),
                 Operation::CopyItems(paths, dir) => zfm::operations::copy_items(&paths, &dir, &cancel)
                     .map(|result| result.message(paths.len())),
                 Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
@@ -2331,7 +2337,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 }
             }
             .map_err(|e| e.to_string());
-        let msg = Box::into_raw(Box::new(OperationMessage { result, consumed_cut_sequence }));
+        let msg = Box::into_raw(Box::new(OperationMessage { result, consumed_cut_sequence, details }));
         if unsafe { PostMessageW(target as H, WM_OPERATION_RESULT, 0, msg as isize) } == 0 {
             unsafe {
                 drop(Box::from_raw(msg));
@@ -2661,6 +2667,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             (PROMPT_RENAME, "Rename…"),
             (TRASH, "Move to Recycle Bin"),
             (DELETE, "Delete permanently…"),
+            (CALCULATE_SIZE, "Calculate size…"),
             (PROPERTIES, "Properties"),
         ] {
             AppendMenuW(menu, 0, id, text(title).as_ptr());
@@ -3285,6 +3292,12 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             app.operation_busy = false;
             app.operation_cancel = None;
             let mut result = message.result;
+            if message.details {
+                let text = match result { Ok(text) => text, Err(error) => format!("Could not calculate size: {error}") };
+                set_status(hwnd, app, Some("Size scan finished; see results.".into()));
+                windows_actions::question(hwnd, app.theme, "Size results", &text, "Close", false);
+                return 0;
+            }
             if let Some(sequence) = message.consumed_cut_sequence {
                 // Guard against replay if another program temporarily holds the
                 // clipboard and prevents clearing. Do not touch a newer clipboard.
@@ -3562,6 +3575,15 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                         cancel.store(true, Ordering::Relaxed);
                         set_status(hwnd, app, Some("Cancellation requested where supported; earlier results may remain.".into()));
                     } else { set_status(hwnd, app, Some("No operation is running.".into())); }
+                }
+                CALCULATE_SIZE if code == 0 => {
+                    let selected = selected_indices(app);
+                    if selected.is_empty() || selected.len() > zfm::operations::MAX_COPY_ITEMS {
+                        set_status(hwnd, app, Some("Select between 1 and 1024 items to calculate size.".into()));
+                        return 0;
+                    }
+                    let paths = selected.iter().map(|i| app.entries[*i].path.clone()).collect();
+                    start_operation(hwnd, app, Operation::CalculateSize(paths));
                 }
                 COPY_TO | MOVE_TO if code == 0 => {
                     let selected = selected_indices(app);
