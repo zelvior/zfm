@@ -81,9 +81,11 @@ unsafe extern "C" fn office_preview_ready(data: P) -> c_int {
 pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
     let app = &mut *(data as *mut App);
     let rows = selected_rows(app.list);
+    eprintln!("TRACE preview callback selected rows: {}", rows.len());
     if rows.len() != 1 { set_status(app, "Select one file to preview."); return; }
     let index = (api().gtk_list_box_row_get_index)(rows[0]);
     let entry = match app.entries.get(index as usize) { Some(e) if e.is_file => e, _ => return };
+    eprintln!("TRACE preview path {:?} file {}", entry.path, entry.is_file);
     let kind = viewer::kind(&entry.path);
     if kind == Kind::Office {
         if app.office_cancels.len() >= 4 { set_status(app, "Too many document previews are already running."); return; }

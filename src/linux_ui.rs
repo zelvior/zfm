@@ -1073,6 +1073,7 @@ unsafe extern "C" fn trace_menu_select(item: P, _: P) {
 unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     let item = (api().gtk_menu_item_new_with_label)(c(text).as_ptr());
     connect(item, "select", trace_menu_select as P, ptr::null_mut());
+    connect(item, "activate", trace_menu_select as P, ptr::null_mut());
     (api().gtk_menu_shell_append)(menu, item);
     connect(item, "activate", callback, data);
 }
