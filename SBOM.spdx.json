@@ -9,7 +9,7 @@
       "Tool: Python-3"
     ],
     "created": "2026-11-12T00:00:00Z",
-    "comment": "Source-workspace Cargo.lock, vendored 7-Zip source and PDFium wheel inventory; not a complete binary SBOM. Compiler, runtime, system libraries and build dependencies are outside scope. No file-level analysis."
+    "comment": "Source-workspace Cargo.lock, vendored QR and 7-Zip source and PDFium wheel inventory; not a complete binary SBOM. Compiler, runtime, system libraries and build dependencies are outside scope. No file-level analysis."
   },
   "packages": [
     {
@@ -129,6 +129,17 @@
       "licenseDeclared": "MIT OR Apache-2.0",
       "copyrightText": "The Rust Project Developers and Andrew Gallant",
       "sourceInfo": "Vendored source of regex-lite 0.1.6; Cargo.toml was simplified for an offline path dependency. See vendor/regex-lite for upstream notices."
+    },
+    {
+      "name": "qrcodegen",
+      "SPDXID": "SPDXRef-QrCodeGen",
+      "versionInfo": "1.8.0",
+      "downloadLocation": "https://github.com/nayuki/QR-Code-generator/tree/v1.8.0/rust",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright Project Nayuki",
+      "sourceInfo": "Vendored upstream Rust source from tag v1.8.0 (commit 720f62bddb7226106071d4728c292cb1df519ceb) with a simplified offline Cargo manifest; see vendor/qrcodegen/LICENSE-MIT."
     }
   ],
   "relationships": [
@@ -171,6 +182,11 @@
       "spdxElementId": "SPDXRef-ZFM",
       "relationshipType": "DEPENDS_ON",
       "relatedSpdxElement": "SPDXRef-RegexLite"
+    },
+    {
+      "spdxElementId": "SPDXRef-ZFM",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-QrCodeGen"
     }
   ]
 }

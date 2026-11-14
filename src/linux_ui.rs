@@ -159,6 +159,7 @@ api! {
     gdk_event_get_coords: unsafe extern "C" fn(P, *mut f64, *mut f64) -> c_int,
     gdk_event_get_event_type: unsafe extern "C" fn(P) -> c_int,
     gtk_clipboard_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
+    gtk_clipboard_wait_for_text: unsafe extern "C" fn(P) -> *mut c_char,
     gdk_atom_intern: unsafe extern "C" fn(*const c_char, c_int) -> P,
     gtk_clipboard_get: unsafe extern "C" fn(P) -> P,
     gtk_clipboard_set_with_data: unsafe extern "C" fn(P, P, c_uint, P, P, P) -> c_int,
@@ -1219,6 +1220,7 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
         ("Find saved paths by tag…", find_tags as P),
+        ("Show clipboard as offline QR…", clipboard_qr as P),
         ("Markdown / code scratchpad…", scratchpad as P),
         ("Run code snippet…", run_snippet as P),
         ("Open terminal here…", open_terminal as P),
@@ -2610,6 +2612,38 @@ unsafe extern "C" fn unmount_archive(_: P, data: P) {
     let app = &*(data as *mut App);
     if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Archive dismount cancelled because the view changed."); return; }
     start_operation(data, root, Operation::ArchiveMount(zfm::archive_mount::Job::Unmount(point)));
+}
+
+unsafe extern "C" fn clipboard_qr(_: P, data: P) {
+    let app = &*(data as *mut App); let parent = app.window; let alive = app.alive.clone();
+    let warning = "Read clipboard text and display it as a QR code? The code contains the complete text in plaintext: anyone who can see or capture your screen can read it. There is no network transfer or encryption. ZFM does not clear clipboard history or screenshots. Only 1–512 UTF-8 bytes are supported.";
+    if !confirm_action(parent, "Show clipboard QR?", warning, "Show QR") || !alive.load(Ordering::Relaxed) { return; }
+    let clip = (api().gtk_clipboard_get)((api().gdk_atom_intern)(c("CLIPBOARD").as_ptr(), 0));
+    let raw = (api().gtk_clipboard_wait_for_text)(clip);
+    if !alive.load(Ordering::Relaxed) { if !raw.is_null() { (api().g_free)(raw as P); } return; }
+    if raw.is_null() { set_status(&*(data as *mut App), "Clipboard has no readable text."); return; }
+    let bytes = CStr::from_ptr(raw).to_bytes();
+    let image = match std::str::from_utf8(bytes).map_err(|_| "Clipboard text must be UTF-8".to_string()).and_then(|s| zfm::clipboard_qr::encode(s).map_err(|e| e.to_string())) {
+        Ok(image) => image, Err(error) => { (api().g_free)(raw as P); set_status(&*(data as *mut App), &error); return; }
+    };
+    (api().g_free)(raw as P);
+    let bmp = zfm::clipboard_qr::bmp(&image); let loader = (api().gdk_pixbuf_loader_new)();
+    if loader.is_null() { set_status(&*(data as *mut App), "Could not create QR image."); return; }
+    let wrote = (api().gdk_pixbuf_loader_write)(loader, bmp.as_ptr(), bmp.len(), ptr::null_mut()) != 0;
+    let closed = (api().gdk_pixbuf_loader_close)(loader, ptr::null_mut()) != 0;
+    let ok = wrote && closed;
+    let pixbuf = if ok { (api().gdk_pixbuf_loader_get_pixbuf)(loader) } else { ptr::null_mut() };
+    if pixbuf.is_null() { (api().g_object_unref)(loader); set_status(&*(data as *mut App), "Could not display QR image."); return; }
+    let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Offline clipboard QR — plaintext").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent); (api().gtk_window_set_modal)(dialog, 1); (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
+    let area = (api().gtk_dialog_get_content_area)(dialog);
+    (api().gtk_box_pack_start)(area, wrapped_label("Anyone who sees this code can read your clipboard text. Close to dismiss; no network is used."), 0, 0, 8);
+    let widget = (api().gtk_image_new_from_pixbuf)(pixbuf); (api().gtk_box_pack_start)(area, widget, 0, 0, 8);
+    (api().g_object_unref)(loader);
+    (api().gtk_widget_show_all)(dialog); let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
 }
 
 unsafe extern "C" fn scratchpad(_: P, data: P) {

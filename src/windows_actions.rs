@@ -397,6 +397,78 @@ unsafe fn prompt_inner(
     state.result
 }
 
+/// Read only bounded Unicode text after explicit user confirmation.
+pub(super) unsafe fn clipboard_text(hwnd: H) -> Result<String, &'static str> {
+    if OpenClipboard(hwnd) == 0 { return Err("Clipboard is unavailable."); }
+    let result = (|| {
+        let handle = GetClipboardData(13); // CF_UNICODETEXT
+        if handle.is_null() { return Err("Clipboard has no Unicode text."); }
+        let size = GlobalSize(handle);
+        if size < 2 || size > 1024 * 1024 || size % 2 != 0 { return Err("Clipboard text is invalid or too large."); }
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() { return Err("Could not read clipboard text."); }
+        let values = std::slice::from_raw_parts(pointer as *const u16, size / 2);
+        let end = values.iter().position(|v| *v == 0);
+        let value = match end { Some(end) => String::from_utf16(&values[..end]).map_err(|_| "Clipboard text must be Unicode."), None => Err("Clipboard text is not terminated.") };
+        GlobalUnlock(handle);
+        value
+    })();
+    CloseClipboard();
+    result
+}
+
+struct ClipboardQrDialog { theme: *const Theme, bitmap: H, size: i32 }
+unsafe extern "system" fn clipboard_qr_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
+    if msg == 0x0110 {
+        let state = &mut *(lp as *mut ClipboardQrDialog); set_data(hwnd, lp);
+        SetWindowTextW(hwnd, text("Offline clipboard QR — plaintext").as_ptr()); apply_dark_window_chrome(hwnd);
+        let mut rect: Rect = std::mem::zeroed(); GetClientRect(hwnd, &mut rect);
+        let width = rect.right; let height = rect.bottom; let instance = GetModuleHandleW(ptr::null());
+        let heading = CreateWindowExW(0, text("STATIC").as_ptr(), text("Anyone who sees this code can read your clipboard text. No network is used.").as_ptr(),
+            WS_CHILD | WS_VISIBLE, 18, 16, width - 36, 28, hwnd, 1002usize as H, instance, ptr::null_mut());
+        let picture = CreateWindowExW(0, text("STATIC").as_ptr(), ptr::null(), WS_CHILD | WS_VISIBLE | 0x000e,
+            (width - state.size) / 2, 50, state.size, state.size, hwnd, 1001usize as H, instance, ptr::null_mut());
+        let close = CreateWindowExW(0, text("BUTTON").as_ptr(), text("Close").as_ptr(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            width - 108, height - 48, 90, 30, hwnd, 1usize as H, instance, ptr::null_mut());
+        if heading.is_null() || picture.is_null() || close.is_null() { EndDialog(hwnd, -1); return 1; }
+        SendMessageW(heading, WM_SETFONT, (*state.theme).font as usize, 1);
+        SendMessageW(close, WM_SETFONT, (*state.theme).font as usize, 1);
+        SendMessageW(picture, 0x0172, 0, state.bitmap as isize); // STM_SETIMAGE, IMAGE_BITMAP
+        style_dialog_button(close); SetFocus(close); return 0;
+    }
+    let state = get_data(hwnd) as *mut ClipboardQrDialog;
+    if state.is_null() { return 0; }
+    match msg {
+        WM_COMMAND if wp & 0xffff == 1 || wp & 0xffff == 2 => { EndDialog(hwnd, 0); 1 }
+        0x0010 => { EndDialog(hwnd, 0); 1 }
+        WM_DRAWITEM if lp != 0 && (*(lp as *const DrawItem)).control_type == ODT_BUTTON => draw_dialog_button((*state).theme, &*(lp as *const DrawItem)),
+        0x0136 => (*(*state).theme).window_brush as isize,
+        WM_CTLCOLORSTATIC => { SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref()); SetBkColor(wp as H, ui_theme::HEADER_TOP.colorref()); (*(*state).theme).window_brush as isize }
+        _ => 0,
+    }
+}
+pub(super) unsafe fn show_clipboard_qr(hwnd: H, theme: *const Theme, image: &zfm::clipboard_qr::Image) {
+    let size = image.width as i32; let bmp = zfm::clipboard_qr::bmp(image);
+    let info = BitmapInfo { header: BitmapInfoHeader {
+        size: std::mem::size_of::<BitmapInfoHeader>() as u32, width: size, height: -size,
+        planes: 1, bit_count: 24, compression: 0, size_image: 0,
+        x_pels_per_meter: 0, y_pels_per_meter: 0, clr_used: 0, clr_important: 0,
+    }, colors: [0] };
+    let mut pixels: P = ptr::null_mut();
+    let bitmap = CreateDIBSection(ptr::null_mut(), &info, 0, &mut pixels, ptr::null_mut(), 0);
+    if bitmap.is_null() || pixels.is_null() {
+        if !bitmap.is_null() { DeleteObject(bitmap); }
+        show_error(hwnd, "Could not create QR image."); return;
+    }
+    ptr::copy_nonoverlapping(bmp[54..].as_ptr(), pixels as *mut u8, bmp.len() - 54);
+    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
+    let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 480, 400, 0, 0, 0];
+    let mut state = ClipboardQrDialog { theme, bitmap, size };
+    let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(clipboard_qr_proc), &mut state as *mut _ as isize);
+    DeleteObject(bitmap);
+    if result == -1 { show_error(hwnd, "Could not open QR dialog."); }
+}
+
 struct SnippetEditor {
     theme: *const Theme,
     edit: H,

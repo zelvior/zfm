@@ -28,6 +28,7 @@ for spec in '32 i686-unknown-linux-gnu i386' '64 x86_64-unknown-linux-gnu amd64'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 readme = pathlib.Path(sys.argv[2]).read_bytes()
+assert (root / 'vendor/qrcodegen/LICENSE-MIT').read_bytes() in readme
 for name in ('COPYRIGHT', 'LICENSE-MIT', 'LICENSE-APACHE'):
     assert (root / 'LICENSES' / 'rust-1.77.2' / name).read_bytes() in readme, name
 PYTEST

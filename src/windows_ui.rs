@@ -192,6 +192,7 @@ const ADB_PUSH: usize = 197;
 const SCRATCHPAD: usize = 198;
 const ISO_MOUNT: usize = 199;
 const ISO_DISMOUNT: usize = 200;
+const CLIPBOARD_QR: usize = 207;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2437,6 +2438,16 @@ unsafe fn batch_rename(hwnd: H, app: &mut App) {
     start_operation(hwnd, app, Operation::BatchRename(plan));
 }
 
+unsafe fn clipboard_qr(hwnd: H, app: &mut App) {
+    let warning = "Read clipboard text and display it as a QR code? The code contains the complete text in plaintext: anyone who can see or capture your screen can read it. There is no network transfer or encryption. ZFM does not clear clipboard history or screenshots. Only 1–512 UTF-8 bytes are supported.";
+    if windows_actions::question(hwnd, app.theme, "Show clipboard QR?", warning, "Show QR", true) != Some(true) { return; }
+    let value = match windows_actions::clipboard_text(hwnd) { Ok(value) => value, Err(error) => { set_status(hwnd, app, Some(error.into())); return; } };
+    match zfm::clipboard_qr::encode(&value) {
+        Ok(image) => windows_actions::show_clipboard_qr(hwnd, app.theme, &image),
+        Err(error) => set_status(hwnd, app, Some(format!("Cannot create clipboard QR: {error}"))),
+    }
+}
+
 unsafe fn scratchpad(hwnd: H, app: &mut App) {
     let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
     let mut content = String::new();
@@ -3009,6 +3020,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
     }
     AppendMenuW(menu, 0, FIND_TAGS, text("Find saved paths by tag…").as_ptr());
+    AppendMenuW(menu, 0, CLIPBOARD_QR, text("Show clipboard as offline QR…").as_ptr());
     AppendMenuW(menu, 0, SCRATCHPAD, text("Markdown / code scratchpad…").as_ptr());
     AppendMenuW(menu, 0, RUN_SNIPPET, text("Run code snippet…").as_ptr());
     AppendMenuW(menu, 0, OPEN_TERMINAL, text("Open terminal here…").as_ptr());
@@ -3742,6 +3754,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 ADD_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Add),
                 REMOVE_TAGS if code == 0 => batch_tags(hwnd, app, zfm::tags::BatchMode::Remove),
                 FIND_TAGS if code == 0 => find_tags(hwnd, app),
+                CLIPBOARD_QR if code == 0 => clipboard_qr(hwnd, app),
                 ADB_DEVICES if code == 0 => adb_devices(hwnd, app),
                 ADB_CONNECT if code == 0 => adb_connect(hwnd, app),
                 ADB_PUSH if code == 0 => adb_push(hwnd, app),

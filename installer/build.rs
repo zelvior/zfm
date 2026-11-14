@@ -140,6 +140,11 @@ fn main() {
         println!("cargo:rustc-env={}={}", env_key, path.display());
     }
 
+    let qr_notice = root.join("vendor/qrcodegen/LICENSE-MIT");
+    if !qr_notice.is_file() { panic!("missing qrcodegen notice: {}", qr_notice.display()); }
+    println!("cargo:rerun-if-changed={}", qr_notice.display());
+    println!("cargo:rustc-env=ZFM_QRCODEGEN_MIT_PATH={}", qr_notice.display());
+
     let version = env::var("ZFM_VERSION").unwrap_or_else(|_| "dev".to_string());
     println!("cargo:rustc-env=ZFM_VERSION={}", version);
 

@@ -32,6 +32,32 @@ public static class ZfmSmoke {
     public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", ExactSpelling=true)] public static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll", ExactSpelling=true)] public static extern bool CloseClipboard();
+    [DllImport("user32.dll", ExactSpelling=true)] public static extern bool EmptyClipboard();
+    [DllImport("user32.dll", ExactSpelling=true)] public static extern IntPtr SetClipboardData(uint format, IntPtr memory);
+    [DllImport("kernel32.dll", ExactSpelling=true)] public static extern IntPtr GlobalAlloc(uint flags, UIntPtr size);
+    [DllImport("kernel32.dll", ExactSpelling=true)] public static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll", ExactSpelling=true)] public static extern bool GlobalUnlock(IntPtr memory);
+    [DllImport("kernel32.dll", ExactSpelling=true)] public static extern IntPtr GlobalFree(IntPtr memory);
+    public static bool SetClipboardText(string text) {
+        if (!OpenClipboard(IntPtr.Zero)) return false;
+        IntPtr handle = IntPtr.Zero;
+        try {
+            if (!EmptyClipboard()) return false;
+            byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
+            handle = GlobalAlloc(2, (UIntPtr)bytes.Length);
+            if (handle == IntPtr.Zero) return false;
+            IntPtr pointer = GlobalLock(handle);
+            if (pointer == IntPtr.Zero) return false;
+            Marshal.Copy(bytes, 0, pointer, bytes.Length);
+            GlobalUnlock(handle);
+            if (SetClipboardData(13, handle) == IntPtr.Zero) return false;
+            handle = IntPtr.Zero;
+            return true;
+        } finally { if (handle != IntPtr.Zero) GlobalFree(handle); CloseClipboard(); }
+    }
+
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
@@ -1078,6 +1104,29 @@ try {
         for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($dialog); $i++) { Start-Sleep -Milliseconds 100 }
     }
     Navigate-Cut $work 'example.txt'
+
+    # The offline QR requires an explicit confirmation and shows a bitmap.
+    if (-not [ZfmSmoke]::SetClipboardText('ZFM QR smoke sample')) { throw 'Could not prepare clipboard text.' }
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]207, [IntPtr]::Zero)
+    $qrConfirm = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $qrConfirm = [ZfmSmoke]::FindWindowW('#32770', 'Show clipboard QR?')
+        if ($qrConfirm -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($qrConfirm, 1) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($qrConfirm -eq [IntPtr]::Zero) { throw 'Clipboard QR confirmation did not appear.' }
+    [void][ZfmSmoke]::PostMessageW($qrConfirm, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    $qrDialog = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $qrDialog = [ZfmSmoke]::FindWindowW('#32770', 'Offline clipboard QR — plaintext')
+        if ($qrDialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($qrDialog, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($qrDialog -eq [IntPtr]::Zero) { throw 'Clipboard QR dialog did not appear.' }
+    $bitmap = [UIntPtr]::Zero
+    if ([ZfmSmoke]::SendMessageTimeoutW([ZfmSmoke]::GetDlgItem($qrDialog, 1001), 0x0173, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$bitmap) -eq [IntPtr]::Zero -or $bitmap.ToUInt64() -eq 0) { throw 'Clipboard QR bitmap is missing.' }
+    [void][ZfmSmoke]::PostMessageW($qrDialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($qrDialog); $i++) { Start-Sleep -Milliseconds 100 }
 
     # Save a changed value after the other list tests, then verify it survives restart.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings for saving.' }

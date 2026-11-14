@@ -2,10 +2,11 @@
 <!-- Modified: record prospective upstream archive-engine integration and its unresolved obligations. -->
 # Third-party inventory and obligations
 
-**ACTION REQUIRED.** `Cargo.lock` includes local workspace packages `zfm` and `zfm-installer` 0.1.0 and the vendored `regex-lite` dependency. This is not a complete executable SBOM: Rust's standard library and its own dependencies are outside this lockfile; Linux system libraries and Windows runtime are also outside it.
+**ACTION REQUIRED.** `Cargo.lock` includes local workspace packages `zfm` and `zfm-installer` 0.1.0 and the vendored `regex-lite` and `qrcodegen` dependencies. This is not a complete executable SBOM: Rust's standard library and its own dependencies are outside this lockfile; Linux system libraries and Windows runtime are also outside it.
 
 | Component | Relationship / evidence | License and action |
 |---|---|---|
+| qrcodegen 1.8.0 | Vendored Rust source from [Project Nayuki v1.8.0](https://github.com/nayuki/QR-Code-generator/tree/v1.8.0/rust), simplified offline manifest in `vendor/qrcodegen`. | MIT; upstream copyright and permission notice included with the source and installed README. Review before distribution. |
 | regex-lite 0.1.6 | Vendored source and simplified offline Cargo manifest in `vendor/regex-lite`, from [upstream tag](https://github.com/rust-lang/regex/tree/regex-lite-0.1.6/regex-lite). | MIT OR Apache-2.0; upstream license texts are included in that directory and appended to installed documentation. Review the vendored source and notices before distribution. |
 | Rust 1.77.2 standard library and bundled components | release workflow pins rustc 1.77.2; Rust code may be statically linked into both binaries | [std manifest](https://github.com/rust-lang/rust/blob/1.77.2/library/std/Cargo.toml) declares MIT OR Apache-2.0, but transitive/in-tree exceptions vary. Upstream versioned COPYRIGHT and license texts included in `LICENSES/rust-1.77.2`, and appended to installed README. **NEEDS REVIEW**: trace included objects and per-component notices for each target; upstream COPYRIGHT alone may not cover all vendored dependencies. |
 | Microsoft CRT / Windows SDK | release workflow uses MSVC `+crt-static` | **UNVERIFIED** exact libraries, versions, applicable redistribution terms and required notices. Review actual toolchain agreement/redist list and linked output for each architecture. Do not substitute an invented license. |
