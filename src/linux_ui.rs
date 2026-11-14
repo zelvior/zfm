@@ -210,6 +210,7 @@ struct App {
     converter: P,
     archive_manager: P,
     window: P,
+    organize: P,
     operation: Option<Arc<AtomicBool>>,
     operation_id: u64,
     cut_guard: zfm::file_clipboard::CutReplayGuard,
@@ -642,6 +643,7 @@ unsafe extern "C" fn key_press(_: P, event: P, p: P) -> c_int {
         (0x6e, 4) | (0x4e, 4) => new_file(ptr::null_mut(), p),
         (0x64, 4) | (0x44, 4) if list_has_focus(p) => duplicate(ptr::null_mut(), p),
         (0x69, 5) | (0x49, 5) if list_has_focus(p) => calculate_size(ptr::null_mut(), p),
+        (0x6f, 5) | (0x4f, 5) => organize_menu((*(p as *mut App)).organize, p),
         (0x2c, 4) => show_settings(ptr::null_mut(), p),
         (0x62, 4) | (0x42, 4) => bookmark_current(ptr::null_mut(), p),
         (0x70, 4) | (0x50, 4) if list_has_focus(p) => preview_selected(ptr::null_mut(), p),
@@ -941,14 +943,28 @@ unsafe extern "C" fn row_context(row: P, event: P, data: P) -> c_int {
     1
 }
 unsafe fn show_row_menu(row: P, event: P, data: P) {
+    let list = (*(data as *mut App)).list;
+    if (api().gtk_list_box_row_is_selected)(row) == 0 {
+        (api().gtk_list_box_unselect_all)(list);
+        (api().gtk_list_box_select_row)(list, row);
+    }
+    (api().gtk_widget_grab_focus)(list);
+    let menu = (api().gtk_menu_new)();
+    populate_selection_menu(menu, row, data);
+    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
+    (api().gtk_widget_show_all)(menu);
+    if event.is_null() {
+        (api().gtk_menu_popup_at_widget)(menu, row, 6, 2, ptr::null_mut());
+    } else {
+        (api().gtk_menu_popup_at_pointer)(menu, event);
+    }
+}
+// The same contextual actions are reachable from right-click and Organize.
+unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
     let app = &*(data as *mut App);
     let index = (api().gtk_list_box_row_get_index)(row);
-    if index < 0 {
-        return;
-    }
-    let entry = match app.entries.get(index as usize) {
-        Some(entry) => entry,
-        None => return,
+    let entry = match if index >= 0 { app.entries.get(index as usize) } else { None } {
+        Some(entry) => entry, None => return,
     };
     let is_directory = entry.is_dir;
     let can_duplicate = entry.is_file;
@@ -963,15 +979,10 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     let is_json = extension.eq_ignore_ascii_case("json");
     let can_archive = can_duplicate && supports_archive(&entry.path);
     let list = app.list;
-    if (api().gtk_list_box_row_is_selected)(row) == 0 {
-        (api().gtk_list_box_unselect_all)(list);
-        (api().gtk_list_box_select_row)(list, row);
-    }
-    (api().gtk_widget_grab_focus)(list);
-    let menu = (api().gtk_menu_new)();
-    menu_action(menu, "Open", open_selected as P, data);
-    if entry.is_file { menu_action(menu, "Preview in ZFM…", preview_selected as P, data); }
-    if is_directory {
+    let selected_count = selected_rows(list).len();
+    if selected_count == 1 { menu_action(menu, "Open", open_selected as P, data); }
+    if selected_count == 1 && entry.is_file { menu_action(menu, "Preview in ZFM…", preview_selected as P, data); }
+    if selected_count == 1 && is_directory {
         menu_action(menu, "Open folder in new tab", open_folder_tab as P, data);
     }
     if app.recursive_search && selected_rows(list).len() == 1 {
@@ -1000,6 +1011,9 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
             show_converter as P,
             data,
         );
+        if extension.eq_ignore_ascii_case("wav") {
+            menu_action(menu, "Convert PCM WAV to AU…", show_converter_wav_to_au as P, data);
+        }
     }
     if can_archive && selected_rows(list).len() == 1 {
         menu_action(menu, "Open archive…", show_archive as P, data);
@@ -1033,7 +1047,7 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
         menu_action(menu, "Copy", copy_to_clipboard as P, data);
     }
     menu_action(menu, "Cut", cut_to_clipboard as P, data);
-    menu_action(menu, "Copy path", copy_path as P, data);
+    if selected_count == 1 { menu_action(menu, "Copy path", copy_path as P, data); }
     menu_action(
         menu,
         "Paste into current folder",
@@ -1048,15 +1062,9 @@ unsafe fn show_row_menu(row: P, event: P, data: P) {
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
     menu_action(menu, "Calculate size…", calculate_size as P, data);
-    menu_action(menu, "Properties", properties as P, data);
-    connect(menu, "selection-done", destroy_child as P, ptr::null_mut());
-    (api().gtk_widget_show_all)(menu);
-    if event.is_null() {
-        (api().gtk_menu_popup_at_widget)(menu, row, 6, 2, ptr::null_mut());
-    } else {
-        (api().gtk_menu_popup_at_pointer)(menu, event);
-    }
-}
+    if selected_count == 1 { menu_action(menu, "Properties", properties as P, data); }
+ }
+
 unsafe fn menu_action(menu: P, text: &str, callback: P, data: P) {
     let item = (api().gtk_menu_item_new_with_label)(c(text).as_ptr());
     (api().gtk_menu_shell_append)(menu, item);
@@ -1117,6 +1125,15 @@ unsafe extern "C" fn bookmarks_menu(widget: P, data: P) {
 
 unsafe extern "C" fn organize_menu(widget: P, data: P) {
     let menu = (api().gtk_menu_new)();
+    let rows = selected_rows((*(data as *mut App)).list);
+    if let Some(row) = rows.first() {
+        let submenu = (api().gtk_menu_new)();
+        populate_selection_menu(submenu, *row, data);
+        let item = (api().gtk_menu_item_new_with_label)(c("Selected items").as_ptr());
+        (api().gtk_menu_item_set_submenu)(item, submenu);
+        (api().gtk_menu_shell_append)(menu, item);
+        (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
+    }
     for (title, callback) in [
         ("New file…", new_file as P), ("New folder…", new_folder as P),
         ("Rename…", rename as P), ("Move to trash", move_to_trash as P),
@@ -1326,6 +1343,7 @@ pub fn run() -> Result<(), String> {
             converter: ptr::null_mut(),
             archive_manager: ptr::null_mut(),
             window,
+            organize: ptr::null_mut(),
             operation: None,
             operation_id: 0,
             cut_guard: zfm::file_clipboard::CutReplayGuard::default(),
@@ -1344,7 +1362,7 @@ pub fn run() -> Result<(), String> {
         let p = app as P;
 
         // Frequently used actions are visible; the rest remain in Organize.
-        button(tabs_row, "Organize ▾", organize_menu as P, p);
+        (*app).organize = button(tabs_row, "Organize ▾", organize_menu as P, p);
         button(tabs_row, "New folder", new_folder as P, p);
         button(tabs_row, "New file", new_file as P, p);
         let new_tab_btn = button(tabs_row, "+ New tab", new_tab as P, p);
@@ -1744,6 +1762,11 @@ unsafe extern "C" fn show_converter(_: P, data: P) {
         }
     }
     (api().gtk_widget_show_all)(converter.window);
+}
+unsafe extern "C" fn show_converter_wav_to_au(_: P, data: P) {
+    show_converter(ptr::null_mut(), data);
+    let converter = &*((*(data as *mut App)).converter as *mut Converter);
+    if !converter.running { (api().gtk_combo_box_set_active)(converter.mode, 7); }
 }
 unsafe fn create_converter(parent: P) -> P {
     let window = (api().gtk_window_new)(0);

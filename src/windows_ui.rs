@@ -163,6 +163,8 @@ const SEARCH_RECURSIVE: usize = 168;
 const OPEN_CONTAINING: usize = 169;
 const CONVERT_WAV_TO_AU: usize = 170;
 const CALCULATE_SIZE: usize = 171;
+const ACTIONS_MENU: usize = 172;
+const SEARCH_CASE: usize = 173;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -748,6 +750,7 @@ struct App {
     theme: *const Theme,
     tabs: Tabs,
     filter: String,
+    search_case: bool,
     recursive_search: bool,
     search_root: Option<PathBuf>,
     show_hidden: bool,
@@ -778,7 +781,7 @@ struct App {
     list: H,
     status: H,
     nav_buttons: [H; 6],
-    extra_buttons: [H; 9],
+    extra_buttons: [H; 10],
     sidebar_items: Vec<SidebarEntry>,
     entries: Vec<Entry>,
     backdrop_w: i32,
@@ -2102,6 +2105,7 @@ unsafe fn layout(hwnd: H, app: &mut App) {
     place_box(app.nav_buttons[5], m.nav_go);
     place_box(app.address, m.address_edit);
 
+    place_box(app.extra_buttons[9], m.actions_btn);
     place_box(app.extra_buttons[0], m.new_tab);
     place_box(app.extra_buttons[1], m.close_tab);
 
@@ -2192,10 +2196,11 @@ unsafe fn poll_folder(hwnd: H, app: &mut App) {
     let generation = token.load(Ordering::Relaxed);
     let filter = app.filter.clone();
     let show_hidden = app.show_hidden;
+    let search_case = app.search_case;
     let (sender, receiver) = mpsc::channel();
     app.folder_scan = Some(receiver);
     thread::spawn(move || {
-        let result = directory::read_filtered(&path, show_hidden, &filter, false, &token, generation);
+        let result = directory::read_filtered(&path, show_hidden, &filter, search_case, &token, generation);
         let _ = sender.send(FolderScan { generation, path, result });
     });
 }
@@ -2218,15 +2223,16 @@ unsafe fn load(hwnd: H, app: &mut App, destination: Destination, preserve_notice
     let filter = app.filter.clone();
     let recursive = app.recursive_search;
     let show_hidden = app.show_hidden;
+    let search_case = app.search_case;
     let notice = if preserve_notice { app.notice.clone() } else { None };
     if !preserve_notice {
         set_status(hwnd, app, Some(format!("Loading {}…", path.display())));
     }
     thread::spawn(move || {
         let result = if recursive {
-            directory::search_recursive(&path, show_hidden, &filter, false, &token, generation)
+            directory::search_recursive(&path, show_hidden, &filter, search_case, &token, generation)
         } else {
-            directory::read_filtered(&path, show_hidden, &filter, false, &token, generation)
+            directory::read_filtered(&path, show_hidden, &filter, search_case, &token, generation)
         };
         if token.load(Ordering::Relaxed) != generation {
             return;
@@ -2581,12 +2587,17 @@ unsafe extern "system" fn list_proc(
     DefSubclassProc(list, msg, wp, lp)
 }
 
-unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
+unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>) {
     let keyboard = lp == -1;
     let point = if keyboard {
-        let mut p = Point { x: 8, y: 8 };
-        ClientToScreen(app.list, &mut p);
-        p
+        match anchor {
+            Some(point) => point,
+            None => {
+                let mut p = Point { x: 8, y: 8 };
+                ClientToScreen(app.list, &mut p);
+                p
+            }
+        }
     } else {
         Point {
             x: (lp as i16) as i32,
@@ -2614,14 +2625,14 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         return;
     }
     if selected {
-        AppendMenuW(menu, 0, 1, text("Open").as_ptr());
-        if app.recursive_search && selected_indices(app).len() == 1 {
+        let selected_items = selected_indices(app);
+        if selected_items.len() == 1 { AppendMenuW(menu, 0, 1, text("Open").as_ptr()); }
+        if app.recursive_search && selected_items.len() == 1 {
             AppendMenuW(menu, 0, OPEN_CONTAINING, text("Open containing folder").as_ptr());
         }
-        if selected_indices(app).len() == 1 && app.entries[selected_indices(app)[0]].is_dir {
+        if selected_items.len() == 1 && app.entries[selected_items[0]].is_dir {
             AppendMenuW(menu, 0, OPEN_TAB, text("Open in new tab").as_ptr());
         }
-        let selected_items = selected_indices(app);
         if selected_items.len() == 1 && app.entries[selected_items[0]].is_file {
             AppendMenuW(menu, 0, PREVIEW, text("Preview in ZFM…").as_ptr());
             let extension = app.entries[selected_items[0]].path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -2670,6 +2681,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
             (CALCULATE_SIZE, "Calculate size…"),
             (PROPERTIES, "Properties"),
         ] {
+            if selected_items.len() != 1 && matches!(id, COPY_PATH | DUPLICATE | DELETE | PROPERTIES) { continue; }
             AppendMenuW(menu, 0, id, text(title).as_ptr());
         }
     } else {
@@ -2703,7 +2715,13 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam) {
         }
     }
     AppendMenuW(menu, 0x800, 0, ptr::null());
+    if selected {
+        AppendMenuW(menu, 0, PROMPT_FILE, text("New file…").as_ptr());
+        AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
+    }
     AppendMenuW(menu, 0, SEARCH_RECURSIVE, text("Search subfolders (Ctrl+Shift+F)").as_ptr());
+    AppendMenuW(menu, if app.search_case { 0x0008 } else { 0 }, SEARCH_CASE, text("Case-sensitive search").as_ptr());
+    if selected { AppendMenuW(menu, 0, SETTINGS, text("Settings…").as_ptr()); }
     // Retain this snapshot while the menu is open; commands refer to its indices.
     let bookmark_paths = match zfm::bookmarks::user_path().and_then(|file| zfm::bookmarks::load(&file)) {
         Ok(paths) => paths,
@@ -2970,6 +2988,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 DELETE,
             ),
             child(hwnd, "BUTTON", "Rename", WS_TABSTOP | BS_OWNERDRAW, RENAME),
+            child(hwnd, "BUTTON", "Actions ▾", WS_TABSTOP | BS_OWNERDRAW, ACTIONS_MENU),
         ];
 
         if address.is_null()
@@ -3142,7 +3161,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             0
         }
         WM_CONTEXTMENU if wp as H == app.list => {
-            list_context(hwnd, app, lp);
+            list_context(hwnd, app, lp, None);
             0
         }
         WM_CONTEXTMENU if wp as H == hwnd => {
@@ -3389,6 +3408,17 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     } else {
                         set_status(hwnd, app, Some("At least one tab must remain open.".into()));
                     }
+                }
+                ACTIONS_MENU if code == 0 => {
+                    let mut rect: Rect = std::mem::zeroed();
+                    let anchor = if GetWindowRect(app.extra_buttons[9], &mut rect) != 0 {
+                        Some(Point { x: rect.left, y: rect.bottom })
+                    } else { None };
+                    list_context(hwnd, app, -1, anchor);
+                }
+                SEARCH_CASE if code == 0 => {
+                    app.search_case = !app.search_case;
+                    load(hwnd, app, Destination::Refresh, false);
                 }
                 APPLY_FILTER if code == 0 => {
                     app.recursive_search = false;
@@ -3904,6 +3934,7 @@ pub fn run() -> Result<(), String> {
             theme: &theme,
             tabs: Tabs::new(initial),
             filter: String::new(),
+            search_case: false,
             recursive_search: false,
             search_root: None,
             show_hidden: saved_settings.show_hidden,
@@ -3934,7 +3965,7 @@ pub fn run() -> Result<(), String> {
             list: ptr::null_mut(),
             status: ptr::null_mut(),
             nav_buttons: [ptr::null_mut(); 6],
-            extra_buttons: [ptr::null_mut(); 9],
+            extra_buttons: [ptr::null_mut(); 10],
             sidebar_items: Vec::new(),
             entries: Vec::new(),
             backdrop_w: 0,
@@ -4021,6 +4052,8 @@ pub fn run() -> Result<(), String> {
                     0x44 if ctrl && !alt && focus == (*app).list => Some(DUPLICATE),
                     0x42 if ctrl && !alt && !shift => Some(BOOKMARK_ADD),
                     0x46 if ctrl && !alt && shift => Some(SEARCH_RECURSIVE),
+                    0x4f if ctrl && !alt && shift => Some(ACTIONS_MENU),
+                    0x49 if ctrl && !alt && shift && focus == (*app).list => Some(CALCULATE_SIZE),
                     0x4e if ctrl && !alt && shift => Some(PROMPT_FOLDER),
                     0x4e if ctrl && !alt => Some(PROMPT_FILE),
                     0x0d if alt && !ctrl && focus == (*app).list => Some(PROPERTIES),
