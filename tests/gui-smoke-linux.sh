@@ -157,7 +157,7 @@ for _ in $(seq 1 100); do
 done
 if [ -z "$search_preview" ]; then echo 'Recursive search result did not open its preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$search_preview"
-xdotool key --window "$search_preview" Escape
+xdotool key Escape
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+f ctrl+a BackSpace Return
 sleep 1
