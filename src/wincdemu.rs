@@ -17,8 +17,8 @@ pub fn supports(path: &Path) -> bool {
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 
 fn validate_program(program: &Path) -> io::Result<()> {
-    if !program.is_absolute() || !program.file_name().and_then(|s| s.to_str()).map_or(false, |s| s.eq_ignore_ascii_case("batchmnt.exe")) {
-        return Err(invalid("Choose the absolute path to the installed WinCDEmu batchmnt.exe"));
+    if !program.is_absolute() || !program.file_name().and_then(|s| s.to_str()).map_or(false, |s| s.eq_ignore_ascii_case("batchmnt.exe") || s.eq_ignore_ascii_case("batchmnt64.exe")) {
+        return Err(invalid("Choose the absolute path to the installed WinCDEmu batchmnt.exe or batchmnt64.exe"));
     }
     let _file = crate::settings::open_existing(program)?;
     Ok(())
@@ -80,7 +80,8 @@ mod tests {
         let root = crate::test_support::scratch_dir("wincdemu");
         let program = root.join("batchmnt.exe"); let image = root.join("image.cue");
         std::fs::write(&program, b"fake").unwrap(); std::fs::write(&image, b"fake").unwrap();
-        assert!(validate_program(&program).is_ok()); assert!(validate_image(&image).is_ok());
+        let program64 = root.join("batchmnt64.exe"); std::fs::write(&program64, b"fake").unwrap();
+        assert!(validate_program(&program).is_ok()); assert!(validate_program(&program64).is_ok()); assert!(validate_image(&image).is_ok());
         assert!(validate_program(&root.join("else.exe")).is_err());
         assert!(validate_image(&root.join("missing.iso")).is_err());
         #[cfg(unix)] {

@@ -2502,7 +2502,7 @@ unsafe fn wincdemu_action(hwnd: H, app: &mut App, action: zfm::wincdemu::Action)
         }
     };
     let default = std::env::var_os("ZFM_WINCDEMU_BATCHMNT").unwrap_or_default();
-    let program = match windows_actions::prompt(hwnd, app.theme, "Absolute path to installed WinCDEmu batchmnt.exe", &default, false) {
+    let program = match windows_actions::prompt(hwnd, app.theme, "Absolute path to WinCDEmu batchmnt.exe or batchmnt64.exe", &default, false) {
         Some(value) => PathBuf::from(value), None => return,
     };
     let subject = image.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "all WinCDEmu drives".into());

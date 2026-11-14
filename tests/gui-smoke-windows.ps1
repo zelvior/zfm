@@ -1109,7 +1109,7 @@ try {
         [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$id, [IntPtr]::Zero)
         $programDialog = [IntPtr]::Zero
         for ($i = 0; $i -lt 100; $i++) {
-            $programDialog = [ZfmSmoke]::FindWindowW('#32770', 'Absolute path to installed WinCDEmu batchmnt.exe')
+            $programDialog = [ZfmSmoke]::FindWindowW('#32770', 'Absolute path to WinCDEmu batchmnt.exe or batchmnt64.exe')
             if ($programDialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($programDialog, 1001) -ne [IntPtr]::Zero) { break }
             Start-Sleep -Milliseconds 100
         }
