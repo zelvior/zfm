@@ -208,7 +208,21 @@ try {
     # Preview the first text fixture; this command opens a modal dialog.
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Cannot select preview fixture.' }
-    if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]142, [IntPtr]::Zero)) { throw 'Could not request preview.' }
+    # Open the selection-aware Actions menu and choose its Preview entry.
+    [void][ZfmSmoke]::PostMessageW($actions, 0x00f5, [UIntPtr]::Zero, [IntPtr]::Zero)
+    $popup = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $popup = [ZfmSmoke]::FindWindowAnyTitle('#32768', [IntPtr]::Zero)
+        $ownerPid = [uint32]0
+        if ($popup -ne [IntPtr]::Zero) { [void][ZfmSmoke]::GetWindowThreadProcessId($popup, [ref]$ownerPid) }
+        if ($popup -ne [IntPtr]::Zero -and $ownerPid -eq $process.Id -and [ZfmSmoke]::IsWindowVisible($popup)) { break }
+        $popup = [IntPtr]::Zero
+        Start-Sleep -Milliseconds 100
+    }
+    if ($popup -eq [IntPtr]::Zero) { throw 'Selected-item Actions menu did not open.' }
+    [void][ZfmSmoke]::PostMessageW($popup, 0x100, [UIntPtr]40, [IntPtr]::Zero) # Open
+    [void][ZfmSmoke]::PostMessageW($popup, 0x100, [UIntPtr]40, [IntPtr]::Zero) # Preview
+    [void][ZfmSmoke]::PostMessageW($popup, 0x100, [UIntPtr]13, [IntPtr]::Zero) # Enter
     $preview = [IntPtr]::Zero
     $previewTitle = 'ZFM Preview — ' + (Join-Path $work 'example.txt')
     for ($i = 0; $i -lt 100; $i++) {
