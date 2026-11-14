@@ -77,7 +77,15 @@ for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited while opening preview:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
-if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
+if [ -z "$preview" ]; then
+    echo "Text preview did not appear for pid $pid; title-matching windows:" >&2
+    for candidate in $(xdotool search --name '^ZFM Preview' 2>/dev/null || true); do
+        xdotool getwindowname "$candidate" >&2 || true
+        xdotool getwindowpid "$candidate" >&2 || true
+        xdotool getwindowgeometry --shell "$candidate" >&2 || true
+    done
+    cat "$work/stderr" >&2; exit 1
+fi
 xdotool windowfocus --sync "$preview"
 xdotool key Escape
 xdotool windowfocus --sync "$window"
