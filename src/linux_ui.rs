@@ -1275,7 +1275,9 @@ pub fn run() -> Result<(), String> {
         let css = (api().gtk_css_provider_new)();
         // Keep the compact desktop theme separate from widget construction.
         let style = c(include_str!("linux-theme.css"));
-        (api().gtk_css_provider_load_from_data)(css, style.as_ptr(), -1, ptr::null_mut());
+        if (api().gtk_css_provider_load_from_data)(css, style.as_ptr(), -1, ptr::null_mut()) == 0 {
+            eprintln!("ZFM theme CSS could not be loaded; using the desktop theme.");
+        }
         (api().gtk_style_context_add_provider_for_screen)(
             (api().gdk_screen_get_default)(),
             css,
