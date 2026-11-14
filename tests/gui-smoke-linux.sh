@@ -68,7 +68,7 @@ for _ in $(seq 1 100); do
 done
 if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$preview"
-xdotool key --window "$preview" Escape
+xdotool key Escape
 sleep 0.5
 xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
@@ -191,7 +191,7 @@ batch_dialog() {
     [ -n "$dialog" ] || { echo 'Batch rename dialog did not appear.' >&2; exit 1; }
     xdotool windowfocus --sync "$dialog"
     xdotool type --clearmodifiers 'Holiday'
-    xdotool key --window "$dialog" Return
+    xdotool key Return
     preview=''
     for _ in $(seq 1 100); do
         preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' 2>/dev/null | head -n 1 || true)
@@ -211,7 +211,7 @@ done
 [ -f "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/Holiday (1).txt" ]
 batch_dialog
 # Focus starts on Cancel; Tab moves to Rename, and Space activates it.
-xdotool key --window "$preview" Tab space
+xdotool key Tab space
 for _ in $(seq 1 100); do
     if [ -f "$work/rename-test/Holiday (1).txt" ] && [ -f "$work/rename-test/Holiday (2).csv" ]; then break; fi
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during batch rename:' >&2; cat "$work/stderr" >&2; exit 1; fi
