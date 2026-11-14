@@ -1937,6 +1937,7 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
         return 0;
     }
     app.operation = None;
+    eprintln!("DEBUG operation result {:?}", message.result);
     match message.result {
         Ok(result) => {
             if (app.tabs.current().current() == message.directory
@@ -2133,6 +2134,7 @@ unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     (api().gtk_widget_show_all)(dialog);
     (api().gtk_widget_grab_focus)(cancel_button);
     let response = (api().gtk_dialog_run)(dialog);
+    eprintln!("DEBUG batch dialog response={response} preview={preview:?}");
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     response == -3
 }
@@ -2165,6 +2167,7 @@ unsafe fn batch_rename(data: P) {
     };
     if !confirm_numbered_rename(parent, plan.preview()) || !alive.load(Ordering::Relaxed) { return; }
     let app = &*(data as *mut App);
+    eprintln!("DEBUG batch confirmed generation={generation} current={} root={root:?} current_root={:?}", app.generation.load(Ordering::Relaxed), app.tabs.current().current());
     if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root {
         set_status(app, "Rename cancelled because the view changed; select the files again."); return;
     }
