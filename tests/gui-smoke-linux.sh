@@ -55,8 +55,12 @@ if [ -z "$settings" ]; then echo 'Settings dialog did not appear:' >&2; cat "$wo
 xdotool windowfocus --sync "$settings"
 xdotool key --window "$settings" Escape
 xdotool windowfocus --sync "$window"
-# Preview the only fixture from the file list.
-# Wait for the asynchronous directory load before selecting it.
+# Preview one fixture from a folder without stdout/stderr test log files.
+mkdir -p "$work/preview-fixture"
+cp "$work/example.txt" "$work/preview-fixture/example.txt"
+xdotool key --window "$window" ctrl+l ctrl+a
+xdotool type --clearmodifiers "$work/preview-fixture"
+xdotool key --window "$window" Return
 sleep 1
 xdotool key --window "$window" Escape ctrl+a ctrl+shift+o
 # Organize → Selected items → Preview in ZFM.
@@ -77,6 +81,10 @@ if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/s
 xdotool windowfocus --sync "$preview"
 xdotool key Escape
 xdotool windowfocus --sync "$window"
+xdotool key --window "$window" ctrl+l ctrl+a
+xdotool type --clearmodifiers "$work"
+xdotool key --window "$window" Return
+sleep 1
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
 for _ in $(seq 1 7); do xdotool key --window "$window" ctrl+t; done

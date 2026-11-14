@@ -1124,10 +1124,8 @@ unsafe extern "C" fn bookmarks_menu(widget: P, data: P) {
 }
 
 unsafe extern "C" fn organize_menu(widget: P, data: P) {
-    eprintln!("DEBUG organize invoked");
     let menu = (api().gtk_menu_new)();
     let rows = selected_rows((*(data as *mut App)).list);
-    eprintln!("DEBUG selected rows {}", rows.len());
     if let Some(row) = rows.first() {
         let submenu = (api().gtk_menu_new)();
         populate_selection_menu(submenu, *row, data);
