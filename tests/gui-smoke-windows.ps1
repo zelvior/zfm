@@ -1103,6 +1103,29 @@ try {
         [void][ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]2, [IntPtr]::Zero)
         for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($dialog); $i++) { Start-Sleep -Milliseconds 100 }
     }
+    # WinCDEmu actions require a separate executable path and explicit confirmation.
+    # Cancel every action before execution: no driver or external tool is needed.
+    foreach ($id in @(208, 209, 210)) {
+        [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]$id, [IntPtr]::Zero)
+        $programDialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $programDialog = [ZfmSmoke]::FindWindowW('#32770', 'Absolute path to installed WinCDEmu batchmnt.exe')
+            if ($programDialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($programDialog, 1001) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($programDialog -eq [IntPtr]::Zero) { throw "WinCDEmu executable prompt missing for $id" }
+        [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($programDialog, 1001), 0x000c, [UIntPtr]::Zero, 'C:\trusted\batchmnt.exe')
+        [void][ZfmSmoke]::PostMessageW($programDialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+        $confirm = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $confirm = [ZfmSmoke]::FindWindowW('#32770', 'Run WinCDEmu?')
+            if ($confirm -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($confirm, 2) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($confirm -eq [IntPtr]::Zero) { throw "WinCDEmu confirmation missing for $id" }
+        [void][ZfmSmoke]::PostMessageW($confirm, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+        for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($confirm); $i++) { Start-Sleep -Milliseconds 100 }
+    }
     Navigate-Cut $work 'example.txt'
 
     # The offline QR requires an explicit confirmation and shows a bitmap.
