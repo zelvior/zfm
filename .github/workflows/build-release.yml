@@ -206,7 +206,7 @@ jobs:
             prerelease=()
             if [[ "$TAG" == *-* ]]; then prerelease+=(--prerelease); fi
             gh release create "$TAG" --verify-tag --title "$TAG" "${prerelease[@]}" \
-              --notes 'Installers only: run the Windows setup program for your architecture, or install the .deb on Linux. Automated builds target Ubuntu 18.04 / Mint 19 and Windows 7 SP1 or newer. Linux requires GTK 3 and libarchive. Both setup programs are built from this repository without a third-party installer framework, present the native ZFM setup wizard, and install for the current user with an uninstaller. GUI startup is smoke-tested on hosted runners, not on the legacy operating systems; compatibility is not guaranteed. See the included README.'
+              --notes 'Installers only: run the Windows setup program for your architecture, or install the .deb on Linux. Automated builds target Ubuntu 18.04 / Mint 19 and Windows 7 SP1 or newer. Linux requires GTK 3 and libarchive. The Windows installers are built from this repository without a third-party installer framework, present the native ZFM setup wizard, and install for the current user with an uninstaller. Linux packages are installed and removed with the system package manager. Linux is smoke-tested in an Ubuntu 18.04 container; Windows is tested on hosted runners, not Windows 7. Compatibility is not guaranteed. See the included README.'
           fi
           ../scripts/resolve-release-tag.sh "$TAG" "$BUILT_COMMIT"
           gh release upload "$TAG" "${assets[@]}" SHA256SUMS.txt --clobber
