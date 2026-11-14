@@ -688,7 +688,13 @@ try {
             if ($previewText -ne [IntPtr]::Zero) { break }
             Start-Sleep -Milliseconds 100
         }
-        if ($previewText -eq [IntPtr]::Zero) { throw 'Batch rename preview did not appear.' }
+        if ($previewText -eq [IntPtr]::Zero) {
+            $status = New-Object System.Text.StringBuilder 2048
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+            $selectedCount = [UIntPtr]::Zero
+            [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x190, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$selectedCount)
+            throw "Batch rename preview did not appear: preview=$preview status=$($status.ToString()) selection=$($selectedCount.ToUInt64())."
+        }
         $value = New-Object System.Text.StringBuilder 8192
         $r = [UIntPtr]::Zero
         [void][ZfmSmoke]::GetControlText($previewText, 0x000d, [UIntPtr]$value.Capacity, $value, 2, 3000, [ref]$r)

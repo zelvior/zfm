@@ -208,12 +208,21 @@ for _ in $(seq 1 100); do
 done
 [ -f "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/Holiday (1).txt" ]
 batch_dialog
-xdotool key --window "$preview" alt+r
+# GTK's dialog action area places Rename at the lower right.
+eval "$(xdotool getwindowgeometry --shell "$preview" | grep -E '^(WIDTH|HEIGHT)=')"
+xdotool mousemove --window "$preview" "$((WIDTH - 45))" "$((HEIGHT - 25))" click 1
 for _ in $(seq 1 100); do
     if [ -f "$work/rename-test/Holiday (1).txt" ] && [ -f "$work/rename-test/Holiday (2).csv" ]; then break; fi
     if ! kill -0 "$pid" 2>/dev/null; then echo 'ZFM exited during batch rename:' >&2; cat "$work/stderr" >&2; exit 1; fi
     sleep 0.1
 done
+if [ ! -f "$work/rename-test/Holiday (1).txt" ]; then
+    echo 'Batch rename did not create expected files; directory and windows:' >&2
+    find "$work/rename-test" -print >&2
+    xdotool search --onlyvisible --pid "$pid" getwindowname %@ >&2 || true
+    cat "$work/stderr" >&2
+    exit 1
+fi
 grep -q alpha "$work/rename-test/Holiday (1).txt"
 grep -q beta "$work/rename-test/Holiday (2).csv"
 [ ! -e "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/beta.csv" ]
