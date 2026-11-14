@@ -51,6 +51,29 @@ pub fn get(file: &Path, path: &Path) -> io::Result<Vec<String>> {
     if !valid_path(path) { return Err(invalid("Tagging requires an absolute UTF-8 path without control characters")); }
     Ok(load(file)?.remove(path).unwrap_or_default())
 }
+/// Find an exact, case-sensitive tag across the local path database. Results
+/// are path records, not verified file identities; records can be stale.
+pub fn find(file: &Path, tag: &str) -> io::Result<Vec<PathBuf>> {
+    if !valid_tag(tag) { return Err(invalid("Enter one nonempty tag of at most 64 bytes")); }
+    Ok(load(file)?.into_iter().filter_map(|(path, tags)| {
+        if tags.iter().any(|value| value == tag) { Some(path) } else { None }
+    }).collect())
+}
+/// Produce a bounded, selectable report without touching paths on disk.
+pub fn find_report(file: &Path, tag: &str) -> io::Result<String> {
+    let matches = find(file, tag)?;
+    let mut report = format!("Tag {:?}: {} saved path(s).\n\n", tag, matches.len());
+    let mut shown = 0;
+    for path in matches.iter().take(250) {
+        let line = format!("{}\n", path.display());
+        if report.len() + line.len() > 48 * 1024 { break; }
+        report.push_str(&line); shown += 1;
+    }
+    if matches.len() > shown { report.push_str(&format!("\n{} more paths not shown.\n", matches.len() - shown)); }
+    report.push_str("\nPaths may be stale after moves, renames or deletion. This search does not check whether files exist.");
+    Ok(report)
+}
+
 /// Replace all tags on one path. Empty input removes the entry.
 pub fn set(file: &Path, path: &Path, tags: &[String]) -> io::Result<()> {
     let distinct: BTreeSet<_> = tags.iter().collect();
@@ -99,6 +122,12 @@ mod tests {
         let root = crate::test_support::scratch_dir("tags"); let file = root.join("config/tags.conf"); let path = root.join("file ü.txt");
         let values = parse_input("project, work, 一").unwrap(); set(&file, &path, &values).unwrap();
         assert_eq!(get(&file, &path).unwrap(), values);
+        let other = root.join("other"); set(&file, &other, &["work".into()]).unwrap();
+        let found = find(&file, "work").unwrap();
+        assert_eq!(found.len(), 2); assert!(found.contains(&path)); assert!(found.contains(&other));
+        assert!(find_report(&file, "work").unwrap().contains("2 saved path(s)"));
+        assert!(find(&file, "Work").unwrap().is_empty());
+        assert!(find(&file, "").is_err());
         assert!(parse_input("x,x").is_err()); assert!(parse_input("x,,y").is_err());
         set(&file, &path, &[]).unwrap(); assert!(get(&file, &path).unwrap().is_empty());
         fs::write(&file, "version=99\n").unwrap(); assert!(set(&file, &path, &values).is_err()); assert_eq!(fs::read_to_string(&file).unwrap(), "version=99\n");

@@ -182,6 +182,7 @@ const SERVER_STOP: usize = 187;
 const RUN_SNIPPET: usize = 188;
 const RUN_SCRIPT: usize = 189;
 const OPEN_TERMINAL: usize = 190;
+const FIND_TAGS: usize = 191;
 const BOOKMARK_OPEN_BASE: usize = 500;
 const BOOKMARK_REMOVE_BASE: usize = 600;
 
@@ -2425,16 +2426,18 @@ unsafe fn batch_rename(hwnd: H, app: &mut App) {
 
 unsafe fn run_code(hwnd: H, app: &mut App, file: Option<PathBuf>) {
     let root = app.tabs.current().current().to_path_buf(); let generation = app.token.load(Ordering::Relaxed);
-    let program = match windows_actions::prompt(hwnd, app.theme, "Interpreter executable (e.g. python, node, cmd.exe)", OsStr::new("cmd.exe"), false) { Some(v) => v, None => return };
-    let flag = match windows_actions::prompt(hwnd, app.theme, "Single interpreter argument (e.g. /C, -c, -e, -File)", OsStr::new("/C"), false) { Some(v) => v, None => return };
+    let default_program = std::env::var_os("ZFM_INTERPRETER").unwrap_or_else(|| OsString::from("cmd.exe"));
+    let program = match windows_actions::prompt(hwnd, app.theme, "Interpreter executable (e.g. python, node, cmd.exe)", &default_program, false) { Some(v) => v, None => return };
+    let default_flag = std::env::var_os("ZFM_INTERPRETER_ARG").unwrap_or_else(|| OsString::from(if file.is_some() { "" } else { "/C" }));
+    let flag = match windows_actions::prompt(hwnd, app.theme, "Single interpreter argument (e.g. /C, -c, -e, -File)", &default_flag, false) { Some(v) => v, None => return };
     let code = if file.is_none() {
-        match windows_actions::prompt(hwnd, app.theme, "Single-line snippet (select a script file for multiline)", OsStr::new(""), false) {
+        match windows_actions::snippet_editor(hwnd, app.theme) {
             Some(v) => match v.into_string() { Ok(v) => Some(v), Err(_) => { set_status(hwnd, app, Some("Snippet must be Unicode.".into())); return; } },
             None => return,
         }
     } else { None };
     let what = file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "the entered snippet".into());
-    let message = format!("Run {what} with {} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout or cancellation does not stop descendants. Run only code you trust.", program.to_string_lossy(), root.display());
+    let message = format!("Run {what} with executable {:?} and literal argument {:?} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout or cancellation does not stop descendants. Run only code you trust.", program, flag, root.display());
     if windows_actions::question(hwnd, app.theme, "Run external code?", &message, "Run", true) != Some(true) { return; }
     if app.token.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(hwnd, app, Some("Run cancelled because the view changed.".into())); return; }
     let operation = match (file, code) { (Some(file), _) => Operation::Script(program, flag, file, root), (_, Some(code)) => Operation::Snippet(program, flag, code, root), _ => return };
@@ -2485,6 +2488,17 @@ unsafe fn begin_hash(hwnd: H, app: &mut App, verify: bool) {
     } else { None };
     if app.token.load(Ordering::Relaxed) != generation { set_status(hwnd, app, Some("Hashing cancelled because the view changed.".into())); return; }
     start_operation(hwnd, app, Operation::Hash(path, expected));
+}
+
+unsafe fn find_tags(hwnd: H, app: &mut App) {
+    let tag = match windows_actions::prompt(hwnd, app.theme, "Find exact case-sensitive tag", OsStr::new(""), false) {
+        Some(value) => match value.into_string() { Ok(value) => value, Err(_) => { set_status(hwnd, app, Some("Tag must be Unicode.".into())); return; } },
+        None => return,
+    };
+    match zfm::tags::user_path().and_then(|file| zfm::tags::find_report(&file, &tag)) {
+        Ok(report) => { windows_actions::question(hwnd, app.theme, "Saved paths by tag", &report, "Close", false); }
+        Err(error) => set_status(hwnd, app, Some(format!("Tag search failed: {error}"))),
+    }
 }
 
 unsafe fn edit_tags(hwnd: H, app: &mut App) {
@@ -2894,6 +2908,7 @@ unsafe fn list_context(hwnd: H, app: &mut App, lp: LParam, anchor: Option<Point>
         AppendMenuW(menu, 0, PROMPT_FILE, text("New file…").as_ptr());
         AppendMenuW(menu, 0, PROMPT_FOLDER, text("New folder…").as_ptr());
     }
+    AppendMenuW(menu, 0, FIND_TAGS, text("Find saved paths by tag…").as_ptr());
     AppendMenuW(menu, 0, RUN_SNIPPET, text("Run code snippet…").as_ptr());
     AppendMenuW(menu, 0, OPEN_TERMINAL, text("Open terminal here…").as_ptr());
     AppendMenuW(menu, 0, SERVER_START, text("Start local static server…").as_ptr());
@@ -3620,6 +3635,7 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                 }
                 REGEX_RENAME if code == 0 => regex_rename(hwnd, app),
                 EDIT_TAGS if code == 0 => edit_tags(hwnd, app),
+                FIND_TAGS if code == 0 => find_tags(hwnd, app),
                 RUN_SNIPPET if code == 0 => run_code(hwnd, app, None),
                 RUN_SCRIPT if code == 0 => {
                     let selected = selected_indices(app);

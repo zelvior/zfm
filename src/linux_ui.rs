@@ -94,6 +94,9 @@ api! {
     gtk_text_view_new: unsafe extern "C" fn() -> P,
     gtk_text_view_get_buffer: unsafe extern "C" fn(P) -> P,
     gtk_text_buffer_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
+    gtk_text_buffer_get_bounds: unsafe extern "C" fn(P, P, P),
+    gtk_text_buffer_get_text: unsafe extern "C" fn(P, P, P, c_int) -> *mut c_char,
+    gtk_text_buffer_get_char_count: unsafe extern "C" fn(P) -> c_int,
     gtk_text_view_set_editable: unsafe extern "C" fn(P, c_int),
     gtk_text_view_set_cursor_visible: unsafe extern "C" fn(P, c_int),
     gtk_image_new_from_pixbuf: unsafe extern "C" fn(P) -> P,
@@ -1205,6 +1208,7 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Review cleanup candidates…", cleanup_review as P),
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
+        ("Find saved paths by tag…", find_tags as P),
         ("Run code snippet…", run_snippet as P),
         ("Open terminal here…", open_terminal as P),
         ("Start local static server…", server_start as P),
@@ -2475,19 +2479,71 @@ unsafe fn confirm_run(parent: P, message: &str) -> bool {
     let response = (api().gtk_dialog_run)(dialog); if response != -1 { (api().gtk_widget_destroy)(dialog); }
     response == -3
 }
+// GtkTextIter's public GTK 3 ABI consists of pointers and gint padding. Its
+// fields are private to GTK; initialize only via gtk_text_buffer_get_bounds.
+#[repr(C)]
+struct GtkTextIter {
+    dummy1: P, dummy2: P, dummy3: c_int, dummy4: c_int, dummy5: c_int,
+    dummy6: c_int, dummy7: c_int, dummy8: c_int, dummy9: P, dummy10: P,
+    dummy11: c_int, dummy12: c_int, dummy13: c_int, dummy14: P,
+}
+unsafe fn snippet_editor(parent: P) -> Result<Option<String>, String> {
+    let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Code snippet").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    (api().gtk_window_set_default_size)(dialog, 650, 400);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let next = (api().gtk_dialog_add_button)(dialog, c("Continue").as_ptr(), -3); add_class(next, "zfm-primary");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let area = (api().gtk_dialog_get_content_area)(dialog);
+    (api().gtk_box_pack_start)(area, wrapped_label("Enter code (up to 16 KiB). You will be asked to confirm before it runs."), 0, 0, 8);
+    let scroll = scroll_window(); (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
+    (api().gtk_widget_set_size_request)(scroll, 480, 240);
+    let view = (api().gtk_text_view_new)();
+    (api().gtk_container_add)(scroll, view); (api().gtk_box_pack_start)(area, scroll, 1, 1, 0);
+    (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(view);
+    let response = (api().gtk_dialog_run)(dialog);
+    let result = if response == -3 {
+        let buffer = (api().gtk_text_view_get_buffer)(view);
+        if (api().gtk_text_buffer_get_char_count)(buffer) > 16 * 1024 {
+            Err("Snippet exceeds 16 KiB.".to_string())
+        } else {
+            let mut start = std::mem::MaybeUninit::<GtkTextIter>::uninit();
+            let mut end = std::mem::MaybeUninit::<GtkTextIter>::uninit();
+            (api().gtk_text_buffer_get_bounds)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P);
+            let raw = (api().gtk_text_buffer_get_text)(buffer, start.as_mut_ptr() as P, end.as_mut_ptr() as P, 1);
+            if raw.is_null() { Err("Could not read the snippet.".to_string()) }
+            else {
+                let code = CStr::from_ptr(raw).to_string_lossy().into_owned(); (api().g_free)(raw as P);
+                if code.len() > 16 * 1024 { Err("Snippet exceeds 16 KiB.".to_string()) } else { Ok(Some(code)) }
+            }
+        }
+    } else { Ok(None) };
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    let _ = cancel;
+    result
+}
+
 unsafe fn run_code(data: P, file: Option<PathBuf>) {
     let app = &*(data as *mut App); let parent = app.window; let root = app.tabs.current().current().to_path_buf();
     let generation = app.generation.load(Ordering::Relaxed); let alive = app.alive.clone();
-    let program = match prompt(parent, "Interpreter", "Installed executable name or absolute path (for example python3, node, or /bin/sh):", Some("/bin/sh")) { Some(v) => v, None => return };
+    let default_program = std::env::var("ZFM_INTERPRETER").unwrap_or_else(|_| "/bin/sh".into());
+    let program = match prompt(parent, "Interpreter", "Installed executable name or absolute path (for example python3, node, or /bin/sh):", Some(&default_program)) { Some(v) => v, None => return };
     if !alive.load(Ordering::Relaxed) { return; }
-    let flag = match prompt(parent, "Interpreter argument", "One literal argument before the code or filename (for example -c, -e, or -File). Leave empty if not needed:", Some(if file.is_some() { "" } else { "-c" })) { Some(v) => v, None => return };
+    let default_flag = std::env::var("ZFM_INTERPRETER_ARG").unwrap_or_else(|_| if file.is_some() { "" } else { "-c" }.into());
+    let flag = match prompt(parent, "Interpreter argument", "One literal argument before the code or filename (for example -c, -e, or -File). Leave empty if not needed:", Some(&default_flag)) { Some(v) => v, None => return };
     if !alive.load(Ordering::Relaxed) { return; }
     let code = if file.is_none() {
-        match prompt(parent, "Code snippet", "Enter a single-line snippet. For multiline code, select a script file instead:", Some("")) { Some(v) => Some(v), None => return }
+        match snippet_editor(parent) {
+            Ok(Some(code)) => Some(code), Ok(None) => return,
+            Err(error) => { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), &error); } return; }
+        }
     } else { None };
     if !alive.load(Ordering::Relaxed) { return; }
     let what = file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "the entered snippet".into());
-    let message = format!("Run {what} with {program} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout/cancellation does not stop descendants. Run only code you trust.", root.display());
+    let message = format!("Run {what} with executable {program:?} and literal argument {flag:?} in {}?\n\nThis is not sandboxed. Code has your full permissions and can modify or delete files, access the network, and start other programs. Timeout/cancellation does not stop descendants. Run only code you trust.", root.display());
     if !confirm_run(parent, &message) || !alive.load(Ordering::Relaxed) { return; }
     let app = &*(data as *mut App);
     if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Run cancelled because the view changed."); return; }
@@ -2561,6 +2617,17 @@ unsafe extern "C" fn server_stop(_: P, data: P) {
 
 unsafe extern "C" fn hash_selected(_: P, data: P) { begin_hash(data, false); }
 unsafe extern "C" fn verify_selected(_: P, data: P) { begin_hash(data, true); }
+
+unsafe extern "C" fn find_tags(_: P, data: P) {
+    let app = &*(data as *mut App); let parent = app.window; let alive = app.alive.clone();
+    let tag = match prompt(parent, "Find paths by tag", "Exact case-sensitive tag to find in your saved labels:", Some("")) { Some(tag) => tag, None => return };
+    if !alive.load(Ordering::Relaxed) { return; }
+    let app = &*(data as *mut App);
+    match zfm::tags::user_path().and_then(|file| zfm::tags::find_report(&file, &tag)) {
+        Ok(report) => show_report(parent, "Saved paths by tag", &report),
+        Err(error) => set_status(app, &format!("Tag search failed: {error}")),
+    }
+}
 
 unsafe extern "C" fn edit_tags(_: P, data: P) {
     let app = &*(data as *mut App);

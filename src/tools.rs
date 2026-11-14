@@ -96,7 +96,7 @@ mod tests {
     #[cfg(unix)]
     #[test] fn runs_captures_and_cancels() {
         let root = crate::test_support::scratch_dir("snippet");
-        let report = snippet(OsStr::new("/bin/sh"), OsStr::new("-c"), "printf ok; printf err >&2", &root, &AtomicBool::new(false)).unwrap();
+        let report = snippet(OsStr::new("/bin/sh"), OsStr::new("-c"), "printf ok\nprintf err >&2", &root, &AtomicBool::new(false)).unwrap();
         assert!(report.contains("ok") && report.contains("err"));
         assert_eq!(snippet(OsStr::new("/bin/sh"), OsStr::new("-c"), "true", &root, &AtomicBool::new(true)).unwrap_err().kind(), io::ErrorKind::Interrupted);
         std::fs::remove_dir_all(root).unwrap();
