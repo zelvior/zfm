@@ -345,6 +345,7 @@ extern "system" {
     fn OpenClipboard(owner: H) -> i32;
     fn CloseClipboard() -> i32;
     fn EmptyClipboard() -> i32;
+    fn GetClipboardSequenceNumber() -> u32;
     fn SetClipboardData(format: u32, memory: H) -> H;
     fn GetClipboardData(format: u32) -> H;
     fn RegisterClipboardFormatW(name: *const u16) -> u32;
@@ -767,6 +768,7 @@ struct App {
     tracking_mouse: bool,
     operation_busy: bool,
     operation_cancel: Option<Arc<AtomicBool>>,
+    consumed_cut_sequence: Option<u32>,
     notice: Option<String>,
     token: Arc<AtomicU64>,
     address: H,
@@ -785,6 +787,7 @@ struct App {
 
 struct OperationMessage {
     result: Result<String, String>,
+    consumed_cut_sequence: Option<u32>,
 }
 
 struct ResultMessage {
@@ -2247,7 +2250,7 @@ enum Operation {
     Delete(PathBuf),
     Rename(PathBuf, OsString),
     Copy(PathBuf, PathBuf, OsString),
-    Move(PathBuf, PathBuf),
+    CutPaste(Vec<PathBuf>, PathBuf, u32),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
     Trash(Vec<PathBuf>, usize),
@@ -2271,6 +2274,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
     set_status(hwnd, app, Some("Working… Right-click the file list to cancel where supported.".into()));
     let target = hwnd as usize;
     thread::spawn(move || {
+        let mut consumed_cut_sequence = None;
         let result =
             match operation {
                 Operation::NewFile(dir, name) => zfm::operations::create_file(&dir, &name)
@@ -2291,8 +2295,16 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                     .map(|result| result.message(paths.len())),
                 Operation::MoveItems(paths, dir) => zfm::operations::move_items(&paths, &dir, &cancel, |_| {})
                     .map(|result| result.message(paths.len())),
-                Operation::Move(path, dir) => zfm::operations::move_into(&path, &dir)
-                    .map(|p| format!("Moved to {}", p.display())),
+                Operation::CutPaste(paths, dir, sequence) => {
+                    zfm::operations::move_items(&paths, &dir, &cancel, |_| {}).map(|result| {
+                        if result.completed > 0 { consumed_cut_sequence = Some(sequence); }
+                        let mut status = result.message(paths.len());
+                        if result.completed > 0 && result.failure.is_some() {
+                            status.push_str(" Reselect remaining items before another cut and paste.");
+                        }
+                        status
+                    })
+                }
                 Operation::ArchiveCreate(inputs, output, password) =>
                     zfm::archive_engine::create_items_password(&inputs, &output, &cancel, password.as_deref())
                         .map(|_| format!("Created {}", output.display())),
@@ -2316,7 +2328,7 @@ unsafe fn start_operation(hwnd: H, app: &mut App, operation: Operation) {
                 }
             }
             .map_err(|e| e.to_string());
-        let msg = Box::into_raw(Box::new(OperationMessage { result }));
+        let msg = Box::into_raw(Box::new(OperationMessage { result, consumed_cut_sequence }));
         if unsafe { PostMessageW(target as H, WM_OPERATION_RESULT, 0, msg as isize) } == 0 {
             unsafe {
                 drop(Box::from_raw(msg));
@@ -3245,7 +3257,18 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             let message = Box::from_raw(lp as *mut OperationMessage);
             app.operation_busy = false;
             app.operation_cancel = None;
-            match message.result {
+            let mut result = message.result;
+            if let Some(sequence) = message.consumed_cut_sequence {
+                // Guard against replay if another program temporarily holds the
+                // clipboard and prevents clearing. Do not touch a newer clipboard.
+                app.consumed_cut_sequence = Some(sequence);
+                if windows_actions::clear_cut_if_unchanged(hwnd, sequence) == windows_actions::ClearCut::Unavailable {
+                    if let Ok(status) = &mut result {
+                        status.push_str(" Clipboard could not be cleared; recut items before pasting again.");
+                    }
+                }
+            }
+            match result {
                 Ok(status) => {
                     set_status(hwnd, app, Some(status));
                     load(hwnd, app, Destination::Refresh, true);
@@ -3375,8 +3398,6 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     let indices = selected_indices(app);
                     let message = if indices.is_empty() || indices.len() > zfm::operations::MAX_COPY_ITEMS {
                         "Select between 1 and 1024 items.".to_string()
-                    } else if id == CUT && indices.len() != 1 {
-                        "Cut supports exactly one item.".to_string()
                     } else if id == COPY && indices.iter().any(|i| !app.entries[*i].is_file && !app.entries[*i].is_dir) {
                         "Copy supports regular files and folders only.".to_string()
                     } else {
@@ -3409,10 +3430,14 @@ unsafe extern "system" fn window_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                     );
                 }
                 PASTE if code == 0 => match windows_actions::read_files(hwnd) {
-                    Ok((paths, cut)) => {
+                    Ok((paths, cut, sequence)) => {
                         let dir = app.tabs.current().current().to_path_buf();
                         if cut {
-                            start_operation(hwnd, app, Operation::Move(paths[0].clone(), dir));
+                            if app.consumed_cut_sequence == Some(sequence) {
+                                set_status(hwnd, app, Some("This cut clipboard was already used; select and cut the remaining items again.".into()));
+                                return 0;
+                            }
+                            start_operation(hwnd, app, Operation::CutPaste(paths, dir, sequence));
                         } else {
                             start_operation(hwnd, app, Operation::CopyItems(paths, dir));
                         }
@@ -3849,6 +3874,7 @@ pub fn run() -> Result<(), String> {
             tracking_mouse: false,
             operation_busy: false,
             operation_cancel: None,
+            consumed_cut_sequence: None,
             notice: None,
             token: Arc::new(AtomicU64::new(0)),
             address: ptr::null_mut(),

@@ -25,6 +25,8 @@ public static class ZfmSmoke {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern IntPtr FindWindowW(string cls, string title);
     [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
     public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, string text);
@@ -575,6 +577,84 @@ try {
     if (-not $opened) { throw 'Containing folder did not open.' }
     [void][ZfmSmoke]::SendMessageW($address, 0x000c, [UIntPtr]::Zero, $work)
     [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]105, [IntPtr]::Zero, 2, 3000, [ref]$result)
+
+    # Multi-item cut/paste, including a partial move and safe clipboard cleanup.
+    $cutSource = Join-Path $configRoot 'cut-source'
+    $cutTarget = Join-Path $configRoot 'cut-target'
+    New-Item -ItemType Directory -Path (Join-Path $cutSource 'folder-a') -Force | Out-Null
+    New-Item -ItemType Directory -Path $cutTarget | Out-Null
+    [IO.File]::WriteAllText((Join-Path $cutSource 'folder-a\nested.txt'), 'nested cut')
+    [IO.File]::WriteAllText((Join-Path $cutSource 'z-conflict.txt'), 'original cut')
+    [IO.File]::WriteAllText((Join-Path $cutTarget 'z-conflict.txt'), 'existing')
+    function Navigate-Cut([string]$path, [string]$expected) {
+        [void][ZfmSmoke]::SendMessageW($address, 0x000c, [UIntPtr]::Zero, $path)
+        $r = [UIntPtr]::Zero
+        [void][ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]105, [IntPtr]::Zero, 2, 3000, [ref]$r)
+        for ($i = 0; $i -lt 100; $i++) {
+            $status = New-Object System.Text.StringBuilder 1024
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $status, $status.Capacity)
+            if ($status.ToString() -notmatch '^Loading ' -and [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $expected).ToInt64() -ge 0) { return }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Cut fixture $expected was not listed."
+    }
+    function Select-Cut([string[]]$names) {
+        $r = [UIntPtr]::Zero
+        [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$r)
+        foreach ($name in $names) {
+            $index = [ZfmSmoke]::SendMessageW($list, 0x1a2, [UIntPtr]::Zero, $name).ToInt64()
+            if ($index -lt 0) { throw "Could not select $name for cut." }
+            [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]1, [IntPtr]$index, 2, 3000, [ref]$r)
+        }
+    }
+    function Invoke-CutCommand([int]$command) {
+        $r = [UIntPtr]::Zero
+        if ([ZfmSmoke]::SendMessageTimeoutW($window, 0x111, [UIntPtr]$command, [IntPtr]::Zero, 2, 3000, [ref]$r) -eq [IntPtr]::Zero) { throw "Cut/paste command $command failed." }
+    }
+    function Wait-CutStatus([string]$pattern) {
+        for ($i = 0; $i -lt 100; $i++) {
+            $text = New-Object System.Text.StringBuilder 1024
+            [void][ZfmSmoke]::GetWindowTextW([ZfmSmoke]::GetDlgItem($window, 108), $text, $text.Capacity)
+            if ($text.ToString() -match $pattern) { return }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Cut/paste did not report $pattern."
+    }
+    Navigate-Cut $cutSource 'folder-a'
+    Select-Cut @('folder-a', 'z-conflict.txt')
+    Invoke-CutCommand 131
+    if (-not [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Cut did not publish a file clipboard.' }
+    # Pasting into the source folder fails without consuming the cut clipboard.
+    Invoke-CutCommand 132
+    Wait-CutStatus 'Moved 0 of 2'
+    if (-not [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'A zero-progress failure cleared the cut clipboard.' }
+    Navigate-Cut $cutTarget 'z-conflict.txt'
+    Invoke-CutCommand 132
+    Wait-CutStatus 'Moved 1 of 2'
+    if ([IO.File]::ReadAllText((Join-Path $cutTarget 'folder-a\nested.txt')) -ne 'nested cut' -or
+        [IO.File]::ReadAllText((Join-Path $cutTarget 'z-conflict.txt')) -ne 'existing' -or
+        [IO.File]::ReadAllText((Join-Path $cutSource 'z-conflict.txt')) -ne 'original cut') { throw 'Partial cut/paste did not preserve the conflict.' }
+    if ([ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Consumed cut clipboard was not cleared after partial move.' }
+    Remove-Item -LiteralPath (Join-Path $cutTarget 'z-conflict.txt')
+    Navigate-Cut $cutSource 'z-conflict.txt'
+    Select-Cut @('z-conflict.txt')
+    Invoke-CutCommand 131
+    Navigate-Cut $cutTarget 'folder-a'
+    Invoke-CutCommand 132
+    Wait-CutStatus 'Moved 1 items'
+    if ([IO.File]::ReadAllText((Join-Path $cutTarget 'z-conflict.txt')) -ne 'original cut' -or [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Retry cut/paste failed.' }
+    [IO.File]::WriteAllText((Join-Path $cutSource 'a.txt'), 'a')
+    [IO.File]::WriteAllText((Join-Path $cutSource 'b.txt'), 'b')
+    Navigate-Cut $cutSource 'a.txt'
+    Select-Cut @('a.txt', 'b.txt')
+    Invoke-CutCommand 131
+    Navigate-Cut $cutTarget 'z-conflict.txt'
+    Invoke-CutCommand 132
+    Wait-CutStatus 'Moved 2 items'
+    if ([IO.File]::ReadAllText((Join-Path $cutTarget 'a.txt')) -ne 'a' -or
+        [IO.File]::ReadAllText((Join-Path $cutTarget 'b.txt')) -ne 'b' -or
+        [ZfmSmoke]::IsClipboardFormatAvailable(15)) { throw 'Multi-item cut/paste failed.' }
+    Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.
     if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]143, [IntPtr]::Zero)) { throw 'Could not request settings for saving.' }
