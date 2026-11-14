@@ -1070,6 +1070,7 @@ unsafe fn populate_selection_menu(menu: P, row: P, data: P) {
     menu_action(menu, "Delete permanently…", delete_permanently as P, data);
     (api().gtk_menu_shell_append)(menu, (api().gtk_separator_menu_item_new)());
     menu_action(menu, "Calculate size…", calculate_size as P, data);
+    for (caption, callback) in [("Preview copy impact…", preview_copy as P), ("Preview move impact…", preview_move as P), ("Preview rename impact…", preview_rename as P), ("Preview archive impact…", preview_archive as P)] { menu_action(menu, caption, callback, data); }
     if selected_count == 1 { menu_action(menu, "Properties", properties as P, data); }
  }
 
@@ -1149,6 +1150,9 @@ unsafe extern "C" fn organize_menu(widget: P, data: P) {
         ("Paste", paste_from_clipboard as P), ("Copy to…", copy_to as P),
         ("Move to…", move_to as P), ("Duplicate…", duplicate as P),
         ("Calculate size… (Ctrl+Shift+I)", calculate_size as P),
+        ("Save folder snapshot…", snapshot_save as P),
+        ("Compare folder snapshot…", snapshot_compare as P),
+        ("Review cleanup candidates…", cleanup_review as P),
         ("Cancel operation", cancel_operation as P),
         ("Search subfolders (Ctrl+Shift+F)", search_subfolders as P),
         ("Converter…", show_converter as P), ("Archive manager…", show_archive as P),
@@ -1989,6 +1993,7 @@ enum Operation {
     MoveItems(Vec<PathBuf>, PathBuf),
     ClipboardMove(Vec<PathBuf>, PathBuf),
     CalculateSize(Vec<PathBuf>),
+    Insight(zfm::insights::Job),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -1998,7 +2003,7 @@ struct OperationResult {
     id: u64,
     directory: PathBuf,
     generation: u64,
-    details: bool,
+    details: Option<&'static str>,
     result: Result<String, String>,
 }
 unsafe extern "C" fn operation_result(data: P) -> c_int {
@@ -2008,12 +2013,12 @@ unsafe extern "C" fn operation_result(data: P) -> c_int {
         return 0;
     }
     app.operation = None;
-    if message.details {
-        let text = match message.result { Ok(text) => text, Err(error) => format!("Could not calculate size: {error}") };
-        set_status(app, "Size scan finished; see results.");
+    if let Some(title) = message.details {
+        let text = match message.result { Ok(text) => text, Err(error) => format!("Could not complete {title}: {error}") };
+        set_status(app, "Review finished; see results.");
         let parent = app.window;
         // The modal dialog runs a nested loop; do not retain an App reference.
-        show_size_result(parent, &text);
+        show_report(parent, title, &text);
         return 0;
     }
     match message.result {
@@ -2056,7 +2061,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
     let id = app.operation_id;
     let generation = app.generation.load(Ordering::Relaxed);
     let app_ptr = data as usize;
-    let details = matches!(&operation, Operation::CalculateSize(_));
+    let details = match &operation { Operation::CalculateSize(_) => Some("Size results"), Operation::Insight(job) => Some(job.title()), _ => None };
     set_status(app, "Working…");
     thread::spawn(move || {
         use std::ffi::OsStr;
@@ -2079,6 +2084,7 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             }
             Operation::CalculateSize(paths) => zfm::size_scan::calculate(&paths, &cancel, |_| {})
                 .map(|result| result.message()),
+            Operation::Insight(job) => job.run(&cancel),
             Operation::CopyItems(paths, destination) => {
                 operations::copy_items(&paths, &destination, &cancel).map(|result| result.message(paths.len()))
             }
@@ -2151,10 +2157,82 @@ unsafe extern "C" fn cancel_operation(_: P, data: P) {
         set_status(app, "No operation is running.");
     }
 }
-unsafe fn show_size_result(parent: P, text: &str) {
+unsafe fn launch_insight(data: P, job: zfm::insights::Job) {
+    let dir = (*(data as *mut App)).tabs.current().current().to_path_buf();
+    start_operation(data, dir, Operation::Insight(job));
+}
+unsafe extern "C" fn snapshot_save(_: P, data: P) {
+    let app = &*(data as *mut App);
+    let parent = app.window;
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let alive = app.alive.clone();
+    let dialog = (api().gtk_dialog_new)(); add_class(dialog, "zfm-dialog");
+    (api().gtk_window_set_title)(dialog, c("Save folder snapshot?").as_ptr());
+    (api().gtk_window_set_transient_for)(dialog, parent);
+    (api().gtk_window_set_modal)(dialog, 1);
+    (api().gtk_window_set_destroy_with_parent)(dialog, 1);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let save = (api().gtk_dialog_add_button)(dialog, c("Save snapshot").as_ptr(), -3); add_class(save, "zfm-primary");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let message = label("Save names and metadata of this folder's immediate entries? This replaces the one previously saved baseline, which may belong to another folder. It is not a backup. Filenames are stored in your user configuration.");
+    (api().gtk_label_set_line_wrap)(message, 1);
+    (api().gtk_widget_set_size_request)(message, 480, -1);
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), message, 1, 1, 12);
+    (api().gtk_widget_show_all)(dialog); (api().gtk_widget_grab_focus)(cancel);
+    let response = (api().gtk_dialog_run)(dialog);
+    if response != -1 { (api().gtk_widget_destroy)(dialog); }
+    if response == -3 && alive.load(Ordering::Relaxed) {
+        let app = &*(data as *mut App);
+        if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "Folder changed; snapshot cancelled."); return; }
+        launch_insight(data, zfm::insights::Job::Save(root));
+    }
+}
+unsafe extern "C" fn snapshot_compare(_: P, data: P) {
+    let root = (*(data as *mut App)).tabs.current().current().to_path_buf();
+    launch_insight(data, zfm::insights::Job::Compare(root));
+}
+unsafe extern "C" fn cleanup_review(_: P, data: P) {
+    let root = (*(data as *mut App)).tabs.current().current().to_path_buf();
+    launch_insight(data, zfm::insights::Job::Cleanup(root));
+}
+unsafe fn preview_impact(data: P, kind: zfm::insights::PreviewKind) {
+    let app = &*(data as *mut App);
+    let rows = selected_rows(app.list);
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS { set_status(app, "Select 1–1024 items to preview."); return; }
+    let mut paths = Vec::new();
+    for row in rows {
+        let index = (api().gtk_list_box_row_get_index)(row);
+        match if index >= 0 { app.entries.get(index as usize) } else { None } { Some(entry) => paths.push(entry.path.clone()), None => { set_status(app, "Selection changed; try again."); return; } }
+    }
+    if matches!(kind, zfm::insights::PreviewKind::Rename) && paths.len() != 1 { set_status(app, "Select one item for rename preview."); return; }
+    let root = app.tabs.current().current().to_path_buf();
+    let generation = app.generation.load(Ordering::Relaxed);
+    let alive = app.alive.clone();
+    let parent = app.window;
+    let target = match kind {
+        zfm::insights::PreviewKind::Copy | zfm::insights::PreviewKind::Move => choose_folder(parent),
+        zfm::insights::PreviewKind::Rename => {
+            let initial = paths[0].file_name().and_then(|s| s.to_str()).unwrap_or("");
+            prompt(parent, "Preview rename impact", "Enter a proposed new name (nothing will be changed):", Some(initial)).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(paths[0].parent().unwrap_or(&root).join(name)) } else { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), "Invalid proposed filename."); } None })
+        }
+        zfm::insights::PreviewKind::Archive => prompt(parent, "Preview archive impact", "Enter a proposed archive filename (nothing will be created):", Some("archive.zip")).and_then(|name| if zfm::operations::validate_name(std::ffi::OsStr::new(&name)).is_ok() { Some(root.join(name)) } else { if alive.load(Ordering::Relaxed) { set_status(&*(data as *mut App), "Invalid proposed filename."); } None }),
+    };
+    if let Some(target) = target { if alive.load(Ordering::Relaxed) {
+        let app = &*(data as *mut App);
+        if app.generation.load(Ordering::Relaxed) != generation || app.tabs.current().current() != root { set_status(app, "View changed; preview cancelled."); return; }
+        launch_insight(data, zfm::insights::Job::Impact(kind, paths, target));
+    }}
+}
+unsafe extern "C" fn preview_copy(_: P, data: P) { preview_impact(data, zfm::insights::PreviewKind::Copy); }
+unsafe extern "C" fn preview_move(_: P, data: P) { preview_impact(data, zfm::insights::PreviewKind::Move); }
+unsafe extern "C" fn preview_rename(_: P, data: P) { preview_impact(data, zfm::insights::PreviewKind::Rename); }
+unsafe extern "C" fn preview_archive(_: P, data: P) { preview_impact(data, zfm::insights::PreviewKind::Archive); }
+
+unsafe fn show_report(parent: P, title: &str, text: &str) {
     let dialog = (api().gtk_dialog_new)();
     add_class(dialog, "zfm-dialog");
-    (api().gtk_window_set_title)(dialog, c("Size results").as_ptr());
+    (api().gtk_window_set_title)(dialog, c(title).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
@@ -2166,10 +2244,10 @@ unsafe fn show_size_result(parent: P, text: &str) {
     let view = (api().gtk_text_view_new)();
     (api().gtk_text_view_set_editable)(view, 0);
     (api().gtk_text_view_set_cursor_visible)(view, 0);
-    let report = match text.split_once('\n') {
+    let report = if title == "Size results" { match text.split_once('\n') {
         Some((headline, rest)) => format!("{headline}\n\nDetailed Report:\n{rest}"),
         None => text.to_owned(),
-    };
+    }} else { text.to_owned() };
     (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(&report).as_ptr(), -1);
     (api().gtk_container_add)(scroll, view);
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), scroll, 1, 1, 8);

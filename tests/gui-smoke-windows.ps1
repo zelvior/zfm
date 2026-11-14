@@ -854,6 +854,49 @@ try {
     $result = [UIntPtr]::Zero
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x0115, [UIntPtr]7, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero) { throw 'List scroll failed.' }
     if ([ZfmSmoke]::SendMessageTimeoutW($list, 0x018e, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or $result.ToUInt64() -eq 0) { throw 'List did not scroll to the bottom.' }
+    # Review-only insights: persist and compare a baseline, explain cleanup,
+    # and preview a conflicting rename without changing the selected file.
+    $insightFolder = Join-Path $work 'insight-fixture'
+    New-Item -ItemType Directory -Path $insightFolder | Out-Null
+    [IO.File]::WriteAllText((Join-Path $insightFolder 'before.txt'), 'before')
+    Navigate-Cut $insightFolder 'before.txt'
+    function Read-InsightReport([string]$title, [string]$pattern) {
+        $dialog = [IntPtr]::Zero; $content = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', $title)
+            if ($dialog -ne [IntPtr]::Zero) { $content = [ZfmSmoke]::GetDlgItem($dialog, 1002) }
+            if ($content -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($content -eq [IntPtr]::Zero) { throw "$title report did not appear." }
+        $buffer = New-Object System.Text.StringBuilder 32768; $r = [UIntPtr]::Zero
+        [void][ZfmSmoke]::GetControlText($content, 0x000d, [UIntPtr]$buffer.Capacity, $buffer, 2, 3000, [ref]$r)
+        if ($buffer.ToString() -notmatch $pattern) { throw "Unexpected $title report: $buffer" }
+        [void][ZfmSmoke]::PostMessageW($dialog, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+        for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', $title) -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
+    }
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]174, [IntPtr]::Zero)
+    $confirmSnapshot = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $confirmSnapshot = [ZfmSmoke]::FindWindowW('#32770', 'Save folder snapshot?')
+        if ($confirmSnapshot -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($confirmSnapshot -eq [IntPtr]::Zero) { throw 'Snapshot confirmation did not appear.' }
+    [void][ZfmSmoke]::PostMessageW($confirmSnapshot, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    Read-InsightReport 'Folder snapshot' 'Saved a baseline'
+    Remove-Item -LiteralPath (Join-Path $insightFolder 'before.txt')
+    [IO.File]::WriteAllText((Join-Path $insightFolder 'after.tmp'), '')
+    Navigate-Cut $insightFolder 'after.tmp'
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]175, [IntPtr]::Zero)
+    Read-InsightReport 'Folder changes' 'Removed:.*before.txt[\s\S]*Added:.*after.tmp'
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]176, [IntPtr]::Zero)
+    Read-InsightReport 'Cleanup review' 'empty file.*temporary/backup-like name'
+    if (-not (Test-Path -LiteralPath (Join-Path $insightFolder 'after.tmp'))) { throw 'Cleanup review changed files.' }
+    Select-Cut @('after.tmp')
+    Submit-Destination 179 'Preview rename impact' 'after.tmp'
+    Read-InsightReport 'Operation impact preview' 'destination already exists'
+    if (-not (Test-Path -LiteralPath (Join-Path $insightFolder 'after.tmp'))) { throw 'Impact preview changed files.' }
     Navigate-Cut $work 'example.txt'
 
     # Save a changed value after the other list tests, then verify it survives restart.
