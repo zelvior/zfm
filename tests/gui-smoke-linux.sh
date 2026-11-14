@@ -184,7 +184,7 @@ batch_dialog() {
     xdotool key --window "$window" Escape ctrl+a F2
     local dialog=''
     for _ in $(seq 1 100); do
-        dialog=$(xdotool search --onlyvisible --pid "$pid" --name '^Batch rename$' 2>/dev/null | head -n 1 || true)
+        dialog=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Batch rename$' 2>/dev/null | head -n 1 || true)
         [ -z "$dialog" ] || break
         sleep 0.1
     done
@@ -194,19 +194,18 @@ batch_dialog() {
     xdotool key --window "$dialog" Return
     preview=''
     for _ in $(seq 1 100); do
-        preview=$(xdotool search --onlyvisible --pid "$pid" --name '^Preview batch rename$' 2>/dev/null | head -n 1 || true)
+        preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' 2>/dev/null | head -n 1 || true)
         [ -z "$preview" ] || break
         sleep 0.1
     done
     [ -n "$preview" ] || { echo 'Batch rename preview did not appear.' >&2; exit 1; }
-    echo "DEBUG preview $preview $(xdotool getwindowname "$preview") $(xdotool getwindowgeometry --shell "$preview" | tr '\n' ' ')" >&2
     xdotool windowfocus --sync "$preview"
     sleep 0.5
 }
 batch_dialog
 xdotool key --window "$preview" Escape
 for _ in $(seq 1 100); do
-    if ! xdotool search --onlyvisible --pid "$pid" --name '^Preview batch rename$' >/dev/null 2>&1; then break; fi
+    if ! xdotool search --all --onlyvisible --pid "$pid" --name '^Preview batch rename$' >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
 [ -f "$work/rename-test/alpha.txt" ] && [ ! -e "$work/rename-test/Holiday (1).txt" ]
@@ -221,7 +220,7 @@ done
 if [ ! -f "$work/rename-test/Holiday (1).txt" ]; then
     echo 'Batch rename did not create expected files; directory and windows:' >&2
     find "$work/rename-test" -print >&2
-    xdotool search --onlyvisible --pid "$pid" getwindowname >&2 || true
+    xdotool search --onlyvisible --pid "$pid" 2>/dev/null | while read -r id; do xdotool getwindowname "$id" >&2 || true; done
     cat "$work/stderr" >&2
     exit 1
 fi
