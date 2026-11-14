@@ -21,7 +21,10 @@ pub fn terminal(program: &OsStr, argument: &OsStr, directory: &Path) -> io::Resu
     let mut cmd = Command::new(program); cmd.current_dir(directory);
     if !argument.is_empty() { cmd.arg(argument); }
     #[cfg(windows)] { use std::os::windows::process::CommandExt; cmd.creation_flags(0x0000_0010); }
-    cmd.spawn()?; Ok(())
+    let mut child = cmd.spawn()?;
+    // Reap the terminal after it exits; dropping Child alone leaves a zombie on Unix.
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Ok(())
 }
 fn collect<R: Read + Send + 'static>(mut reader: R) -> mpsc::Receiver<(Vec<u8>, bool)> {
     let (tx, rx) = mpsc::sync_channel(1);

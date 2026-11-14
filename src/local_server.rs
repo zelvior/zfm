@@ -38,7 +38,7 @@ impl Server {
             while !quit.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => { let _ = handle(&mut stream, &root, &token, port, &quit); }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(30)),
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset) => std::thread::sleep(Duration::from_millis(30)),
                     Err(_) => break,
                 }
             }
@@ -124,9 +124,21 @@ fn handle(stream: &mut TcpStream, root: &Path, token: &str, port: u16, stop: &At
 mod tests {
     use super::*;
     fn request(port: u16, target: &str, host: &str, method: &str) -> String {
-        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(c, "{method} {target} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
-        let mut text = String::new(); c.read_to_string(&mut text).unwrap(); text
+        let wire = format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        for attempt in 0..3 {
+            let result = (|| -> io::Result<String> {
+                let mut c = TcpStream::connect(("127.0.0.1", port))?;
+                c.set_read_timeout(Some(Duration::from_secs(5)))?;
+                c.write_all(wire.as_bytes())?;
+                let mut text = String::new(); c.read_to_string(&mut text)?; Ok(text)
+            })();
+            match result {
+                Ok(text) => return text,
+                Err(e) if attempt < 2 && matches!(e.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted) => std::thread::sleep(Duration::from_millis(30)),
+                Err(e) => panic!("HTTP request failed: {e}"),
+            }
+        }
+        unreachable!()
     }
     #[test] fn loopback_token_and_traversal() {
         let root = crate::test_support::scratch_dir("http"); fs::write(root.join("index.html"), "hello").unwrap();
