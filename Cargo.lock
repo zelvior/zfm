@@ -3,6 +3,10 @@
 version = 3
 
 [[package]]
+name = "qrcodegen"
+version = "1.8.0"
+
+[[package]]
 name = "regex-lite"
 version = "0.1.6"
 
@@ -10,6 +14,7 @@ version = "0.1.6"
 name = "zfm"
 version = "0.1.0"
 dependencies = [
+ "qrcodegen",
  "regex-lite",
 ]
 

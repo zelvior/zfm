@@ -37,6 +37,8 @@ pub const README: &str = concat!(
     include_str!(env!("ZFM_REGEX_MIT_PATH")),
     "\n\n--- regex-lite 0.1.6 LICENSE-APACHE ---\n",
     include_str!(env!("ZFM_REGEX_APACHE_PATH")),
+    "\n\n--- qrcodegen 1.8.0 MIT notice ---\n",
+    include_str!(env!("ZFM_QRCODEGEN_MIT_PATH")),
     "\n\n--- 7-Zip license and notices ---\n",
     include_str!(env!("ZFM_7ZIP_NOTICE_PATH")),
     "\n\n--- GNU LGPL license ---\n",

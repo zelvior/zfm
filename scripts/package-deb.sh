@@ -50,6 +50,8 @@ install -m 644 "$root/packaging/zfm.svg" "$stage/usr/share/icons/hicolor/scalabl
     cat "$root/vendor/regex-lite/LICENSE-MIT"
     printf '\n\n--- regex-lite 0.1.6 LICENSE-APACHE ---\n'
     cat "$root/vendor/regex-lite/LICENSE-APACHE"
+    printf '\n\n--- qrcodegen 1.8.0 MIT notice ---\n'
+    cat "$root/vendor/qrcodegen/LICENSE-MIT"
 } > "$stage/usr/share/doc/zfm/README"
 chmod 644 "$stage/usr/share/doc/zfm/README"
 install -m 644 "$root/LICENSE" "$stage/usr/share/doc/zfm/copyright"

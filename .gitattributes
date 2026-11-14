@@ -1,1 +1,4 @@
 *.cmd text eol=crlf
+
+# Preserve upstream formatting in the vendored QR source.
+vendor/qrcodegen/src/lib.rs whitespace=-blank-at-eol

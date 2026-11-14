@@ -31,3 +31,5 @@
 - Scratchpad text remains in the editor until explicitly saved or discarded; a saved file is ordinary unencrypted local data and may be retained by backups or other software.
 
 - Optional mount actions pass the chosen image path, and on Linux a mountpoint, to installed OS/FUSE tools. Mounts can expose file contents to other programs with access and can persist after ZFM exits. Windows system autoplay policies may apply.
+
+- The offline clipboard QR action reads clipboard text only after confirmation and renders it locally without a network service or image file. The code is plaintext and can be read by anyone seeing or recording it. Clipboard history, screenshots and recipient copies are outside ZFM's control; process memory is not securely erased.

@@ -1,6 +1,6 @@
 [workspace]
 members = ["installer"]
-exclude = ["vendor/regex-lite"]
+exclude = ["vendor/regex-lite", "vendor/qrcodegen"]
 
 [package]
 name = "zfm"
@@ -13,6 +13,7 @@ license = "Apache-2.0"
 
 [dependencies]
 regex-lite = { path = "vendor/regex-lite", version = "=0.1.6" }
+qrcodegen = { path = "vendor/qrcodegen", version = "=1.8.0" }
 
 [profile.release]
 opt-level = "s"
