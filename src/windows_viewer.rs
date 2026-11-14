@@ -125,6 +125,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
         }
         state.close = create("BUTTON", text("Close").as_ptr(), WS_TABSTOP | BS_OWNERDRAW, 2);
         for b in [state.minus, state.fit, state.plus, state.previous, state.next, state.page_label, state.close] { if !b.is_null() { SendMessageW(b, WM_SETFONT, (*state.theme).font as usize, 1); } }
+        for button in [state.minus, state.fit, state.plus, state.previous, state.next, state.close] { style_dialog_button(button); }
         layout(hwnd, state);
         if state.office_receiver.is_some() && SetTimer(hwnd, 1, 100, ptr::null_mut()) == 0 {
             if let Some(cancel) = &state.office_cancel { cancel.store(true, Ordering::Relaxed); }
@@ -171,6 +172,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
                                     state.plus = make("BUTTON", "+", WS_TABSTOP | BS_OWNERDRAW, 12);
                                     state.previous = make("BUTTON", "Previous", WS_TABSTOP | BS_OWNERDRAW, 13);
                                     state.next = make("BUTTON", "Next", WS_TABSTOP | BS_OWNERDRAW, 14);
+                                    for button in [state.minus, state.fit, state.plus, state.previous, state.next] { style_dialog_button(button); }
                                     state.page_label = make("STATIC", &format!("1 / {count}"), 0, 15);
                                     for control in [state.minus, state.fit, state.plus, state.previous, state.next, state.page_label] {
                                         if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }

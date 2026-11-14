@@ -285,6 +285,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
             if control.is_null() { EndDialog(hwnd, -1); return 1; }
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
         }
+        for button in [ok, cancel] { style_dialog_button(button); }
         SendMessageW(heading, WM_SETFONT, (*state.theme).subtitle_font as usize, 1);
         SendMessageW(hwnd, 0x0401, 1, 0); // DM_SETDEFID
         SetFocus(state.edit);
@@ -453,6 +454,7 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
         for control in [mark, heading, message, yes, cancel] {
             if !control.is_null() { SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1); }
         }
+        for button in [yes, cancel] { style_dialog_button(button); }
         SendMessageW(heading, WM_SETFONT, (*state.theme).subtitle_font as usize, 1);
         // Make cancellation the default for destructive or extract actions.
         SendMessageW(hwnd, 0x0401, if state.has_cancel { 2 } else { 1 }, 0);

@@ -124,11 +124,13 @@ api! {
     gtk_switch_set_active: unsafe extern "C" fn(P, c_int),
     gtk_switch_get_active: unsafe extern "C" fn(P) -> c_int,
     gtk_label_set_text: unsafe extern "C" fn(P, *const c_char),
+    gtk_label_get_text: unsafe extern "C" fn(P) -> *const c_char,
     gtk_label_set_xalign: unsafe extern "C" fn(P, f32),
     gtk_label_set_line_wrap: unsafe extern "C" fn(P, c_int),
     gtk_editable_set_editable: unsafe extern "C" fn(P, c_int),
     gtk_label_set_ellipsize: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_new: unsafe extern "C" fn(P, P) -> P,
+    gtk_scrolled_window_set_overlay_scrolling: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_get_hadjustment: unsafe extern "C" fn(P) -> P,
     gtk_adjustment_clamp_page: unsafe extern "C" fn(P, f64, f64),
     gtk_widget_translate_coordinates: unsafe extern "C" fn(P, P, c_int, c_int, *mut c_int, *mut c_int) -> c_int,
@@ -274,6 +276,13 @@ unsafe fn add_class(widget: P, class_name: &str) {
 unsafe fn label(text: &str) -> P {
     (api().gtk_label_new)(c(text).as_ptr())
 }
+// Always expose the real scrollbar while there is overflow; overlay scrollbars
+// otherwise disappear and can be difficult to discover or drag with a mouse.
+unsafe fn scroll_window() -> P {
+    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    (api().gtk_scrolled_window_set_overlay_scrolling)(scroll, 0);
+    scroll
+}
 unsafe fn wrapped_label(text: &str) -> P {
     let widget = label(text);
     (api().gtk_label_set_xalign)(widget, 0.0);
@@ -281,6 +290,15 @@ unsafe fn wrapped_label(text: &str) -> P {
     (api().gtk_label_set_line_wrap_mode)(widget, 2); // PANGO_WRAP_WORD_CHAR
     (api().gtk_label_set_max_width_chars)(widget, 72);
     widget
+}
+// Ellipsized status messages remain available in full via tooltip and a11y.
+unsafe extern "C" fn status_label_changed(widget: P, _: P, _: P) {
+    (api().gtk_widget_set_tooltip_text)(widget, (api().gtk_label_get_text)(widget));
+}
+unsafe fn ellipsized_status(widget: P) {
+    (api().gtk_label_set_ellipsize)(widget, 3);
+    connect(widget, "notify::label", status_label_changed as P, ptr::null_mut());
+    status_label_changed(widget, ptr::null_mut(), ptr::null_mut());
 }
 unsafe fn set_status(app: &App, text: &str) {
     (api().gtk_label_set_text)(app.status, c(text).as_ptr());
@@ -1327,7 +1345,7 @@ pub fn run() -> Result<(), String> {
         // Split workspace: left sidebar + right table pane
         let content = (api().gtk_box_new)(0, 0);
         (api().gtk_box_pack_start)(outer, content, 1, 1, 0);
-        let sidebar_scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        let sidebar_scroll = scroll_window();
         (api().gtk_widget_set_size_request)(sidebar_scroll, 150, -1);
         (api().gtk_box_pack_start)(content, sidebar_scroll, 0, 0, 0);
         let sidebar = (api().gtk_box_new)(1, 0);
@@ -1340,7 +1358,7 @@ pub fn run() -> Result<(), String> {
         add_class(col_bar, "zfm-col-bar");
         (api().gtk_box_pack_start)(right_pane, col_bar, 0, 0, 0);
 
-        let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        let scroll = scroll_window();
         (api().gtk_box_pack_start)(right_pane, scroll, 1, 1, 0);
         let list = (api().gtk_list_box_new)();
         (api().gtk_widget_set_can_focus)(list, 1);
@@ -1355,7 +1373,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_box_pack_start)(status_box, status_icon, 0, 0, 8);
         let status = label("Ready");
         (api().gtk_label_set_xalign)(status, 0.0);
-        (api().gtk_label_set_ellipsize)(status, 3);
+        ellipsized_status(status);
         (api().gtk_box_pack_start)(status_box, status, 1, 1, 0);
         (api().gtk_box_pack_start)(outer, status_box, 0, 0, 0);
 
@@ -1433,7 +1451,7 @@ pub fn run() -> Result<(), String> {
         let tab_background = (api().gtk_event_box_new)();
         (api().gtk_container_add)(tab_background, tab_strip);
         // Many tabs must not force the main window wider than the screen.
-        let tab_scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        let tab_scroll = scroll_window();
         (*app).tab_scroll = tab_scroll;
         (api().gtk_scrolled_window_set_policy)(tab_scroll, 1, 2); // automatic / never
         (api().gtk_widget_set_size_request)(tab_scroll, 72, -1);
@@ -1833,7 +1851,7 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_widget_set_margin_top)(layout, 12);
     (api().gtk_widget_set_margin_bottom)(layout, 12);
     (api().gtk_container_add)(window, layout);
-    let caption = label("Offline converter · audio: PCM 8/16-bit mono/stereo; metadata is not preserved");
+    let caption = wrapped_label("Offline converter · audio: PCM 8/16-bit mono/stereo; metadata is not preserved");
     (api().gtk_label_set_xalign)(caption, 0.0);
     (api().gtk_box_pack_start)(layout, caption, 0, 0, 0);
     let mode = (api().gtk_combo_box_text_new)();
@@ -1862,6 +1880,7 @@ unsafe fn create_converter(parent: P) -> P {
     (api().gtk_box_pack_start)(layout, progress, 0, 0, 0);
     let status = label("Output must not already exist.");
     (api().gtk_label_set_xalign)(status, 0.0);
+    ellipsized_status(status);
     (api().gtk_box_pack_start)(layout, status, 0, 0, 0);
     let actions = (api().gtk_box_new)(0, 4);
     (api().gtk_box_pack_start)(layout, actions, 0, 0, 0);
@@ -2255,7 +2274,7 @@ unsafe fn show_report(parent: P, title: &str, text: &str) {
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     (api().gtk_window_set_default_size)(dialog, 600, 300);
     (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
-    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    let scroll = scroll_window();
     (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
     (api().gtk_widget_set_size_request)(scroll, 520, 200);
     let view = (api().gtk_text_view_new)();
@@ -2346,7 +2365,7 @@ unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     add_class(rename_button, "zfm-primary");
     (api().gtk_dialog_set_default_response)(dialog, -6);
     let area = (api().gtk_dialog_get_content_area)(dialog);
-    let scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+    let scroll = scroll_window();
     (api().gtk_scrolled_window_set_policy)(scroll, 1, 1);
     (api().gtk_widget_set_size_request)(scroll, 580, 300);
     let view = (api().gtk_text_view_new)();

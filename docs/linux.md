@@ -44,6 +44,7 @@ F2 or Rename on 2–100 selected regular files in the same folder opens a number
 ### Dialog and scrollbar styling
 
 The GTK interface uses grouped settings and a shared dark scrollbar style for
-ZFM's GTK scrolled windows. Linux exposes only the preferences supported by its
+ZFM's GTK scrolled windows, with non-overlay scrollbars when content overflows.
+Linux exposes only the preferences supported by its
 interface; drive-specific Windows settings are not shown. Desktop-owned dialogs
 may use the desktop's own styling.

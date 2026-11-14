@@ -258,6 +258,19 @@ try {
     foreach ($id in @(1001, 1002, 1004, 1005, 1006, 1007)) {
         if ([ZfmSmoke]::GetDlgItem($settings, $id) -eq [IntPtr]::Zero) { throw "Settings control $id is missing." }
     }
+    # All controls must remain inside the dialog and the rows must not overlap.
+    $settingsRect = New-Object 'ZfmSmoke+Rect'
+    if (-not [ZfmSmoke]::GetWindowRect($settings, [ref]$settingsRect)) { throw 'Cannot inspect settings dialog bounds.' }
+    $rowRects = @()
+    foreach ($id in @(1010, 1001, 1002, 1004, 1005, 1011, 1006, 1007, 1003, 1, 2)) {
+        $rect = New-Object 'ZfmSmoke+Rect'
+        if (-not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($settings, $id), [ref]$rect)) { throw "Cannot inspect settings control $id." }
+        if ($rect.left -lt $settingsRect.left -or $rect.right -gt $settingsRect.right -or $rect.top -lt $settingsRect.top -or $rect.bottom -gt $settingsRect.bottom) { throw "Settings control $id is clipped." }
+        if ($id -ne 2) { $rowRects += $rect }
+    }
+    for ($i = 1; $i -lt $rowRects.Count; $i++) {
+        if ($rowRects[$i].top -lt $rowRects[$i-1].bottom) { throw "Settings rows overlap at index $i." }
+    }
     # The custom-painted switches retain native checkbox state and activation.
     $switch = [ZfmSmoke]::GetDlgItem($settings, 1001)
     $result = [UIntPtr]::Zero

@@ -11,6 +11,14 @@ struct SettingsDialog {
     card_brush: H,
 }
 
+// Use the dialog's font-derived units for both the painted cards and the
+// controls, so the template and its contents scale together.
+unsafe fn dialog_rect(hwnd: H, x: i32, y: i32, w: i32, h: i32) -> BoxRect {
+    let mut r = Rect { left: x, top: y, right: x + w, bottom: y + h };
+    MapDialogRect(hwnd, &mut r);
+    BoxRect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)
+}
+
 // Keep the native auto-checkbox state, keyboard handling and accessibility, but
 // replace its check mark with the same switch treatment used in the toolbar.
 unsafe extern "system" fn switch_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam, _: usize, data: usize) -> LResult {
@@ -23,10 +31,11 @@ unsafe extern "system" fn switch_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam,
         if w <= 4096 && h <= 1024 {
             let mut pixels = vec![Rgb(40, 46, 56).pixel(); (w * h) as usize];
             let checked = SendMessageW(hwnd, 0x00f0, 0, 0) == 1;
-            ui_theme::paint_toggle_switch(&mut pixels, w, h, 2, (h - 16) / 2, checked, false);
+            let enabled = IsWindowEnabled(hwnd) != 0;
+            ui_theme::paint_toggle_switch(&mut pixels, w, h, 2, (h - 16) / 2, checked, enabled && button_hovered(hwnd));
             let caption = control_value(hwnd).to_string_lossy().into_owned();
             blit_pixels(dc, 0, 0, w, h, &pixels, |mem| {
-                draw_text_in(mem, (*(data as *const Theme)).font, ui_theme::TEXT_BRIGHT,
+                draw_text_in(mem, (*(data as *const Theme)).font, if enabled { ui_theme::TEXT_BRIGHT } else { ui_theme::TEXT_DIM },
                     BoxRect::new(44, 0, (w - 46).max(1), h), &caption,
                     DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
                 if GetFocus() == hwnd {
@@ -38,8 +47,12 @@ unsafe extern "system" fn switch_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam,
         EndPaint(hwnd, &paint);
         return 0;
     }
+    if msg == WM_MOUSEMOVE {
+        let mut tracking = TrackMouseEvent { size: std::mem::size_of::<TrackMouseEvent>() as u32, flags: 2, hwnd_track: hwnd, hover_time: 0 };
+        TrackMouseEvent(&mut tracking);
+    }
     let result = DefSubclassProc(hwnd, msg, wp, lp);
-    if matches!(msg, 0x00f1 | 0x0007 | 0x0008 | 0x0202 | 0x0101 | 0x000a) {
+    if matches!(msg, 0x00f1 | 0x0007 | 0x0008 | 0x0202 | 0x0101 | 0x000a | WM_MOUSEMOVE | WM_MOUSELEAVE | 0x000c) {
         InvalidateRect(hwnd, ptr::null(), 0);
     }
     result
@@ -57,28 +70,28 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         apply_dark_window_chrome(hwnd);
         let instance = GetModuleHandleW(ptr::null());
         let make = |class: &str, caption: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: usize| {
+            let r = dialog_rect(hwnd, x, y, w, h);
             CreateWindowExW(0, text(class).as_ptr(), text(caption).as_ptr(), WS_CHILD | WS_VISIBLE | style,
-                x, y, w, h, hwnd, id as H, instance, ptr::null_mut())
+                r.x, r.y, r.width, r.height, hwnd, id as H, instance, ptr::null_mut())
         };
-        let mut rect: Rect = std::mem::zeroed();
-        GetClientRect(hwnd, &mut rect);
-        let width = rect.right;
         state.card_brush = CreateSolidBrush(Rgb(40, 46, 56).colorref());
         state.headings = [
-            make("STATIC", "File list", 0, 36, 28, width - 72, 24, 1010),
-            make("STATIC", "Drives and navigation", 0, 36, 190, width - 72, 24, 1011),
+            make("STATIC", "File list", 0, 24, 17, 292, 16, 1010),
+            make("STATIC", "Drives and navigation", 0, 24, 123, 292, 16, 1011),
         ];
         state.controls = [
-            make("BUTTON", "Show hidden files", WS_TABSTOP | 3, 36, 55, width - 72, 24, 1001),
-            make("BUTTON", "Sort ascending", WS_TABSTOP | 3, 36, 81, width - 72, 24, 1002),
-            make("BUTTON", "Automatically refresh the current folder", WS_TABSTOP | 3, 36, 107, width - 72, 24, 1004),
-            make("BUTTON", "Use compact view at startup", WS_TABSTOP | 3, 36, 133, width - 72, 24, 1005),
-            make("BUTTON", "Show drive volume names", WS_TABSTOP | 3, 36, 217, width - 72, 24, 1006),
-            make("BUTTON", "Expand Computer at startup", WS_TABSTOP | 3, 36, 243, width - 72, 24, 1007),
+            make("BUTTON", "Show hidden files", WS_TABSTOP | 3, 24, 34, 292, 16, 1001),
+            make("BUTTON", "Sort ascending", WS_TABSTOP | 3, 24, 52, 292, 16, 1002),
+            make("BUTTON", "Automatically refresh the current folder", WS_TABSTOP | 3, 24, 70, 292, 16, 1004),
+            make("BUTTON", "Use compact view at startup", WS_TABSTOP | 3, 24, 88, 292, 16, 1005),
+            make("BUTTON", "Show drive volume names", WS_TABSTOP | 3, 24, 140, 292, 16, 1006),
+            make("BUTTON", "Expand Computer at startup", WS_TABSTOP | 3, 24, 158, 292, 16, 1007),
         ];
-        let note = make("STATIC", "Drive changes are detected automatically. Apply saves these preferences.", 1, 20, 300, width - 40, 36, 1003);
-        let apply = make("BUTTON", "Apply", WS_TABSTOP | BS_OWNERDRAW, width / 2 - 94, 344, 88, 30, 1);
-        let cancel = make("BUTTON", "Cancel", WS_TABSTOP | BS_OWNERDRAW, width / 2 + 6, 344, 88, 30, 2);
+        let note = make("STATIC", "Drive changes are detected automatically. Apply saves these preferences.", 1, 12, 194, 316, 24, 1003);
+        let apply = make("BUTTON", "Apply", WS_TABSTOP | BS_OWNERDRAW, 108, 232, 60, 20, 1);
+        let cancel = make("BUTTON", "Cancel", WS_TABSTOP | BS_OWNERDRAW, 172, 232, 60, 20, 2);
+        style_dialog_button(apply);
+        style_dialog_button(cancel);
         for control in state.controls.into_iter().chain(state.headings).chain([note, apply, cancel]) {
             if control.is_null() { EndDialog(hwnd, -1); return 1; }
             SendMessageW(control, WM_SETFONT, (*state.theme).font as usize, 1);
@@ -120,7 +133,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
             let (w, h) = (r.right, r.bottom);
             if w > 0 && h > 0 && w <= 4096 && h <= 4096 {
                 let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
-                for card in [BoxRect::new(20, 18, w - 40, 148), BoxRect::new(20, 180, w - 40, 103)] {
+                for card in [dialog_rect(hwnd, 12, 10, 316, 100), dialog_rect(hwnd, 12, 116, 316, 70)] {
                     ui_theme::paint_rounded_box(&mut pixels, w, h, card, 9.0,
                         Rgb(40, 46, 56), Rgb(40, 46, 56), Some(Rgb(30, 35, 43)));
                 }
@@ -133,7 +146,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         0x0136 => (*state.theme).window_brush as isize,
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
-            let in_card = state.headings.contains(&(lp as H));
+            let in_card = state.headings.contains(&(lp as H)) || state.controls.contains(&(lp as H));
             SetBkColor(wp as H, if in_card { Rgb(40, 46, 56).colorref() } else { ui_theme::HEADER_TOP.colorref() });
             if in_card && !state.card_brush.is_null() { state.card_brush as isize } else { (*state.theme).window_brush as isize }
         }
