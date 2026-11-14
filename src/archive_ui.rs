@@ -929,7 +929,7 @@ unsafe fn archive_confirm(parent: P, destination: &str) -> bool {
     add_class(heading, "zfm-dialog-heading");
     (api().gtk_label_set_xalign)(heading, 0.0);
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), heading, 0, 0, 8);
-    let message = label(&format!("Extract into {destination}?\nExisting files are not overwritten. Earlier files remain if extraction stops.\nArchives may contain dangerous files; never run untrusted content."));
+    let message = wrapped_label(&format!("Extract into {destination}?\nExisting files are not overwritten. Earlier files remain if extraction stops.\nArchives may contain dangerous files; never run untrusted content."));
     (api().gtk_widget_set_margin_start)(message, 12);
     (api().gtk_widget_set_margin_end)(message, 12);
     (api().gtk_widget_set_margin_top)(message, 12);

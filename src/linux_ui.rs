@@ -129,6 +129,13 @@ api! {
     gtk_editable_set_editable: unsafe extern "C" fn(P, c_int),
     gtk_label_set_ellipsize: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_new: unsafe extern "C" fn(P, P) -> P,
+    gtk_scrolled_window_get_hadjustment: unsafe extern "C" fn(P) -> P,
+    gtk_adjustment_clamp_page: unsafe extern "C" fn(P, f64, f64),
+    gtk_widget_translate_coordinates: unsafe extern "C" fn(P, P, c_int, c_int, *mut c_int, *mut c_int) -> c_int,
+    gtk_widget_get_allocated_width: unsafe extern "C" fn(P) -> c_int,
+    gtk_text_view_set_wrap_mode: unsafe extern "C" fn(P, c_int),
+    gtk_label_set_line_wrap_mode: unsafe extern "C" fn(P, c_int),
+    gtk_label_set_max_width_chars: unsafe extern "C" fn(P, c_int),
     gtk_scrolled_window_set_policy: unsafe extern "C" fn(P, c_int, c_int),
     gtk_list_box_new: unsafe extern "C" fn() -> P,
     gtk_list_box_row_new: unsafe extern "C" fn() -> P,
@@ -201,6 +208,7 @@ fn c(s: &str) -> CString {
 struct App {
     tabs: Tabs,
     tab_strip: P,
+    tab_scroll: P,
     generation: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
     office_cancels: Vec<Arc<AtomicBool>>,
@@ -265,6 +273,14 @@ unsafe fn add_class(widget: P, class_name: &str) {
 }
 unsafe fn label(text: &str) -> P {
     (api().gtk_label_new)(c(text).as_ptr())
+}
+unsafe fn wrapped_label(text: &str) -> P {
+    let widget = label(text);
+    (api().gtk_label_set_xalign)(widget, 0.0);
+    (api().gtk_label_set_line_wrap)(widget, 1);
+    (api().gtk_label_set_line_wrap_mode)(widget, 2); // PANGO_WRAP_WORD_CHAR
+    (api().gtk_label_set_max_width_chars)(widget, 72);
+    widget
 }
 unsafe fn set_status(app: &App, text: &str) {
     (api().gtk_label_set_text)(app.status, c(text).as_ptr());
@@ -787,7 +803,7 @@ unsafe extern "C" fn properties(_: P, data: P) {
     (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
     (api().gtk_box_pack_start)(
         (api().gtk_dialog_get_content_area)(dialog),
-        label(&details),
+        wrapped_label(&details),
         0,
         0,
         12,
@@ -1362,6 +1378,7 @@ pub fn run() -> Result<(), String> {
         let app = Box::into_raw(Box::new(App {
             tabs: Tabs::new(initial),
             tab_strip: ptr::null_mut(),
+            tab_scroll: ptr::null_mut(),
             generation: Arc::new(AtomicU64::new(0)),
             alive: Arc::new(AtomicBool::new(true)),
             office_cancels: Vec::new(),
@@ -1417,6 +1434,7 @@ pub fn run() -> Result<(), String> {
         (api().gtk_container_add)(tab_background, tab_strip);
         // Many tabs must not force the main window wider than the screen.
         let tab_scroll = (api().gtk_scrolled_window_new)(ptr::null_mut(), ptr::null_mut());
+        (*app).tab_scroll = tab_scroll;
         (api().gtk_scrolled_window_set_policy)(tab_scroll, 1, 2); // automatic / never
         (api().gtk_widget_set_size_request)(tab_scroll, 72, -1);
         (api().gtk_container_add)(tab_scroll, tab_background);
@@ -1906,8 +1924,7 @@ unsafe fn prompt(parent: P, title: &str, message: &str, initial: Option<&str>) -
     add_class(heading, "zfm-dialog-heading");
     (api().gtk_label_set_xalign)(heading, 0.0);
     (api().gtk_box_pack_start)(area, heading, 0, 0, 8);
-    let description = label(message);
-    (api().gtk_label_set_line_wrap)(description, 1);
+    let description = wrapped_label(message);
     (api().gtk_label_set_xalign)(description, 0.0);
     (api().gtk_widget_set_margin_start)(description, 12);
     (api().gtk_widget_set_margin_end)(description, 12);
@@ -2244,6 +2261,7 @@ unsafe fn show_report(parent: P, title: &str, text: &str) {
     let view = (api().gtk_text_view_new)();
     (api().gtk_text_view_set_editable)(view, 0);
     (api().gtk_text_view_set_cursor_visible)(view, 0);
+    (api().gtk_text_view_set_wrap_mode)(view, 3); // GTK_WRAP_WORD_CHAR
     let report = if title == "Size results" { match text.split_once('\n') {
         Some((headline, rest)) => format!("{headline}\n\nDetailed Report:\n{rest}"),
         None => text.to_owned(),
@@ -2646,6 +2664,22 @@ unsafe extern "C" fn tab_background_button(widget: P, event: P, data: P) -> c_in
     }
     0
 }
+// GTK allocates the tab strip after this callback returns. Hold references until
+// an idle runs after layout, then reveal the active tab without stealing focus.
+struct RevealTab { scroll: P, strip: P, tab: P }
+unsafe extern "C" fn reveal_tab(data: P) -> c_int {
+    let request = Box::from_raw(data as *mut RevealTab);
+    let (mut x, mut y) = (0, 0);
+    if (api().gtk_widget_translate_coordinates)(request.tab, request.strip, 0, 0, &mut x, &mut y) != 0 {
+        let adjustment = (api().gtk_scrolled_window_get_hadjustment)(request.scroll);
+        let width = (api().gtk_widget_get_allocated_width)(request.tab);
+        if !adjustment.is_null() && width > 0 {
+            (api().gtk_adjustment_clamp_page)(adjustment, x as f64, (x + width) as f64);
+        }
+    }
+    for object in [request.scroll, request.strip, request.tab] { (api().g_object_unref)(object); }
+    0
+}
 unsafe fn rebuild_tabs(app: &App) {
     let data = app as *const App as usize;
     let strip = app.tab_strip;
@@ -2679,6 +2713,15 @@ unsafe fn rebuild_tabs(app: &App) {
         connect(widget, "button-press-event", tab_button as P, callback_data);
         (api().gtk_box_pack_start)(strip, widget, 0, 0, 0);
         (api().gtk_widget_show_all)(widget);
+        if index == app.tabs.active() && !app.tab_scroll.is_null() {
+            let request = Box::new(RevealTab {
+                scroll: (api().g_object_ref)(app.tab_scroll),
+                strip: (api().g_object_ref)(strip),
+                tab: (api().g_object_ref)(widget),
+            });
+            let raw = Box::into_raw(request) as P;
+            if (api().g_idle_add)(reveal_tab, raw) == 0 { reveal_tab(raw); }
+        }
     }
 }
 unsafe fn activate_tab(data: P) {

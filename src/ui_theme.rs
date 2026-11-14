@@ -356,6 +356,38 @@ impl WindowMetrics {
     }
 }
 
+/// Geometry for the visible part of the Windows tab strip. When tabs overflow,
+/// keep the active tab visible and provide previous/next controls.
+#[derive(Debug)]
+pub struct TabStripLayout {
+    pub tabs: Vec<(usize, BoxRect)>,
+    pub previous: Option<BoxRect>,
+    pub next: Option<BoxRect>,
+}
+pub fn tab_strip_layout(m: &WindowMetrics, count: usize, active: usize) -> TabStripLayout {
+    let mut result = TabStripLayout { tabs: Vec::new(), previous: None, next: None };
+    let avail = (m.dynamic_tabs_right - m.dynamic_tabs_left).max(0);
+    if count == 0 || avail < 64 { return result; }
+    let gap = 4;
+    let total = count.min(i32::MAX as usize) as i32;
+    let overflow = total.saturating_mul(64).saturating_add(total.saturating_sub(1).saturating_mul(gap)) > avail;
+    let (left, usable) = if overflow {
+        let left_arrow = BoxRect::new(m.dynamic_tabs_left, m.new_tab.y, 22, m.new_tab.height);
+        let right_arrow = BoxRect::new(m.dynamic_tabs_right - 22, m.new_tab.y, 22, m.new_tab.height);
+        result.previous = Some(left_arrow);
+        result.next = Some(right_arrow);
+        (left_arrow.right() + gap, (avail - 52).max(0))
+    } else { (m.dynamic_tabs_left, avail) };
+    let capacity = ((usable + gap) / (64 + gap)).max(1) as usize;
+    let visible = count.min(capacity);
+    let first = if overflow { active.min(count - 1).saturating_sub(visible / 2).min(count - visible) } else { 0 };
+    let per = ((usable - gap * (visible as i32 - 1)) / visible as i32).clamp(1, 136);
+    for offset in 0..visible {
+        result.tabs.push((first + offset, BoxRect::new(left + offset as i32 * (per + gap), m.new_tab.y, per, m.new_tab.height)));
+    }
+    result
+}
+
 pub fn blend_pixel(buf: &mut [u32], width: i32, x: i32, y: i32, color: Rgb, alpha: f32) {
     if x < 0 || y < 0 || x >= width || alpha <= 0.001 {
         return;
@@ -1421,6 +1453,31 @@ mod tests {
             assert!(m.col_modified.right() <= m.col_type.x);
             assert!(m.col_type.right() <= m.col_size.x);
             assert!(m.col_size.right() <= m.list.right());
+        }
+    }
+
+    #[test]
+    fn overflow_tabs_keep_active_visible_and_controls_do_not_overlap() {
+        let metrics = WindowMetrics::new(720, 600);
+        assert!(tab_strip_layout(&metrics, 0, 0).tabs.is_empty());
+        let fitting = tab_strip_layout(&metrics, 2, 0);
+        assert_eq!(fitting.tabs.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(fitting.previous.is_none() && fitting.next.is_none());
+        for width in [720, 760, 1024, 1440] {
+            let metrics = WindowMetrics::new(width, 600);
+            for count in [2, 6, 10, 50] {
+                for active in 0..count {
+                    let layout = tab_strip_layout(&metrics, count, active);
+                    assert!(layout.tabs.iter().any(|(idx, _)| *idx == active));
+                    for pair in layout.tabs.windows(2) { assert!(pair[0].1.right() <= pair[1].1.x); }
+                    for (_, rect) in &layout.tabs {
+                        assert!(rect.x >= metrics.dynamic_tabs_left && rect.right() <= metrics.dynamic_tabs_right);
+                        if let Some(prev) = layout.previous { assert!(prev.right() <= rect.x); }
+                        if let Some(next) = layout.next { assert!(rect.right() <= next.x); }
+                    }
+                    assert_eq!(layout.previous.is_some(), layout.next.is_some());
+                }
+            }
         }
     }
 

@@ -136,6 +136,14 @@ unsafe extern "system" fn dialog_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam)
     if state.is_null() { return 0; }
     let state = &mut *state;
     match msg {
+        WM_GETMINMAXINFO if lp != 0 => {
+            // PDF controls occupy the bottom row through x=424, followed by Close.
+            // Reserve enough room for all of them even after accounting for borders.
+            let limits = &mut *(lp as *mut MinMaxInfo);
+            limits.min_track_size.x = 560;
+            limits.min_track_size.y = 260;
+            1
+        }
         WM_SIZE => { layout(hwnd, state); InvalidateRect(hwnd, ptr::null(), 1); 1 }
         0x0113 if wp == 1 => {
             let result = match state.office_receiver.as_ref() { Some(receiver) => receiver.try_recv(), None => return 1 };

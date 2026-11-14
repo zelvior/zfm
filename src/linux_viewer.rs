@@ -231,7 +231,7 @@ pub(super) unsafe extern "C" fn show_uninstaller(_: P, data: P) {
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
-    let text = label("Remove the installed Debian package ‘zfm’?\n\nYour personal files are not removed. Authentication is required.\nPackage manager dependency checks remain in effect.\nIf this was not installed as a Debian package, use your installation method instead.");
+    let text = wrapped_label("Remove the installed Debian package ‘zfm’?\n\nYour personal files are not removed. Authentication is required.\nPackage manager dependency checks remain in effect.\nIf this was not installed as a Debian package, use your installation method instead.");
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), text, 1, 1, 16);
     let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
     (api().gtk_dialog_set_default_response)(dialog, -6);
