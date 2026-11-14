@@ -36,9 +36,6 @@ fn uri(path: &Path) -> io::Result<String> {
     Ok(result)
 }
 pub fn encode_gnome(paths: &[PathBuf], cut: bool) -> io::Result<Vec<u8>> {
-    if cut && paths.len() != 1 {
-        return Err(invalid("Cut and paste supports one item only"));
-    }
     encode(paths, if cut { "cut\n" } else { "copy\n" }, "\n")
 }
 pub fn encode_uri_list(paths: &[PathBuf]) -> io::Result<Vec<u8>> {
@@ -119,7 +116,6 @@ fn decode_uri(uri: &[u8]) -> io::Result<PathBuf> {
     Ok(path)
 }
 /// Parse bounded local clipboard paths, rejecting invalid or repeated entries.
-/// Multiple cut items remain unsupported to avoid partial destructive moves.
 pub fn parse(data: &[u8], gnome: bool) -> io::Result<FileClipboard> {
     if data.len() > MAX_BYTES || data.contains(&0) {
         return Err(invalid("Clipboard data is invalid or too large"));
@@ -152,11 +148,41 @@ pub fn parse(data: &[u8], gnome: bool) -> io::Result<FileClipboard> {
     if paths.is_empty() {
         return Err(invalid("No file in clipboard"));
     }
-    if cut && paths.len() != 1 {
-        return Err(invalid("Cut and paste supports one item only"));
-    }
     Ok(FileClipboard { paths, cut })
 }
+
+/// Conservative process-local guard against reusing a source path from a cut
+/// payload. It cannot protect other processes, aliases, or survive a restart.
+/// A fresh explicit cut inside ZFM permits those selected paths again.
+#[derive(Default)]
+pub struct CutReplayGuard {
+    paths: std::collections::HashSet<PathBuf>,
+    bytes: usize,
+}
+impl CutReplayGuard {
+    const MAX_PATHS: usize = 4096;
+    const MAX_PATH_BYTES: usize = 1024 * 1024;
+    pub fn reserve(&mut self, paths: &[PathBuf]) -> io::Result<()> {
+        if paths.iter().any(|p| self.paths.contains(p)) {
+            return Err(invalid("A cut source was already used in this process; select and cut it again in ZFM"));
+        }
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        if unique.len() != paths.len() { return Err(invalid("Duplicate cut sources")); }
+        let added: usize = paths.iter().map(|p| p.as_os_str().as_bytes().len()).sum();
+        if self.paths.len() + paths.len() > Self::MAX_PATHS || self.bytes + added > Self::MAX_PATH_BYTES {
+            return Err(invalid("Cut replay guard is full; restart ZFM and recut the items"));
+        }
+        for path in paths { self.paths.insert(path.clone()); }
+        self.bytes += added;
+        Ok(())
+    }
+    pub fn recut(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            if let Some(stored) = self.paths.take(path) { self.bytes -= stored.as_os_str().as_bytes().len(); }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,8 +221,7 @@ mod tests {
                 cut: false
             }
         );
-        assert!(parse(b"cut\nfile:///tmp/a\nfile:///tmp/b\n", true).is_err());
-        assert!(encode_gnome(&paths, true).is_err());
+        assert_eq!(parse(&encode_gnome(&paths, true).unwrap(), true).unwrap(), FileClipboard { paths: paths.clone(), cut: true });
         assert!(parse(b"copy\nfile:///tmp/a\nfile:///tmp/a\n", true).is_err());
         assert!(parse(b"file:///tmp/a\nfile://remote/b\n", false).is_err());
         assert!(encode_uri_list(&[paths[0].clone(), paths[0].clone()]).is_err());
@@ -211,6 +236,29 @@ mod tests {
             .collect::<String>();
         assert!(parse(payload.as_bytes(), false).is_err());
         assert!(parse(&vec![b'a'; MAX_BYTES + 1], false).is_err());
+    }
+    #[test]
+    fn replay_guard_rejects_reordering_and_subsets_until_explicit_recut() {
+        let a = PathBuf::from("/tmp/a"); let b = PathBuf::from("/tmp/b");
+        let mut guard = CutReplayGuard::default();
+        guard.reserve(&[a.clone(), b.clone()]).unwrap();
+        assert!(guard.reserve(&[b.clone(), a.clone()]).is_err());
+        assert!(guard.reserve(&[a.clone()]).is_err());
+        guard.recut(&[a.clone()]);
+        assert!(guard.reserve(&[a.clone(), b.clone()]).is_err());
+        guard.reserve(&[a]).unwrap();
+        assert_eq!(guard.bytes, 12);
+    }
+    #[test]
+    fn replay_guard_fails_closed_at_capacity() {
+        let mut guard = CutReplayGuard::default();
+        let paths: Vec<_> = (0..CutReplayGuard::MAX_PATHS).map(|n| PathBuf::from(format!("/tmp/{n}"))).collect();
+        guard.reserve(&paths).unwrap();
+        assert!(guard.reserve(&[PathBuf::from("/tmp/extra")]).is_err());
+        guard.recut(&paths[..1]);
+        guard.reserve(&[PathBuf::from("/tmp/extra")]).unwrap();
+        let long = PathBuf::from(format!("/{}", "x".repeat(CutReplayGuard::MAX_PATH_BYTES)));
+        assert!(CutReplayGuard::default().reserve(&[long]).is_err());
     }
     #[test]
     fn rejects_remote_and_invalid() {

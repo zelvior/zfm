@@ -44,12 +44,17 @@ unsafe extern "C" fn clipboard_clear(_: P, data: P) {
 }
 unsafe fn set_file(data: P, cut: bool) {
     let app = &*(data as *mut App);
-    let rows = selected_rows(app.list);
-    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS || (cut && rows.len() != 1) {
+    let mut rows = selected_rows(app.list);
+    rows.sort_by_key(|row| (api().gtk_list_box_row_get_index)(*row));
+    if cut && app.operation.is_some() {
+        set_status(app, "Wait for the current operation before cutting again.");
+        return;
+    }
+    if rows.is_empty() || rows.len() > zfm::operations::MAX_COPY_ITEMS {
         set_status(
             app,
             if cut {
-                "Cut supports exactly one item."
+                "Select between 1 and 1024 items to cut."
             } else {
                 "Select between 1 and 1024 items to copy."
             },
@@ -116,6 +121,7 @@ unsafe fn set_file(data: P, cut: bool) {
         drop(Box::from_raw(content as *mut ClipboardData));
         set_status(&*(data as *mut App), "Could not set the file clipboard.");
     } else {
+        if cut { (&mut *(data as *mut App)).cut_guard.recut(&paths); }
         set_status(
             &*(data as *mut App),
             if cut {
@@ -185,7 +191,16 @@ unsafe extern "C" fn received(clip: P, selection: P, data: P) {
         }
     };
     let operation = if item.cut {
-        Operation::MoveTo(item.paths[0].clone(), request.destination.clone())
+        if app.operation.is_some() {
+            set_status(app, "An operation is already running.");
+            return;
+        }
+        let app = &mut *(request.app as *mut App);
+        if let Err(error) = app.cut_guard.reserve(&item.paths) {
+            set_status(app, &format!("Cannot paste cut items: {error}"));
+            return;
+        }
+        Operation::ClipboardMove(item.paths, request.destination.clone())
     } else {
         Operation::CopyItems(item.paths, request.destination.clone())
     };

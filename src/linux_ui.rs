@@ -212,6 +212,7 @@ struct App {
     window: P,
     operation: Option<Arc<AtomicBool>>,
     operation_id: u64,
+    cut_guard: zfm::file_clipboard::CutReplayGuard,
     search_entry: P,
     case_toggle: P,
     search_query: String,
@@ -1324,6 +1325,7 @@ pub fn run() -> Result<(), String> {
             window,
             operation: None,
             operation_id: 0,
+            cut_guard: zfm::file_clipboard::CutReplayGuard::default(),
             search_entry: ptr::null_mut(),
             case_toggle: ptr::null_mut(),
             search_query: String::new(),
@@ -1918,7 +1920,7 @@ enum Operation {
     Duplicate(PathBuf, String),
     CopyItems(Vec<PathBuf>, PathBuf),
     MoveItems(Vec<PathBuf>, PathBuf),
-    MoveTo(PathBuf, PathBuf),
+    ClipboardMove(Vec<PathBuf>, PathBuf),
     Trash(Vec<PathBuf>),
     Delete(PathBuf),
     ArchiveExtract(PathBuf, PathBuf, Option<String>),
@@ -2003,8 +2005,9 @@ unsafe fn start_operation(data: P, directory: PathBuf, operation: Operation) {
             Operation::MoveItems(paths, destination) => {
                 operations::move_items(&paths, &destination, &cancel, |_| {}).map(|result| result.message(paths.len()))
             }
-            Operation::MoveTo(path, destination) => operations::move_into(&path, &destination)
-                .map(|p| format!("Moved to {}", p.display())),
+            Operation::ClipboardMove(paths, destination) => operations::move_items(&paths, &destination, &cancel, |_| {})
+                .map(|result| format!("{} Cut clipboard is spent in ZFM; recut remaining items.", result.message(paths.len())))
+                .map_err(|e| std::io::Error::new(e.kind(), format!("{e}; recut the items in ZFM before trying again"))),
             Operation::Trash(paths) => {
                 zfm::trash::trash_items(&paths, 0, &cancel).map(|result| result.message(paths.len()))
             }
