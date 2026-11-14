@@ -15,7 +15,8 @@ ZFM exposes its implemented end-user operations in its native Linux and Windows 
 | Script snippets / terminal | Organize; selected file → Run script | Actions; selected file → Run script |
 | Local-only static server and URL | Organize → Start/Copy/Stop local server | Actions → Start/Copy/Stop local server |
 | MD5 / SHA-256 and checksum verification | Selected file menu | Selected file menu |
-| Regex rename and personal tags | Selected item menu | Selected item menu |
+| Regex rename and edit personal tags | Selected item menu | Selected item menu |
+| Find saved paths by tag | Organize → Find saved paths by tag | Actions → Find saved paths by tag |
 | Settings | Organize / Ctrl+, | Actions / Ctrl+, |
 | Package uninstall | Organize → Uninstall ZFM (Debian package via system tools) | Installed uninstaller via Windows settings/Start Menu |
 

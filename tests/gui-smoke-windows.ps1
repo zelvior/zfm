@@ -259,6 +259,79 @@ try {
     try { $expected = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $work 'example.txt')))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
     if (-not $hashText.ToString().Contains($expected)) { throw "File hash report did not contain the expected SHA-256: $hashText" }
     if (-not [ZfmSmoke]::PostMessageW($hashDialog, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Could not close file hash report.' }
+    # The tag database is searchable from Actions without altering the file.
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]182, [IntPtr]::Zero)
+    $tagEdit = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $tagEdit = [ZfmSmoke]::FindWindowW('#32770', 'Edit tags — comma-separated; empty clears')
+        if ($tagEdit -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($tagEdit, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($tagEdit -eq [IntPtr]::Zero) { throw 'Tag editor did not appear.' }
+    [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($tagEdit, 1001), 0x000c, [UIntPtr]::Zero, 'smoke-tag')
+    [void][ZfmSmoke]::PostMessageW($tagEdit, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    $tagConfig = Join-Path $configRoot 'zfm\tags.conf'
+    for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $tagConfig); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $tagConfig)) { throw 'Tags were not saved.' }
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]191, [IntPtr]::Zero)
+    $tagSearch = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $tagSearch = [ZfmSmoke]::FindWindowW('#32770', 'Find exact case-sensitive tag')
+        if ($tagSearch -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($tagSearch, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($tagSearch -eq [IntPtr]::Zero) { throw 'Tag search did not appear.' }
+    [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($tagSearch, 1001), 0x000c, [UIntPtr]::Zero, 'smoke-tag')
+    [void][ZfmSmoke]::PostMessageW($tagSearch, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    $tagReport = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $tagReport = [ZfmSmoke]::FindWindowW('#32770', 'Saved paths by tag')
+        if ($tagReport -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($tagReport, 1002) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($tagReport -eq [IntPtr]::Zero) { throw 'Tag report did not appear.' }
+    $tagText = New-Object System.Text.StringBuilder 4096
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($tagReport, 1002), 0x000d, [UIntPtr]$tagText.Capacity, $tagText, 2, 3000, [ref]$result)
+    if (-not $tagText.ToString().Contains((Join-Path $work 'example.txt'))) { throw "Tag search omitted the fixture: $tagText" }
+    [void][ZfmSmoke]::PostMessageW($tagReport, 0x10, [UIntPtr]::Zero, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($tagReport); $i++) { Start-Sleep -Milliseconds 100 }
+    # Reach the multiline editor and cancel at the final confirmation: no code runs.
+    [void][ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]188, [IntPtr]::Zero)
+    foreach ($title in @('Interpreter executable (e.g. python, node, cmd.exe)', 'Single interpreter argument (e.g. /C, -c, -e, -File)')) {
+        $prompt = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $prompt = [ZfmSmoke]::FindWindowW('#32770', $title)
+            if ($prompt -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($prompt, 1001) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($prompt -eq [IntPtr]::Zero) { throw "Interpreter prompt not shown: $title" }
+        [void][ZfmSmoke]::PostMessageW($prompt, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    }
+    $snippet = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $snippet = [ZfmSmoke]::FindWindowW('#32770', 'Code snippet')
+        if ($snippet -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($snippet, 1001) -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($snippet -eq [IntPtr]::Zero) { throw 'Snippet editor not shown.' }
+    $snippetControl = [ZfmSmoke]::GetDlgItem($snippet, 1001)
+    if (([ZfmSmoke]::GetWindowLongW($snippetControl, -16) -band 0x0004) -eq 0) { throw 'Snippet editor is not multiline.' }
+    [void][ZfmSmoke]::SendMessageW($snippetControl, 0x000c, [UIntPtr]::Zero, "echo first`r`necho second")
+    $snippetText = New-Object System.Text.StringBuilder 256
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText($snippetControl, 0x000d, [UIntPtr]$snippetText.Capacity, $snippetText, 2, 3000, [ref]$result)
+    if ($snippetText.ToString() -notmatch 'first\s+echo second') { throw 'Snippet editor lost its second line.' }
+    [void][ZfmSmoke]::PostMessageW($snippet, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    $confirmRun = [IntPtr]::Zero
+    for ($i = 0; $i -lt 100; $i++) {
+        $confirmRun = [ZfmSmoke]::FindWindowW('#32770', 'Run external code?')
+        if ($confirmRun -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($confirmRun -eq [IntPtr]::Zero) { throw 'Run confirmation not shown.' }
+    [void][ZfmSmoke]::PostMessageW($confirmRun, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::IsWindowVisible($confirmRun); $i++) { Start-Sleep -Milliseconds 100 }
     # Clear the selection after the preview.
     $result = [UIntPtr]::Zero
     [void][ZfmSmoke]::SendMessageTimeoutW($list, 0x185, [UIntPtr]::Zero, [IntPtr](-1), 2, 3000, [ref]$result)
