@@ -477,6 +477,23 @@ struct SnippetEditor {
     scratch: bool,
     result: Option<(OsString, bool)>,
 }
+// Keep the editor usable when the dialog is resized. Controls retain their
+// native IDs and keyboard behavior; only their client-area bounds move.
+unsafe fn layout_text_editor(hwnd: H) {
+    let mut rect: Rect = std::mem::zeroed();
+    if GetClientRect(hwnd, &mut rect) == 0 { return; }
+    let (width, height) = (rect.right.max(320), rect.bottom.max(180));
+    for (id, x, y, w, h) in [
+        (1002, 18, 16, width - 36, 25),
+        (1001, 18, 48, width - 36, height - 110),
+        (3, width - 312, height - 48, 90, 30),
+        (1, width - 210, height - 48, 90, 30),
+        (2, width - 108, height - 48, 90, 30),
+    ] {
+        let control = GetDlgItem(hwnd, id);
+        if !control.is_null() { MoveWindow(control, x, y, w, h, 1); }
+    }
+}
 unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 {
         let state = &mut *(lp as *mut SnippetEditor);
@@ -506,12 +523,20 @@ unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp:
         apply_dark_scrollbar(state.edit);
         style_dialog_button(next); style_dialog_button(cancel); if !preview.is_null() { style_dialog_button(preview); }
         SendMessageW(hwnd, 0x0401, 2, 0); // Cancel is the default action.
+        layout_text_editor(hwnd);
         SetFocus(state.edit);
         return 0;
     }
     let state = get_data(hwnd) as *mut SnippetEditor;
     if state.is_null() { return 0; }
     match msg {
+        WM_GETMINMAXINFO if lp != 0 => {
+            let info = &mut *(lp as *mut MinMaxInfo);
+            info.min_track_size.x = 420;
+            info.min_track_size.y = 260;
+            1
+        }
+        WM_SIZE => { layout_text_editor(hwnd); 1 }
         WM_COMMAND if wp & 0xffff == 1 || ((*state).scratch && wp & 0xffff == 3) => {
             let value = control_value((*state).edit);
             if value.to_str().map_or(true, |v| v.len() > 16 * 1024) {
@@ -532,7 +557,7 @@ pub(super) unsafe fn snippet_editor(hwnd: H, theme: *const Theme) -> Option<OsSt
     text_editor(hwnd, theme, false, OsStr::new("")).map(|(text, _)| text)
 }
 pub(super) unsafe fn text_editor(hwnd: H, theme: *const Theme, scratch: bool, initial: &OsStr) -> Option<(OsString, bool)> {
-    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
+    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x0004_0000 | 0x80;
     let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 480, 280, 0, 0, 0];
     let mut state = SnippetEditor { theme, edit: ptr::null_mut(), heading: ptr::null_mut(), initial: wide(initial), scratch, result: None };
     let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(snippet_editor_proc), &mut state as *mut _ as isize);
@@ -551,6 +576,25 @@ struct ConfirmDialog {
     report_complete: bool,
     delete_path: Option<Vec<u16>>,
     path_field: H,
+}
+unsafe fn layout_confirmation(hwnd: H, state: &ConfirmDialog) {
+    let mut rect: Rect = std::mem::zeroed();
+    if GetClientRect(hwnd, &mut rect) == 0 { return; }
+    let (width, height) = (rect.right.max(360), rect.bottom.max(230));
+    let move_control = |id, x, y, w, h| {
+        let control = GetDlgItem(hwnd, id);
+        if !control.is_null() { MoveWindow(control, x, y, w, h, 1); }
+    };
+    move_control(1004, 48, 20, width - 66, 24);
+    if state.delete_path.is_some() {
+        move_control(1005, 48, 52, width - 66, 22);
+        move_control(1006, 48, 78, width - 66, 30);
+        move_control(1002, 48, 120, width - 66, (height - 180).max(55));
+    } else {
+        move_control(1002, 48, 52, width - 66, height - 110);
+    }
+    move_control(1, if state.has_cancel { width - 210 } else { width - 108 }, height - 48, 90, 30);
+    move_control(2, width - 108, height - 48, 90, 30);
 }
 unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 { // WM_INITDIALOG
@@ -605,12 +649,20 @@ unsafe extern "system" fn confirm_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam
         SendMessageW(heading, WM_SETFONT, (*state.theme).subtitle_font as usize, 1);
         // Make cancellation the default for destructive or extract actions.
         SendMessageW(hwnd, 0x0401, if state.has_cancel { 2 } else { 1 }, 0);
+        layout_confirmation(hwnd, state);
         SetFocus(if state.has_cancel { cancel } else { yes });
         return 0;
     }
     let state = get_data(hwnd) as *mut ConfirmDialog;
     if state.is_null() { return 0; }
     match msg {
+        WM_GETMINMAXINFO if lp != 0 => {
+            let info = &mut *(lp as *mut MinMaxInfo);
+            info.min_track_size.x = 440;
+            info.min_track_size.y = 290;
+            1
+        }
+        WM_SIZE => { layout_confirmation(hwnd, &*state); 1 }
         WM_COMMAND if wp & 0xffff == 1 => { (*state).accepted = true; EndDialog(hwnd, 1); 1 }
         WM_COMMAND if wp & 0xffff == 2 => { EndDialog(hwnd, 0); 1 }
         0x0010 => { EndDialog(hwnd, 0); 1 }
@@ -642,7 +694,7 @@ pub(super) unsafe fn confirm_delete(hwnd: H, theme: *const Theme, path: &Path) -
 }
 
 unsafe fn question_inner(hwnd: H, theme: *const Theme, title: &str, message: &str, affirmative: &'static str, has_cancel: bool, delete_path: Option<Vec<u16>>) -> Option<bool> {
-    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
+    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x0004_0000 | 0x80;
     let report = title == "Size results" && !has_cancel;
     let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 480, 225, 0, 0, 0];
     let formatted = if report {

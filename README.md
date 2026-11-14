@@ -8,7 +8,7 @@ A small native file manager written in Rust with a compact, dark details-view de
 
 ## What works in this foundation
 
-- Linux GTK 3 window with a compact dark theme, 4-column sortable directory table (`Name`, `Date`, `Type`, `Size`), grouped sidebar shortcuts, and selection details. The toolbar’s Organize menu retains file operations including trash, copy, move, duplicate and cancellation. Search and path entry remain available in the navigation bar.
+- Linux GTK 3 window with a compact dark theme, 4-column sortable directory table (`Name`, `Date`, `Type`, `Size`), grouped sidebar shortcuts, and selection details. The toolbar’s Organize menu retains file operations including trash, copy, move, duplicate and cancellation. Navigation and path entry remain in the top bar; search and filtering sit in a separate flexible row.
 - Enter a path and press Enter; double-click a folder to enter it or a file to open it with `xdg-open`. Back, forward, parent and refresh buttons; F5, Alt+Left/Right/Up and Ctrl+L shortcuts.
 - Hidden-file toggle, folder-first case-insensitive name ordering, file sizes and modification dates. Broken links remain visible. Errors opening a directory are shown in the status bar.
 - Directory enumeration and metadata run on a worker. New navigation cancels the *results* of earlier work; UI rows are added in batches on the GTK main loop. There is no persistent background service.

@@ -31,6 +31,7 @@ for _ in $(seq 1 100); do
 done
 if [ -z "$window" ]; then echo 'ZFM did not show a window within 10 seconds:' >&2; cat "$work/stderr" >&2; exit 1; fi
 # Exercise the GTK event loop without requiring a window manager.
+if grep -q 'ZFM theme CSS could not be loaded' "$work/stderr"; then cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$window"
 xdotool key --window "$window" ctrl+t ctrl+t ctrl+Tab ctrl+Page_Up ctrl+1 ctrl+w ctrl+w F5 ctrl+h ctrl+h ctrl+l Escape ctrl+f Escape
 # Ctrl+B bookmarks the current folder without modifying settings.
@@ -101,6 +102,15 @@ xdotool key --window "$window" ctrl+l ctrl+a
 xdotool type --clearmodifiers "$work"
 xdotool key --window "$window" Return
 sleep 1
+# The separate search row and scrollable tabs should fit a smaller workspace.
+xdotool windowsize "$window" 680 560
+sleep 1
+width=$(xdotool getwindowgeometry --shell "$window" | sed -n 's/^WIDTH=//p')
+if [ -z "$width" ] || [ "$width" -gt 720 ]; then
+    echo "Window did not fit a narrow workspace (width ${width:-unknown})." >&2
+    cat "$work/stderr" >&2
+    exit 1
+fi
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
 for _ in $(seq 1 7); do xdotool key --window "$window" ctrl+t; done
