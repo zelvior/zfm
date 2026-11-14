@@ -57,7 +57,7 @@ for _ in $(seq 1 100); do
 done
 if [ -z "$settings" ]; then echo 'Settings dialog did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$settings"
-xdotool key --window "$settings" Escape
+xdotool key Escape
 xdotool windowfocus --sync "$window"
 # Preview one fixture from a folder without stdout/stderr test log files.
 mkdir -p "$work/preview-fixture"
