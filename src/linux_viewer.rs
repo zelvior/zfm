@@ -59,6 +59,7 @@ unsafe extern "C" fn office_preview_ready(data: P) -> c_int {
         Err(error) => { set_status(app, &format!("Document preview failed: {error}")); return 0; }
     };
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c(&format!("ZFM text-only preview — {}", result.title)).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
@@ -116,6 +117,7 @@ pub(super) unsafe extern "C" fn preview_selected(_: P, data: P) {
 
 unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c(&format!("ZFM Preview — {title}")).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
@@ -224,15 +226,19 @@ unsafe extern "C" fn removal_done(data: P) -> c_int {
 pub(super) unsafe extern "C" fn show_uninstaller(_: P, data: P) {
     let app = &*(data as *mut App);
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("Uninstall ZFM").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, app.window);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     let text = label("Remove the installed Debian package ‘zfm’?\n\nYour personal files are not removed. Authentication is required.\nPackage manager dependency checks remain in effect.\nIf this was not installed as a Debian package, use your installation method instead.");
     (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), text, 1, 1, 16);
-    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(dialog, c("Uninstall").as_ptr(), -5);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let uninstall = (api().gtk_dialog_add_button)(dialog, c("Uninstall").as_ptr(), -5);
+    add_class(uninstall, "zfm-destructive");
     (api().gtk_widget_show_all)(dialog);
+    (api().gtk_widget_grab_focus)(cancel);
     let response = (api().gtk_dialog_run)(dialog);
     if response != -1 { (api().gtk_widget_destroy)(dialog); }
     if response != -5 { return; }

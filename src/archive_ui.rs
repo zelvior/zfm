@@ -350,18 +350,24 @@ unsafe extern "C" fn archive_load(_: P, data: P) {
 // over a pipe, never in the command line or environment.
 pub(super) unsafe fn password_prompt(parent: P, title: &str) -> Option<String> {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c(title).as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
     let area = (api().gtk_dialog_get_content_area)(dialog);
+    let heading = label("✓   Action required.");
+    add_class(heading, "zfm-dialog-heading");
+    (api().gtk_label_set_xalign)(heading, 0.0);
+    (api().gtk_box_pack_start)(area, heading, 0, 0, 8);
     (api().gtk_box_pack_start)(area, label("Password:"), 0, 0, 8);
     let entry = (api().gtk_entry_new)();
     (api().gtk_entry_set_visibility)(entry, 0);
     (api().gtk_entry_set_activates_default)(entry, 1);
     (api().gtk_box_pack_start)(area, entry, 0, 0, 8);
     (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(dialog, c("OK").as_ptr(), -3);
+    let ok = (api().gtk_dialog_add_button)(dialog, c("OK").as_ptr(), -3);
+    add_class(ok, "zfm-primary");
     (api().gtk_dialog_set_default_response)(dialog, -3);
     (api().gtk_widget_show_all)(dialog);
     (api().gtk_widget_grab_focus)(entry);
@@ -910,12 +916,19 @@ unsafe fn archive_extract(data: P, selected_only: bool) {
 }
 unsafe fn archive_confirm(parent: P, destination: &str) -> bool {
     let dialog = (api().gtk_dialog_new)();
+    add_class(dialog, "zfm-dialog");
     (api().gtk_window_set_title)(dialog, c("Extract archive?").as_ptr());
     (api().gtk_window_set_transient_for)(dialog, parent);
     (api().gtk_window_set_modal)(dialog, 1);
     (api().gtk_window_set_destroy_with_parent)(dialog, 1);
-    (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
-    (api().gtk_dialog_add_button)(dialog, c("Extract").as_ptr(), -3);
+    let cancel = (api().gtk_dialog_add_button)(dialog, c("Cancel").as_ptr(), -6);
+    let extract = (api().gtk_dialog_add_button)(dialog, c("Extract").as_ptr(), -3);
+    add_class(extract, "zfm-primary");
+    (api().gtk_dialog_set_default_response)(dialog, -6);
+    let heading = label("✓   Action required.");
+    add_class(heading, "zfm-dialog-heading");
+    (api().gtk_label_set_xalign)(heading, 0.0);
+    (api().gtk_box_pack_start)((api().gtk_dialog_get_content_area)(dialog), heading, 0, 0, 8);
     let message = label(&format!("Extract into {destination}?\nExisting files are not overwritten. Earlier files remain if extraction stops.\nArchives may contain dangerous files; never run untrusted content."));
     (api().gtk_widget_set_margin_start)(message, 12);
     (api().gtk_widget_set_margin_end)(message, 12);
@@ -929,6 +942,7 @@ unsafe fn archive_confirm(parent: P, destination: &str) -> bool {
         0,
     );
     (api().gtk_widget_show_all)(dialog);
+    (api().gtk_widget_grab_focus)(cancel);
     let response = (api().gtk_dialog_run)(dialog);
     if response != -1 {
         (api().gtk_widget_destroy)(dialog);
@@ -975,6 +989,7 @@ pub(super) unsafe extern "C" fn show_archive(_: P, data: P) {
 }
 pub(super) unsafe fn create_archive_manager(parent: P) -> P {
     let window = (api().gtk_window_new)(0);
+    add_class(window, "zfm-tool");
     (api().gtk_window_set_title)(window, c("ZFM — Archive manager").as_ptr());
     (api().gtk_window_set_transient_for)(window, parent);
     (api().gtk_window_set_default_size)(window, 850, 600);

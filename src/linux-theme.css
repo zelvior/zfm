@@ -47,3 +47,16 @@ scrollbar slider:active { background-color: #63aee7; }
 switch { background-color: #303740; border: 1px solid #6b737c; border-radius: 14px; box-shadow: none; }
 switch:checked { background-color: #4aa6e5; border-color: #4aa6e5; }
 switch slider { background-color: #d9e0e8; border: 0; border-radius: 14px; box-shadow: none; }
+
+/* Shared treatment for ZFM-owned dialogs; desktop-native pickers remain native. */
+.zfm-dialog { background-color: #1d252e; color: #e4e5e6; }
+.zfm-dialog .dialog-vbox { padding: 16px 20px 12px; }
+.zfm-dialog .dialog-action-area button { border-radius: 18px; padding: 6px 24px; min-height: 24px; }
+.zfm-dialog-heading { font-size: 1.2em; font-weight: bold; color: #f1f3f5; }
+.zfm-dialog button.zfm-primary { background-color: #337fc2; border-color: #478bc5; color: #ffffff; }
+.zfm-dialog button.zfm-primary:hover { background-color: #4094d9; }
+.zfm-dialog button.zfm-destructive { background-color: #32272c; border-color: #c04c53; color: #ffffff; }
+.zfm-dialog button.zfm-destructive:hover { background-color: #61353c; }
+.zfm-dialog textview, .zfm-dialog textview text { background-color: #1d252e; color: #e4e5e6; }
+.zfm-tool button { border-radius: 14px; padding: 4px 12px; }
+.zfm-tool entry { border-radius: 7px; padding: 5px 8px; }

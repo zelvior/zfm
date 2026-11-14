@@ -815,6 +815,37 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (1).txt')) -ne 'alpha' -or
         [IO.File]::ReadAllText((Join-Path $renameSource 'Holiday (2).csv')) -ne 'beta' -or
         (Test-Path -LiteralPath (Join-Path $renameSource 'alpha.txt'))) { throw 'Batch rename failed.' }
+    # Permanent deletion shows the exact path and defaults to cancellation.
+    $deleteFixture = Join-Path $work 'delete-fixture'
+    New-Item -ItemType Directory -Path $deleteFixture | Out-Null
+    $deleteFile = Join-Path $deleteFixture 'delete-me.txt'
+    [IO.File]::WriteAllText($deleteFile, 'delete test')
+    Navigate-Cut $deleteFixture 'delete-me.txt'
+    function Open-DeleteConfirmation {
+        Select-Cut @('delete-me.txt')
+        if (-not [ZfmSmoke]::PostMessageW($window, 0x111, [UIntPtr]119, [IntPtr]::Zero)) { throw 'Could not request permanent deletion.' }
+        $dialog = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100; $i++) {
+            $dialog = [ZfmSmoke]::FindWindowW('#32770', 'Confirm permanent deletion')
+            if ($dialog -ne [IntPtr]::Zero -and [ZfmSmoke]::GetDlgItem($dialog, 1006) -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($dialog -eq [IntPtr]::Zero) { throw 'Deletion confirmation did not appear.' }
+        return $dialog
+    }
+    $confirmDelete = Open-DeleteConfirmation
+    $pathText = New-Object System.Text.StringBuilder 4096
+    $result = [UIntPtr]::Zero
+    [void][ZfmSmoke]::GetControlText([ZfmSmoke]::GetDlgItem($confirmDelete, 1006), 0x000d, [UIntPtr]$pathText.Capacity, $pathText, 2, 3000, [ref]$result)
+    if ($pathText.ToString() -ne $deleteFile) { throw "Deletion confirmation showed the wrong path: $pathText" }
+    if ([ZfmSmoke]::SendMessageTimeoutW($confirmDelete, 0x0400, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 3000, [ref]$result) -eq [IntPtr]::Zero -or ($result.ToUInt64() -band 0xffff) -ne 2) { throw 'Deletion does not default to Cancel.' }
+    [void][ZfmSmoke]::PostMessageW($confirmDelete, 0x111, [UIntPtr]2, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and [ZfmSmoke]::FindWindowW('#32770', 'Confirm permanent deletion') -ne [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $deleteFile)) { throw 'Cancelling deletion removed the file.' }
+    $confirmDelete = Open-DeleteConfirmation
+    [void][ZfmSmoke]::PostMessageW($confirmDelete, 0x111, [UIntPtr]1, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 100 -and (Test-Path -LiteralPath $deleteFile); $i++) { Start-Sleep -Milliseconds 100 }
+    if (Test-Path -LiteralPath $deleteFile) { throw 'Confirmed deletion did not remove the file.' }
     # A populated list still responds to native scrolling with the custom skin.
     $scrollFixture = Join-Path $work 'scroll-fixture'
     New-Item -ItemType Directory -Path $scrollFixture | Out-Null
