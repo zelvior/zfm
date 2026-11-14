@@ -84,6 +84,10 @@ if [ -z "$preview" ]; then
         xdotool getwindowpid "$candidate" >&2 || true
         xdotool getwindowgeometry --shell "$candidate" >&2 || true
     done
+    echo 'All titled windows:' >&2
+    for candidate in $(xdotool search --name '.' 2>/dev/null || true); do
+        echo "Window $candidate: $(xdotool getwindowname "$candidate" 2>/dev/null || true) pid=$(xdotool getwindowpid "$candidate" 2>/dev/null || true)" >&2
+    done
     cat "$work/stderr" >&2; exit 1
 fi
 xdotool windowfocus --sync "$preview"

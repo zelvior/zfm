@@ -183,7 +183,7 @@ unsafe fn show_visual(app: &App, title: &str, kind: Kind, bytes: Vec<u8>) {
     }
     (api().gtk_dialog_add_button)(dialog, c("Close").as_ptr(), -7);
     (api().gtk_widget_show_all)(dialog);
-    eprintln!("TRACE preview dialog shown: {title:?}");
+    eprintln!("TRACE preview dialog shown: {title:?} mapped={} realized={} actual_title={:?}", (api().gtk_widget_get_mapped)(dialog), (api().gtk_widget_get_realized)(dialog), CStr::from_ptr((api().gtk_window_get_title)(dialog)));
     let mut zoom = 100i32;
     loop {
         let response = (api().gtk_dialog_run)(dialog);
