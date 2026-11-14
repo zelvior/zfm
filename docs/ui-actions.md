@@ -17,6 +17,7 @@ ZFM exposes its implemented end-user operations in its native Linux and Windows 
 | Android ADB list / wireless connect / send one file | Organize; send from selected file menu | Actions; send from selected file menu |
 | Duplicate and junk review | Organize → Find duplicates and junk | Actions → Find duplicates and junk |
 | Script snippets / terminal | Organize; selected file → Run script | Actions; selected file → Run script |
+| WinCDEmu mount/dismount/list (external installed tool) | Not available | Selected image → Mount/Dismount with WinCDEmu; Actions → List WinCDEmu drives |
 | Offline clipboard QR (plaintext; no network) | Organize → Show clipboard as offline QR | Actions → Show clipboard as offline QR |
 | Local-only static server and URL | Organize → Start/Copy/Stop local server | Actions → Start/Copy/Stop local server |
 | MD5 / SHA-256 and checksum verification | Selected file menu | Selected file menu |
