@@ -69,6 +69,7 @@ done
 if [ -z "$preview" ]; then echo 'Text preview did not appear:' >&2; cat "$work/stderr" >&2; exit 1; fi
 xdotool windowfocus --sync "$preview"
 xdotool key --window "$preview" Escape
+sleep 0.5
 xdotool windowfocus --sync "$window"
 # Tabs must remain usable without forcing the compact toolbar off-screen.
 xdotool windowsize "$window" 900 600
@@ -198,7 +199,9 @@ batch_dialog() {
         sleep 0.1
     done
     [ -n "$preview" ] || { echo 'Batch rename preview did not appear.' >&2; exit 1; }
+    echo "DEBUG preview $preview $(xdotool getwindowname "$preview") $(xdotool getwindowgeometry --shell "$preview" | tr '\n' ' ')" >&2
     xdotool windowfocus --sync "$preview"
+    sleep 0.5
 }
 batch_dialog
 xdotool key --window "$preview" Escape

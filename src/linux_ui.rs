@@ -2131,7 +2131,9 @@ unsafe fn confirm_numbered_rename(parent: P, preview: &str) -> bool {
     (api().gtk_text_buffer_set_text)((api().gtk_text_view_get_buffer)(view), c(preview).as_ptr(), -1);
     (api().gtk_container_add)(scroll, view);
     (api().gtk_box_pack_start)(area, scroll, 1, 1, 8);
+    eprintln!("DEBUG about to show batch confirmation");
     (api().gtk_widget_show_all)(dialog);
+    eprintln!("DEBUG batch confirmation shown");
     (api().gtk_widget_grab_focus)(cancel_button);
     let response = (api().gtk_dialog_run)(dialog);
     eprintln!("DEBUG batch dialog response={response} preview={preview:?}");
