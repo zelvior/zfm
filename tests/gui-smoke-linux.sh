@@ -61,7 +61,11 @@ sleep 1
 xdotool key --window "$window" Escape ctrl+a ctrl+shift+o
 # Organize → Selected items → Preview in ZFM.
 sleep 0.5
-xdotool key Home Right Down Return
+xdotool key Down
+sleep 0.3
+xdotool key Right
+sleep 0.5
+xdotool key Down Return
 preview=''
 for _ in $(seq 1 100); do
     preview=$(xdotool search --all --onlyvisible --pid "$pid" --name '^ZFM Preview — example.txt$' 2>/dev/null | head -n 1 || true)
