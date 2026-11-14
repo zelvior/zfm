@@ -344,6 +344,7 @@ extern "system" {
     fn LoadCursorW(instance: H, name: *const u16) -> H;
     fn SetCursor(cursor: H) -> H;
     fn GetClientRect(hwnd: H, rect: *mut Rect) -> i32;
+    fn GetDlgItem(hwnd: H, id: i32) -> H;
     fn GetWindowRect(hwnd: H, rect: *mut Rect) -> i32;
     fn ScreenToClient(hwnd: H, point: *mut Point) -> i32;
     fn MapDialogRect(hwnd: H, rect: *mut Rect) -> i32;

@@ -29,7 +29,7 @@ unsafe extern "system" fn switch_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam,
         GetClientRect(hwnd, &mut r);
         let (w, h) = (r.right.max(1), r.bottom.max(1));
         if w <= 4096 && h <= 1024 {
-            let mut pixels = vec![Rgb(40, 46, 56).pixel(); (w * h) as usize];
+            let mut pixels = vec![ui_theme::PANEL_BG.pixel(); (w * h) as usize];
             let checked = SendMessageW(hwnd, 0x00f0, 0, 0) == 1;
             let enabled = IsWindowEnabled(hwnd) != 0;
             ui_theme::paint_toggle_switch(&mut pixels, w, h, 2, (h - 16) / 2, checked, enabled && button_hovered(hwnd));
@@ -74,7 +74,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
             CreateWindowExW(0, text(class).as_ptr(), text(caption).as_ptr(), WS_CHILD | WS_VISIBLE | style,
                 r.x, r.y, r.width, r.height, hwnd, id as H, instance, ptr::null_mut())
         };
-        state.card_brush = CreateSolidBrush(Rgb(40, 46, 56).colorref());
+        state.card_brush = CreateSolidBrush(ui_theme::PANEL_BG.colorref());
         state.headings = [
             make("STATIC", "File list", 0, 24, 17, 292, 16, 1010),
             make("STATIC", "Drives and navigation", 0, 24, 123, 292, 16, 1011),
@@ -135,7 +135,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
                 let mut pixels = vec![ui_theme::HEADER_TOP.pixel(); (w * h) as usize];
                 for card in [dialog_rect(hwnd, 12, 10, 316, 100), dialog_rect(hwnd, 12, 116, 316, 70)] {
                     ui_theme::paint_rounded_box(&mut pixels, w, h, card, 9.0,
-                        Rgb(40, 46, 56), Rgb(40, 46, 56), Some(Rgb(30, 35, 43)));
+                        ui_theme::PANEL_BG, ui_theme::PANEL_BG, Some(ui_theme::PANEL_BORDER));
                 }
                 blit_pixels(wp as H, 0, 0, w, h, &pixels, |_| {});
             }
@@ -147,7 +147,7 @@ unsafe extern "system" fn dialog_proc(hwnd: H, message: u32, wp: WParam, lp: LPa
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             SetTextColor(wp as H, ui_theme::TEXT_BRIGHT.colorref());
             let in_card = state.headings.contains(&(lp as H)) || state.controls.contains(&(lp as H));
-            SetBkColor(wp as H, if in_card { Rgb(40, 46, 56).colorref() } else { ui_theme::HEADER_TOP.colorref() });
+            SetBkColor(wp as H, if in_card { ui_theme::PANEL_BG.colorref() } else { ui_theme::HEADER_TOP.colorref() });
             if in_card && !state.card_brush.is_null() { state.card_brush as isize } else { (*state.theme).window_brush as isize }
         }
         _ => 0,

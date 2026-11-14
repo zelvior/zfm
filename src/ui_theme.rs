@@ -30,42 +30,44 @@ impl Rgb {
 
 // Dark-slate palette calibrated to the ZFM reference design.
 pub const CAPTION_BG: Rgb = Rgb(30, 37, 48);
-pub const HEADER_TOP: Rgb = Rgb(27, 35, 44);
-pub const HEADER_BOTTOM: Rgb = Rgb(34, 43, 53);
-pub const TAB_STRIP_BG: Rgb = Rgb(33, 41, 51);
-pub const TAB_ACTIVE_BG: Rgb = Rgb(46, 51, 58);
-pub const TAB_INACTIVE_BG: Rgb = Rgb(29, 34, 40);
-pub const DECK_TOP: Rgb = Rgb(46, 53, 62);
-pub const DECK_BOTTOM: Rgb = Rgb(36, 40, 47);
-pub const SIDEBAR_BG: Rgb = Rgb(28, 35, 39);
-pub const SIDEBAR_HOVER: Rgb = Rgb(44, 49, 55);
-pub const SIDEBAR_ACTIVE: Rgb = Rgb(53, 60, 69);
+pub const HEADER_TOP: Rgb = Rgb(27, 35, 45);
+pub const HEADER_BOTTOM: Rgb = Rgb(28, 38, 50);
+pub const TAB_STRIP_BG: Rgb = Rgb(32, 44, 57);
+pub const TAB_ACTIVE_BG: Rgb = Rgb(49, 87, 118);
+pub const TAB_INACTIVE_BG: Rgb = Rgb(40, 56, 71);
+pub const DECK_TOP: Rgb = Rgb(32, 44, 57);
+pub const DECK_BOTTOM: Rgb = Rgb(27, 39, 51);
+pub const SIDEBAR_BG: Rgb = Rgb(23, 33, 43);
+pub const SIDEBAR_HOVER: Rgb = Rgb(40, 56, 73);
+pub const SIDEBAR_ACTIVE: Rgb = Rgb(48, 75, 99);
 pub const SPLITTER_DARK: Rgb = Rgb(20, 22, 26);
 pub const SPLITTER_LIGHT: Rgb = Rgb(86, 90, 96);
-pub const COL_HEADER_BG: Rgb = Rgb(29, 30, 32);
-pub const COL_HEADER_HOVER: Rgb = Rgb(46, 49, 54);
-pub const ROW_EVEN: Rgb = Rgb(28, 28, 28);
-pub const ROW_ODD: Rgb = Rgb(33, 33, 33);
-pub const ROW_LINE: Rgb = Rgb(33, 33, 33);
-pub const ROW_SELECTED_BG: Rgb = Rgb(59, 59, 61);
-pub const ROW_SELECTED_BORDER: Rgb = Rgb(78, 84, 93);
-pub const STATUS_BG: Rgb = Rgb(48, 49, 50);
+pub const COL_HEADER_BG: Rgb = Rgb(32, 43, 55);
+pub const COL_HEADER_HOVER: Rgb = Rgb(48, 65, 81);
+pub const ROW_EVEN: Rgb = Rgb(23, 33, 43);
+pub const ROW_ODD: Rgb = Rgb(26, 38, 49);
+pub const ROW_LINE: Rgb = Rgb(35, 49, 61);
+pub const ROW_SELECTED_BG: Rgb = Rgb(49, 87, 118);
+pub const ROW_SELECTED_BORDER: Rgb = Rgb(94, 139, 173);
+pub const STATUS_BG: Rgb = Rgb(32, 44, 57);
+pub const PANEL_BG: Rgb = Rgb(36, 52, 67);
+pub const PANEL_BORDER: Rgb = Rgb(64, 86, 106);
 
 pub const BORDER_SUBTLE: Rgb = Rgb(61, 67, 75);
 pub const BORDER_STRONG: Rgb = Rgb(79, 87, 97);
-pub const BORDER_FOCUS: Rgb = Rgb(92, 148, 208);
+pub const BORDER_FOCUS: Rgb = Rgb(134, 201, 255);
 
-pub const BTN_TOP: Rgb = Rgb(55, 61, 69);
-pub const BTN_BOTTOM: Rgb = Rgb(42, 47, 54);
-pub const BTN_HOVER_TOP: Rgb = Rgb(68, 76, 86);
-pub const BTN_HOVER_BOTTOM: Rgb = Rgb(52, 59, 68);
+pub const BTN_TOP: Rgb = Rgb(51, 70, 87);
+pub const BTN_BOTTOM: Rgb = Rgb(42, 59, 75);
+pub const BTN_HOVER_TOP: Rgb = Rgb(69, 96, 119);
+pub const BTN_HOVER_BOTTOM: Rgb = Rgb(58, 82, 103);
 pub const BTN_PRESS_TOP: Rgb = Rgb(35, 39, 45);
 pub const BTN_PRESS_BOTTOM: Rgb = Rgb(41, 46, 53);
 
 pub const ADDRESS_CHIP_BG: Rgb = Rgb(42, 50, 58);
-pub const ADDRESS_EDIT_BG: Rgb = Rgb(50, 60, 68);
-pub const FILTER_EDIT_BG: Rgb = Rgb(49, 59, 68);
-pub const NAME_EDIT_BG: Rgb = Rgb(31, 34, 38);
+pub const ADDRESS_EDIT_BG: Rgb = Rgb(19, 30, 41);
+pub const FILTER_EDIT_BG: Rgb = Rgb(19, 30, 41);
+pub const NAME_EDIT_BG: Rgb = Rgb(19, 30, 41);
 
 pub const TEXT_BRIGHT: Rgb = Rgb(236, 241, 246);
 pub const TEXT_PRIMARY: Rgb = Rgb(216, 223, 231);
@@ -1428,6 +1430,22 @@ mod tests {
         let slate = CAPTION_BG;
         assert_eq!(slate.colorref(), 0x0030_251e);
         assert_eq!(slate.pixel(), 0x001e_2530);
+    }
+
+    #[test]
+    fn primary_text_meets_readable_contrast_against_shared_surfaces() {
+        fn luminance(c: Rgb) -> f64 {
+            fn channel(c: u8) -> f64 {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            }
+            0.2126 * channel(c.0) + 0.7152 * channel(c.1) + 0.0722 * channel(c.2)
+        }
+        for background in [HEADER_TOP, ROW_EVEN, ROW_ODD, ROW_SELECTED_BG, SIDEBAR_BG, SIDEBAR_ACTIVE, STATUS_BG, PANEL_BG] {
+            let fg = luminance(TEXT_PRIMARY); let bg = luminance(background);
+            let ratio = (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05);
+            assert!(ratio >= 4.5, "primary text contrast {ratio:.2} on {background:?}");
+        }
     }
 
     #[test]

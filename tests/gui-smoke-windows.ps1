@@ -13,6 +13,8 @@ public static class ZfmSmoke {
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll", ExactSpelling=true)]
+    public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", ExactSpelling=true)]
     public static extern int GetWindowLongW(IntPtr window, int index);
     [DllImport("user32.dll", ExactSpelling=true)]
     public static extern IntPtr GetDlgItem(IntPtr parent, int id);
@@ -331,6 +333,14 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($scratch -eq [IntPtr]::Zero) { throw 'Scratchpad did not appear.' }
+    $beforeEditor = New-Object ZfmSmoke+Rect
+    $afterEditor = New-Object ZfmSmoke+Rect
+    $scratchRect = New-Object ZfmSmoke+Rect
+    if (-not [ZfmSmoke]::GetWindowRect($scratch, [ref]$scratchRect) -or -not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($scratch, 1001), [ref]$beforeEditor)) { throw 'Cannot inspect scratchpad layout.' }
+    if (-not [ZfmSmoke]::SetWindowPos($scratch, [IntPtr]::Zero, 0, 0, ($scratchRect.right - $scratchRect.left + 140), ($scratchRect.bottom - $scratchRect.top + 100), 0x0016)) { throw 'Cannot resize scratchpad.' }
+    Start-Sleep -Milliseconds 300
+    if (-not [ZfmSmoke]::GetWindowRect([ZfmSmoke]::GetDlgItem($scratch, 1001), [ref]$afterEditor)) { throw 'Cannot inspect resized scratchpad.' }
+    if (($afterEditor.right - $afterEditor.left) -le ($beforeEditor.right - $beforeEditor.left) -or ($afterEditor.bottom - $afterEditor.top) -le ($beforeEditor.bottom - $beforeEditor.top)) { throw 'Scratchpad editor did not expand on resize.' }
     [void][ZfmSmoke]::SendMessageW([ZfmSmoke]::GetDlgItem($scratch, 1001), 0x000c, [UIntPtr]::Zero, "# Smoke heading`r`n- first item")
     [void][ZfmSmoke]::PostMessageW($scratch, 0x111, [UIntPtr]3, [IntPtr]::Zero)
     $scratchPreview = [IntPtr]::Zero

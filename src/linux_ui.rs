@@ -84,6 +84,7 @@ api! {
     gtk_event_box_new: unsafe extern "C" fn() -> P,
     gtk_get_event_widget: unsafe extern "C" fn(P) -> P,
     gtk_box_pack_start: unsafe extern "C" fn(P, P, c_int, c_int, c_uint),
+    gtk_box_reorder_child: unsafe extern "C" fn(P, P, c_int),
     gtk_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
     gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
     gtk_toggle_button_set_active: unsafe extern "C" fn(P, c_int),
@@ -463,26 +464,29 @@ unsafe extern "C" fn render_batch(data: P) -> c_int {
     let end = (app.render_index + 64).min(app.entries.len());
     for (offset, entry) in app.entries[app.render_index..end].iter().enumerate() {
         let row_idx = app.render_index + offset;
-        let row = (api().gtk_box_new)(0, 6);
+        let row = (api().gtk_box_new)(0, 0);
         (api().gtk_widget_set_margin_start)(row, 8);
         (api().gtk_widget_set_margin_end)(row, 8);
-        (api().gtk_widget_set_margin_top)(row, 1);
-        (api().gtk_widget_set_margin_bottom)(row, 1);
+        (api().gtk_widget_set_margin_top)(row, 3);
+        (api().gtk_widget_set_margin_bottom)(row, 3);
         let kind = (api().gtk_image_new_from_icon_name)(c(linux_item_icon(entry)).as_ptr(), 1);
         add_class(kind, "zfm-file-icon");
+        (api().gtk_widget_set_margin_end)(kind, 8);
         let name = label(&directory::display_name(entry, app.tabs.current().current(), app.recursive_search));
         (api().gtk_label_set_xalign)(name, 0.0);
         (api().gtk_label_set_ellipsize)(name, 3);
         (api().gtk_widget_set_hexpand)(name, 1);
         let date = label(&modified(entry));
         (api().gtk_label_set_xalign)(date, 0.0);
-        (api().gtk_widget_set_size_request)(date, 175, -1);
+        (api().gtk_label_set_ellipsize)(date, 3);
+        (api().gtk_widget_set_size_request)(date, 150, -1);
         let file_type = label(&ui_theme::entry_type_label(entry));
         (api().gtk_label_set_xalign)(file_type, 0.0);
-        (api().gtk_widget_set_size_request)(file_type, 135, -1);
+        (api().gtk_label_set_ellipsize)(file_type, 3);
+        (api().gtk_widget_set_size_request)(file_type, 110, -1);
         let size = label(&ui_theme::format_human_size(entry));
         (api().gtk_label_set_xalign)(size, 1.0);
-        (api().gtk_widget_set_size_request)(size, 86, -1);
+        (api().gtk_widget_set_size_request)(size, 80, -1);
         for child in [kind, name, date, file_type, size] {
             (api().gtk_box_pack_start)(row, child, 0, 0, 0);
         }
@@ -1366,6 +1370,7 @@ pub fn run() -> Result<(), String> {
         (api().g_object_unref)(css);
 
         let window = (api().gtk_window_new)(0);
+        add_class(window, "zfm-main");
         (api().gtk_window_set_title)(window, c("ZFM — Zelvior File Manager").as_ptr());
         (api().gtk_window_set_default_size)(window, 1040, 640);
         let outer = (api().gtk_box_new)(1, 0);
@@ -1379,6 +1384,11 @@ pub fn run() -> Result<(), String> {
         add_class(tabs_row, "zfm-tabs");
         (api().gtk_box_pack_start)(outer, tabs_row, 0, 0, 0);
         let tab_strip = (api().gtk_box_new)(0, 4);
+        // Search and toggles have their own flexible row rather than squeezing
+        // the address and tabs off screen on smaller windows.
+        let search_row = (api().gtk_box_new)(0, 6);
+        add_class(search_row, "zfm-search-row");
+        (api().gtk_box_pack_start)(outer, search_row, 0, 0, 0);
 
         // Split workspace: left sidebar + right table pane
         let content = (api().gtk_box_new)(0, 0);
@@ -1392,8 +1402,10 @@ pub fn run() -> Result<(), String> {
 
         let right_pane = (api().gtk_box_new)(1, 0);
         (api().gtk_box_pack_start)(content, right_pane, 1, 1, 0);
-        let col_bar = (api().gtk_box_new)(0, 8);
+        let col_bar = (api().gtk_box_new)(0, 0);
         add_class(col_bar, "zfm-col-bar");
+        (api().gtk_widget_set_margin_start)(col_bar, 8);
+        (api().gtk_widget_set_margin_end)(col_bar, 8);
         (api().gtk_box_pack_start)(right_pane, col_bar, 0, 0, 0);
 
         let scroll = scroll_window();
@@ -1480,11 +1492,11 @@ pub fn run() -> Result<(), String> {
         add_class(close_tab_btn, "zfm-tab-btn");
         let case_toggle = (api().gtk_check_button_new_with_label)(c("Case").as_ptr());
         (*app).case_toggle = case_toggle;
-        (api().gtk_box_pack_start)(tabs_row, case_toggle, 0, 0, 0);
+        (api().gtk_box_pack_start)(search_row, case_toggle, 0, 0, 0);
         let hidden = (api().gtk_check_button_new_with_label)(c("Hidden").as_ptr());
         (*app).hidden = hidden;
         (api().gtk_toggle_button_set_active)(hidden, saved_settings.show_hidden as c_int);
-        (api().gtk_box_pack_start)(tabs_row, hidden, 0, 0, 0);
+        (api().gtk_box_pack_start)(search_row, hidden, 0, 0, 0);
         connect(hidden, "toggled", refresh as P, p);
         (*app).tab_strip = tab_strip;
         let tab_background = (api().gtk_event_box_new)();
@@ -1500,7 +1512,7 @@ pub fn run() -> Result<(), String> {
         connect(tab_background, "button-press-event", tab_background_button as P, p);
         rebuild_tabs(&*app);
 
-        // Navigation and search share the top line, as in the reference.
+        // Navigation occupies its own row, leaving the address room to grow.
         for (caption, callback, tooltip) in [
             ("←", back as P, "Back"), ("→", forward as P, "Forward"),
             ("↑", up as P, "Parent folder"), ("⌂", go_root as P, "Root"),
@@ -1511,28 +1523,31 @@ pub fn run() -> Result<(), String> {
         }
         let entry = (api().gtk_entry_new)();
         (*app).address = entry;
-        (api().gtk_entry_set_width_chars)(entry, 12);
+        (api().gtk_entry_set_width_chars)(entry, 8);
         (api().gtk_box_pack_start)(top, entry, 1, 1, 0);
         connect(entry, "activate", address as P, p);
         button(top, "Go", go_address as P, p);
         let search_entry = (api().gtk_entry_new)();
         (*app).search_entry = search_entry;
-        (api().gtk_entry_set_width_chars)(search_entry, 12);
+        (api().gtk_entry_set_width_chars)(search_entry, 8);
         (api().gtk_entry_set_placeholder_text)(search_entry, c("Search this folder").as_ptr());
-        (api().gtk_box_pack_start)(top, search_entry, 0, 0, 0);
+        (api().gtk_box_pack_start)(search_row, search_entry, 1, 1, 0);
         connect(search_entry, "activate", search_apply as P, p);
-        button(top, "Search", search_apply as P, p);
-        button(top, "Clear", search_clear as P, p);
+        let search_button = button(search_row, "Search", search_apply as P, p);
+        let clear_button = button(search_row, "Clear", search_clear as P, p);
+        (api().gtk_box_reorder_child)(search_row, search_entry, 0);
+        (api().gtk_box_reorder_child)(search_row, search_button, 1);
+        (api().gtk_box_reorder_child)(search_row, clear_button, 2);
 
         // Sortable column header bar
         let col_name = button(col_bar, if saved_settings.sort_ascending { "Name ▲" } else { "Name ▼" }, sort_by_name as P, p);
         (api().gtk_widget_set_hexpand)(col_name, 1);
         let col_mod = button(col_bar, "Date", sort_by_modified as P, p);
-        (api().gtk_widget_set_size_request)(col_mod, 175, -1);
+        (api().gtk_widget_set_size_request)(col_mod, 150, -1);
         let col_type = button(col_bar, "Type", sort_by_type as P, p);
-        (api().gtk_widget_set_size_request)(col_type, 135, -1);
+        (api().gtk_widget_set_size_request)(col_type, 110, -1);
         let col_size = button(col_bar, "Size", sort_by_size as P, p);
-        (api().gtk_widget_set_size_request)(col_size, 86, -1);
+        (api().gtk_widget_set_size_request)(col_size, 80, -1);
 
         for col in [col_name, col_mod, col_type, col_size] {
             let child = (api().gtk_bin_get_child)(col);

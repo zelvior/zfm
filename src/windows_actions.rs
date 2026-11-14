@@ -477,6 +477,23 @@ struct SnippetEditor {
     scratch: bool,
     result: Option<(OsString, bool)>,
 }
+// Keep the editor usable when the dialog is resized. Controls retain their
+// native IDs and keyboard behavior; only their client-area bounds move.
+unsafe fn layout_text_editor(hwnd: H) {
+    let mut rect: Rect = std::mem::zeroed();
+    if GetClientRect(hwnd, &mut rect) == 0 { return; }
+    let (width, height) = (rect.right.max(320), rect.bottom.max(180));
+    for (id, x, y, w, h) in [
+        (1002, 18, 16, width - 36, 25),
+        (1001, 18, 48, width - 36, height - 110),
+        (3, width - 312, height - 48, 90, 30),
+        (1, width - 210, height - 48, 90, 30),
+        (2, width - 108, height - 48, 90, 30),
+    ] {
+        let control = GetDlgItem(hwnd, id);
+        if !control.is_null() { MoveWindow(control, x, y, w, h, 1); }
+    }
+}
 unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp: LParam) -> isize {
     if msg == 0x0110 {
         let state = &mut *(lp as *mut SnippetEditor);
@@ -506,12 +523,20 @@ unsafe extern "system" fn snippet_editor_proc(hwnd: H, msg: u32, wp: WParam, lp:
         apply_dark_scrollbar(state.edit);
         style_dialog_button(next); style_dialog_button(cancel); if !preview.is_null() { style_dialog_button(preview); }
         SendMessageW(hwnd, 0x0401, 2, 0); // Cancel is the default action.
+        layout_text_editor(hwnd);
         SetFocus(state.edit);
         return 0;
     }
     let state = get_data(hwnd) as *mut SnippetEditor;
     if state.is_null() { return 0; }
     match msg {
+        WM_GETMINMAXINFO if lp != 0 => {
+            let info = &mut *(lp as *mut MinMaxInfo);
+            info.min_track_size.x = 420;
+            info.min_track_size.y = 260;
+            1
+        }
+        WM_SIZE => { layout_text_editor(hwnd); 1 }
         WM_COMMAND if wp & 0xffff == 1 || ((*state).scratch && wp & 0xffff == 3) => {
             let value = control_value((*state).edit);
             if value.to_str().map_or(true, |v| v.len() > 16 * 1024) {
@@ -532,7 +557,7 @@ pub(super) unsafe fn snippet_editor(hwnd: H, theme: *const Theme) -> Option<OsSt
     text_editor(hwnd, theme, false, OsStr::new("")).map(|(text, _)| text)
 }
 pub(super) unsafe fn text_editor(hwnd: H, theme: *const Theme, scratch: bool, initial: &OsStr) -> Option<(OsString, bool)> {
-    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x80;
+    let style: u32 = 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x0004_0000 | 0x80;
     let template: Vec<u16> = vec![style as u16, (style >> 16) as u16, 0, 0, 0, 0, 0, 480, 280, 0, 0, 0];
     let mut state = SnippetEditor { theme, edit: ptr::null_mut(), heading: ptr::null_mut(), initial: wide(initial), scratch, result: None };
     let result = DialogBoxIndirectParamW(GetModuleHandleW(ptr::null()), template.as_ptr(), hwnd, Some(snippet_editor_proc), &mut state as *mut _ as isize);
